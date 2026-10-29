@@ -1,0 +1,17 @@
+# competition data (large, not redistributable)
+data/
+*.zip
+description/
+
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# generated
+cache/
+outputs/
+result/
+*.parquet
+.DS_Store
