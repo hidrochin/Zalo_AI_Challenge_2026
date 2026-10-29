@@ -213,6 +213,34 @@ profit uses the **cost recorded on the sale line**.
 
 ## 5. Repository
 
+- **Plan of record:** [docs/PROPOSAL.md](docs/PROPOSAL.md). It covers the hybrid architecture,
+  prompting only, a solo developer with under 2 weeks, and a Claude example bank built from
+  train only.
+
+- **Tasks and run commands:** [README.md](README.md). Its "Status" section is the handoff point
+  between sessions; read it first.
+- **Status (2026-10-30):**
+  - The hybrid MVP is built and all 44 businesses ingest with 0 warnings.
+  - 37 tests pass, and the dummy-backend end-to-end run works.
+  - **No real LLM score yet.** The local `qwen3.6:35b-mlx` (Ollama, 32k context) ran out of GPU
+    memory on the 32 GB Mac.
+  - Next: get a first train score with a ≤ 15B model (Ollama `qwen3:8b` at a 16k context, or
+    Kaggle vLLM with `Qwen3-14B-AWQ`), or with Claude on train as an upper bound. Then sort the
+    failures from `logs/*.json` by cause.
+  - The prompt is about 10–13k tokens, so a local server needs ≥ 16k context. Ollama's default
+    is too small; set `num_ctx` through a Modelfile or `OLLAMA_CONTEXT_LENGTH`.
+- **Layout:**
+  - `src/datamate/ingest/`: raw files → cleaned tables + schema card, cached in `cache/ingest/`
+  - `src/datamate/dm.py`: helpers available to generated programs
+  - `src/datamate/agent/`: prompt, retrieval, local and Claude backends, sandbox, vote, pipeline
+  - `src/datamate/eval/scorer.py`: exact PA scorer
+  - `src/datamate/cli.py`: `datamate ingest | run | score | export-examples`
+- **Commands:**
+  - `uv run pytest -q`: unit tests
+  - `uv run datamate ingest --split train`: writes `outputs/ingest/<split>/<biz>.md` cards
+  - `uv run datamate run --backend local --model <ollama/vLLM model> --limit N`: scores on train
+- Bump `INGEST_VERSION` in `ingest/business.py` whenever ingestion output changes, so the caches
+  rebuild.
 - Python ≥ 3.11 managed with **uv** (`uv sync`, `uv run ...`, `uv add <pkg>`).
 - Current deps: pandas, numpy, openpyxl, python-calamine, pyarrow, tqdm; dev: ipykernel.
 - `data/`, zips, `.venv/`, caches and outputs are gitignored.
