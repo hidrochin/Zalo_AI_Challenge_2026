@@ -27,5 +27,11 @@ cat > "$KERNEL/kernel-metadata.json" <<EOF
  "enable_internet": true, "dataset_sources": ["$USER/datamate-bundle"], "competition_sources": [], "kernel_sources": []}
 EOF
 echo "waiting for the dataset to finish processing..."
-sleep 60
+sleep 30
+for _ in $(seq 1 60); do
+  s=$(uvx --with six kaggle datasets status "$USER/datamate-bundle" 2>&1 | tail -1)
+  [ "$s" = "ready" ] && break
+  sleep 20
+done
+echo "dataset: $s"
 uvx --with six kaggle kernels push -p "$KERNEL" --accelerator NvidiaTeslaT4
