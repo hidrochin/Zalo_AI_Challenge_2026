@@ -219,16 +219,14 @@ profit uses the **cost recorded on the sale line**.
 
 - **Tasks and run commands:** [README.md](README.md). Its "Status" section is the handoff point
   between sessions; read it first.
-- **Status (2026-10-30):**
-  - The hybrid MVP is built and all 44 businesses ingest with 0 warnings.
-  - 37 tests pass, and the dummy-backend end-to-end run works.
-  - **No real LLM score yet.** The local `qwen3.6:35b-mlx` (Ollama, 32k context) ran out of GPU
-    memory on the 32 GB Mac.
-  - Next: get a first train score with a ≤ 15B model (Ollama `qwen3:8b` at a 16k context, or
-    Kaggle vLLM with `Qwen3-14B-AWQ`), or with Claude on train as an upper bound. Then sort the
-    failures from `logs/*.json` by cause.
-  - The prompt is about 10–13k tokens, so a local server needs ≥ 16k context. Ollama's default
-    is too small; set `num_ctx` through a Modelfile or `OLLAMA_CONTEXT_LENGTH`.
+- **Status (2026-11-01):** see the README "Status (2026-11-01)" section and its "In flight / next
+  steps" list first.
+  - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
+  - dev120 scores: v1 PA 0.100 → v2 PA 0.208. v4 adds question time hints, richer `sales_lines()` /
+    `orders()` and answer checks; it was running at handoff (`outputs/dev120_v4`).
+  - Kaggle (2× T4, vLLM) public-test runner in `kaggle/`; no successful run yet.
+  - The prompt is about 13–16k tokens, so a local server needs ≥ 24k context (set `num_ctx` through
+    a Modelfile).
 - **Layout:**
   - `src/datamate/ingest/`: raw files → cleaned tables + schema card, cached in `cache/ingest/`
   - `src/datamate/dm.py`: helpers available to generated programs

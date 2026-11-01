@@ -103,6 +103,8 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 **First real scores (Qwen3.5-9B Q4 via Ollama on an M2 Pro, thinking off, 1 sample, ~30 s/question)**
 - `outputs/dev120_v1` (baseline): PA = 0.100 (57 correct / 45 wrong / 18 abstain).
+- `outputs/dev120_v2` (sales_lines + ingest fixes): PA = 0.208 (56 / 31 / 33), 55 min. By type: number +0.36,
+  percent −0.09, list −0.13, table −0.50. Next: triage percent/list/table errors.
   Main causes of wrong answers: revenue via order totals or `== 'hoàn thành'` (should be line
   amounts, not cancelled/returned, 'đang giao' counts); status normalizer bugs (`Không giao được`,
   `hàng trả về`); `1tr134` money not parsed; walk-in customers in rankings; counting rows instead of orders.
@@ -110,8 +112,50 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
   README placeholder file names (`BanHang_T<tháng>_<năm>.xlsx`), header-name role fallback, status
   from `Ghi chú`, voucher/shipping lines excluded. Simple monthly/quarterly revenue now matches gold on
   every train business that has line items.
-- `outputs/dev120_v2`: after these fixes (see below once finished).
-- Not yet covered by `sales_lines()`: dev_003/006/009/012, biz_110/123/124 (no line table, sqlite, or no order date).
+- `outputs/wrong_v3`: the 42 questions wrong in v1/v2, rerun with shorter output (max_tokens 1024):
+  −31 → −18 points, mostly wrong → abstain. None of the 38 still-failing answers was a format problem;
+  all were semantic (period, missing column, walk-in, order-level logic, pandas slips, empty-filter refusals).
+
+**Preprocessing + output checks (v4, 2026-11-01)**
+- **Question preprocessing:** [src/datamate/agent/hints.py](src/datamate/agent/hints.py) resolves time expressions
+  deterministically (hqua/bữa qua, tuần rồi, th7/26, tháng M without a year, "tháng trước" relative to the
+  asked month via `prev_period`, cùng kỳ năm trước, N ngày kể từ ngày D / ngay trước, đến hết ngày D,
+  Tết) and lists the period calls under the question. It matches gold on all 164 train "% change vs the
+  previous period" revenue questions.
+- **Data preprocessing:**
+  - `sales_lines()` now carries the order header's other columns (channel, payment, totals, timestamp)
+    and product-master attributes (group, active ingredient, prescription flag, cost); catalogue noise
+    columns are dropped.
+  - `kl` is a walk-in label (12 train and most public businesses); `item` was renamed `is_goods`;
+    phone numbers are stripped from customer names.
+  - CamelCase/snake_case headers get roles, so biz_123 and dev_006 (POS sqlite) now have `sales_lines`.
+- **New helpers:** `orders()` (one row per order, `goods_amount`, `counted`), `price_on`, `prev_period`,
+  `same_period_last_year`, `days_from`, `days_before`. Gold checks: cancel count 88/88, cancel rate
+  114/114, order-threshold counts 22/22, `price_on` 25/25.
+- **Output checks** (`check_result` in the sandbox):
+  - string/list/table names must exist in the data, and True/False flags are rejected;
+  - a refusal from the model after an empty filter goes to repair, and then abstains;
+  - 0 or implausible percents get one re-check round.
+  - All gold train answers pass the hard checks.
+- Still without `sales_lines()`: dev_003/009/012, biz_110/124 (no line table or no order date).
+
+**In flight / next steps (handoff)**
+- `outputs/dev120_v4` (local, normal priority, `--concurrency 2`) was running at the time of the
+  commit. Score it with `uv run datamate score outputs/dev120_v4` and compare with v2 (PA 0.208).
+  If it was interrupted, rerun the same command; runs resume.
+- **Pending fix:** a 0 answer that a re-check does not confirm (re-check crashed, or 0 again) should
+  **abstain**. Only 4 of about 2,460 gold number/percent answers are 0. Today the fallback in
+  `solve_question` keeps the flagged 0. It was not changed mid-run, to keep v4 consistent.
+- **Kaggle public run** ([kaggle/](kaggle/)): `kaggle/push.sh update` uploads the current code and data
+  as the private dataset `hydrochii/datamate-bundle` and runs the kernel `hydrochii/datamate-public-run`
+  on 2× T4 (P100 cannot run vLLM). By default it answers **only the public test** (`DM_STAGES=public`).
+  - Model: `Qwen/Qwen3.5-9B` fp16, with automatic fallback to `Qwen/Qwen3-14B-AWQ`.
+  - Fetch the result with `uvx --with six kaggle kernels output hydrochii/datamate-public-run -p outputs/kaggle/result`;
+    the file to upload to the leaderboard is `submission.jsonl` in that folder.
+  - Earlier attempts failed in setup (dataset auto-unzipped; vLLM installed into the wrong venv).
+    Both are fixed, but no run has finished yet, so the vLLM-on-T4 path is still unverified.
+- **Then:** debt helper (`debt_at`, aging, per-customer flow); the 19 questions wrong in every run
+  (`outputs/wrong_v3`); PROPOSAL_V2 Path A (typed plan executor) on top of the new helpers.
 
 ## Status (end of 2026-10-30)
 

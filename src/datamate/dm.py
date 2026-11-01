@@ -15,6 +15,7 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 
+from datamate.canon import build_orders as _build_orders
 from datamate.canon import is_walkin as _is_walkin
 from datamate.ingest.parsers import parse_date
 from datamate.text import fold, norm_key
@@ -23,6 +24,7 @@ AS_OF: pd.Timestamp | None = None
 CAL: pd.DataFrame | None = None
 _RESULT: dict | None = None
 _SALES: pd.DataFrame | None = None
+_ORDERS: dict[int, pd.DataFrame] = {}
 
 
 class Unanswerable(Exception):
@@ -112,9 +114,43 @@ def prev_month_same_days() -> Period:
 
 
 def last_month() -> Period:
-    """Tháng trước / tháng rồi as a whole month."""
+    """The month before TODAY's month (whole month). For 'tháng M so với tháng trước' use prev_period(month(Y, M))."""
     s = (AS_OF.replace(day=1) - pd.Timedelta(days=1)).replace(day=1)
     return month(s.year, s.month)
+
+
+def prev_period(p: Period) -> Period:
+    """The period just before p: previous month for a whole month, previous quarter/year/Mon-Sun week likewise, else the same number of days right before p."""
+    s, e = p.start, p.end
+    if s.day == 1 and e == s + pd.offsets.MonthEnd(0):
+        t = s - pd.offsets.MonthBegin(1)
+        return month(t.year, t.month)
+    if s.day == 1 and s.month % 3 == 1 and e == s + pd.offsets.QuarterEnd(0):
+        t = s - pd.offsets.QuarterBegin(1, startingMonth=1)
+        return quarter(t.year, (t.month - 1) // 3 + 1)
+    if s.month == 1 and s.day == 1 and e.month == 12 and e.day == 31 and s.year == e.year:
+        return year(s.year - 1)
+    return Period(s - pd.Timedelta(days=p.days), s - pd.Timedelta(days=1))
+
+
+def same_period_last_year(p: Period) -> Period:
+    """'Cùng kỳ năm trước': p shifted back one year (whole month stays a whole month)."""
+    s, e = p.start - pd.DateOffset(years=1), p.end - pd.DateOffset(years=1)
+    if p.end == p.start + pd.offsets.MonthEnd(0) and p.start.day == 1:
+        e = s + pd.offsets.MonthEnd(0)
+    return Period(s, e)
+
+
+def days_from(d, n: int) -> Period:
+    """'N ngày kể từ ngày D': D .. D+N-1."""
+    t = _d(d)
+    return Period(t, t + pd.Timedelta(days=int(n) - 1))
+
+
+def days_before(d, n: int) -> Period:
+    """'N ngày ngay trước ngày D': D-N .. D-1."""
+    t = _d(d)
+    return Period(t - pd.Timedelta(days=int(n)), t - pd.Timedelta(days=1))
 
 
 def week_this() -> Period:
@@ -254,10 +290,37 @@ def find(candidates, text: str, n: int = 5, cutoff: float = 0.5) -> list[str]:
 
 
 def sales_lines() -> pd.DataFrame:
-    """Canonical sold lines of this shop (see the 'sales_lines()' note in the schema card): date, order_id, status, counted, amount, qty_base, product_name, customer, walkin."""
+    """Canonical sold lines of this shop (see the 'sales_lines()' note in the schema card): date, order_id, status, counted, amount, qty_base, product_name, customer, walkin + source columns."""
     if _SALES is None:
-        raise Unanswerable("sales_lines() is not available for this shop; use T directly")
+        raise RuntimeError("sales_lines() is not available for this shop; compute from T directly")
     return _SALES.copy(deep=False)
+
+
+def orders() -> pd.DataFrame:
+    """One row per order: order_id, date, status, counted (not cancelled/returned), goods_amount (= order revenue), n_lines, customer, walkin + header columns."""
+    key = id(_SALES)
+    if key not in _ORDERS:
+        _ORDERS.clear()
+        _ORDERS[key] = _build_orders(sales_lines())
+    return _ORDERS[key].copy(deep=False)
+
+
+def price_on(product: str, d, lines: pd.DataFrame | None = None) -> float:
+    """'Giá bán X ngày D': unit price per BASE unit before line discount on lines of X ordered on day D (cancelled/returned orders included); the most frequent value."""
+    s = sales_lines() if lines is None else lines
+    names = find(s["product_name"], product, n=1)
+    if not names:
+        raise RuntimeError(f"product {product!r} not found in sales_lines()['product_name']")
+    x = s[(s["product_name"] == names[0]) & in_period(s["date"], day(d), clip=False).values]
+    if x.empty:
+        raise Unanswerable(f"{names[0]} has no sale line on {_d(d):%Y-%m-%d}")
+    qty = pd.to_numeric(x["qty"], errors="coerce") if "qty" in x else None
+    qb = pd.to_numeric(x["qty_base"], errors="coerce")
+    if "unit_price" in x and x["unit_price"].notna().any():
+        per = pd.to_numeric(x["unit_price"], errors="coerce") * (qty / qb if qty is not None else 1)
+    else:
+        per = pd.to_numeric(x["amount"], errors="coerce") / qb
+    return float(per.dropna().round(2).mode().iloc[0])
 
 
 def revenue(p: Period, lines: pd.DataFrame | None = None) -> float:
@@ -360,14 +423,16 @@ def answer_table(columns, rows, kind: str = "auto") -> dict:
 
 def unanswerable(reason: str) -> dict:
     """Final answer when the released data cannot support the question."""
-    return _set({"type": "unanswerable", "reason": str(reason)})
+    return _set({"type": "unanswerable", "reason": str(reason), "_src": "model"})
 
 
 __all__ = [
     "Period", "Unanswerable", "day", "today", "yesterday", "between", "until", "month", "month_auto",
-    "this_month", "prev_month_same_days", "last_month", "week_this", "week_prev", "last_n_days", "quarter",
+    "this_month", "prev_month_same_days", "last_month", "prev_period", "same_period_last_year", "days_from", "days_before", "week_this",
+    "week_prev", "last_n_days", "quarter",
     "quarter_auto", "year", "ytd", "tet", "pre_tet", "in_period", "require", "require_coverage", "shift_of",
-    "count_weekday", "pct_change", "round_half_up", "rank_top", "find", "sales_lines", "revenue", "is_walkin",
+    "count_weekday", "pct_change", "round_half_up", "rank_top", "find", "sales_lines", "orders", "revenue",
+    "price_on", "is_walkin",
     "same_name", "fold", "norm_key",
     "answer_number", "answer_percent", "answer_string", "answer_date", "answer_month", "answer_bool",
     "answer_list", "answer_table", "unanswerable",

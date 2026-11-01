@@ -29,13 +29,14 @@ DESC_RULES: list[tuple[str, str]] = [
 HEADER_RULES: list[tuple[str, str]] = [
     ("order_id", r"^(ma (don hang|hoa don|don|bill|hd)|so (hd|hoa don|phieu ban))$"),
     ("status", r"^(trang thai( don hang| don)?|tinh trang( don)?|status)$"),
+    ("order_ts", r"^thoi gian (lap|tao)( don| hoa don)?$"),
     ("order_date", r"^(ngay (ban|dat hang|giao dich|mua|lap|hd|hoa don)|ngayban|ngay|thoi gian|ngay gio)$"),
     ("product_id", r"^ma (hang|sp|san pham|hh|hang hoa|mat hang|sku)$"),
     ("product_name", r"^(ten (hang|san pham|hang hoa|mat hang)|mat hang|san pham)$"),
-    ("qty_base", r"^so luong (le|quy doi|co ban)$"),
+    ("qty_base", r"^(so luong|sl) (le|quy doi|co ban)$"),
     ("qty", r"^(so luong|sl)$"),
     ("unit", r"^(dvt|don vi( tinh)?)$"),
-    ("unit_price", r"^(don gia|gia ban)$"),
+    ("unit_price", r"^(don gia|gia ban|gia don vi)$"),
     ("line_amount", r"^(thanh tien|t\.? ?tien|tri gia|amount)$"),
     ("customer_id", r"^ma (kh|khach( hang)?)$"),
     ("customer_name", r"^(ten )?khach hang$"),
@@ -47,6 +48,14 @@ _DESC = [(role, re.compile(p)) for role, p in DESC_RULES]
 _HEAD = [(role, re.compile(p)) for role, p in HEADER_RULES]
 
 
+def header_key(column: str) -> str:
+    """Folded header with CamelCase and snake_case split into words: 'SLQuyDoi' -> 'sl quy doi'."""
+    s = str(column)
+    s = "".join(" " + c if i and c.isupper() and (s[i - 1].islower() or s[i - 1].isupper() and s[i + 1:i + 2].islower())
+                else c for i, c in enumerate(s))
+    return fold(s.replace("_", " "))
+
+
 def role_for(column: str, desc: str | None) -> str | None:
     if desc:
         d = fold(desc)
@@ -54,7 +63,7 @@ def role_for(column: str, desc: str | None) -> str | None:
             if rx.search(d):
                 return role
         return None
-    h = fold(column)
+    h = header_key(column)
     for role, rx in _HEAD:
         if rx.search(h):
             return role
@@ -69,6 +78,15 @@ def assign_roles(columns: list[str], descs: dict[str, str]) -> dict[str, str]:
     for c in columns:
         desc = descs.get(c) or folded.get(fold(c))
         role = role_for(c, desc)
+        if role and role not in used:
+            out[c] = role
+            used.add(role)
+    for c in columns:  # a bare "tên" (description or header) names the table's entity: product or customer
+        desc = descs.get(c) or folded.get(fold(c))
+        is_name = fold(desc).strip(" .") == "ten" if desc else header_key(c) in ("ten", "ten goi")
+        if c in out or not is_name:
+            continue
+        role = "product_name" if "product_id" in used else ("customer_name" if "customer_id" in used else None)
         if role and role not in used:
             out[c] = role
             used.add(role)

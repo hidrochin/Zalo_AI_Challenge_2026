@@ -10,13 +10,14 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from datamate.agent.prompt import build_system, business_part, extract_code, question_part, repair_message
+from datamate.agent.hints import time_hints
+from datamate.agent.prompt import build_system, business_part, check_message, extract_code, question_part, repair_message
 from datamate.agent.retrieve import ExampleBank
 from datamate.agent.sandbox import ExecPool
 from datamate.agent.vote import decide
 from datamate.canon import build_sales
 from datamate.eval.scorer import read_jsonl, score
-from datamate.ingest import load_business
+from datamate.ingest import load_business, load_calendar
 from datamate.ingest.schema_card import schema_card
 
 
@@ -83,10 +84,12 @@ def _select(questions: list[dict], cfg: RunConfig) -> list[dict]:
     return qs
 
 
-def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig) -> dict:
+def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
+                   cal=None) -> dict:
     t0 = time.time()
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
-    user_parts = [biz_part, question_part(q["question"], q["as_of_date"], examples)]
+    hints = time_hints(q["question"], q["as_of_date"], cal)
+    user_parts = [biz_part, question_part(q["question"], q["as_of_date"], examples, hints)]
     samples = []
     for s in range(cfg.samples):
         temperature = 0.0 if s == 0 else cfg.temperature
@@ -106,15 +109,19 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
             else:
                 out = pool.run(code, q["as_of_date"])
             sample["attempts"].append({"reply": text, "code": code, **out})
-            if out["error"] is None:
+            if out["error"] is None and not (out.get("warning") and attempt < cfg.repair):
                 break
-            history += [{"role": "assistant", "content": text}, {"role": "user", "content": repair_message(out)}]
+            msg = repair_message(out) if out["error"] else check_message(out["warning"])
+            history += [{"role": "assistant", "content": text}, {"role": "user", "content": msg}]
+        flagged = next((a["result"] for a in sample["attempts"] if a.get("warning") and a.get("result")), None)
+        if out["result"] is None and flagged is not None:  # the re-check broke a program that only had a soft warning
+            out = {**out, "result": flagged, "error": None}
         sample["result"], sample["error"] = out["result"], out["error"]
         samples.append(sample)
     final, vote = decide([s["result"] for s in samples], cfg.min_share, cfg.unans_share)
     return {
         "id": q["id"], "business_id": q["business_id"], "question": q["question"], "as_of_date": q["as_of_date"],
-        "final": final, "vote": vote, "examples": [e["id"] for e in examples], "samples": samples,
+        "final": final, "vote": vote, "examples": [e["id"] for e in examples], "hints": hints, "samples": samples,
         "elapsed": round(time.time() - t0, 2),
     }
 
@@ -135,6 +142,7 @@ def run(cfg: RunConfig) -> dict:
     llm = make_llm(cfg)
     system = build_system((split_dir / "rulebook.md").read_text(encoding="utf-8"))
     bank = ExampleBank.from_train(Path(cfg.data_root) / "train", cfg.examples_path)
+    cal = load_calendar(split_dir)
     lock = threading.Lock()
     t_start = time.time()
 
@@ -150,11 +158,12 @@ def run(cfg: RunConfig) -> dict:
             pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg) for q in by_biz[biz_id]]
+                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal) for q in by_biz[biz_id]]
                     for f in as_completed(futs):
                         rec = f.result()
                         with lock:
-                            sub.write(json.dumps({"id": rec["id"], **rec["final"]}, ensure_ascii=False) + "\n")
+                            final = {k: v for k, v in rec["final"].items() if not k.startswith("_")}
+                            sub.write(json.dumps({"id": rec["id"], **final}, ensure_ascii=False) + "\n")
                             sub.flush()
                             (out_dir / "logs" / f"{rec['id']}.json").write_text(
                                 json.dumps(rec, ensure_ascii=False, indent=1, default=str), encoding="utf-8")

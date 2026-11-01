@@ -127,7 +127,7 @@ def main(argv=None) -> None:
     s.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible server (Ollama, vLLM, ...)")
     s.add_argument("--samples", type=int, default=1, help="1 greedy + (samples-1) seeded samples, then vote")
     s.add_argument("--temperature", type=float, default=0.6)
-    s.add_argument("--max-tokens", type=int, default=2048)
+    s.add_argument("--max-tokens", type=int, default=1024)
     s.add_argument("--thinking", choices=["on", "off", "default"], default="default", help="Qwen3 chat-template switch (vLLM)")
     s.add_argument("--effort", default="medium", help="Claude effort level")
     s.add_argument("--concurrency", type=int, default=4)

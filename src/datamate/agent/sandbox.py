@@ -35,7 +35,72 @@ def _compile(code: str):
         return compile(f"def __program_main():\n{body}\n__program_main()\n", "<program>", "exec")
 
 
-def _execute(code: str, as_of: str, tables, cal, timeout: int, sales=None) -> dict:
+_EMPTY_REASON = re.compile(r"khong (tim thay|co (don|dong|giao dich|du lieu ban|ban|ghi nhan|ban ghi))|no (sales|rows?|records?|orders?|data|transactions?)( |$)"
+                           r"|not found|empty|chua co (don|giao dich)|khong ban duoc")
+_BOOLISH = {"true", "false", "none", "nan", "null", ""}
+
+
+def name_index(tables, sales=None) -> set[str]:
+    """norm_key of every text value in the data: a string answer must be one of these (a name or a code)."""
+    import pandas as pd
+
+    from datamate.canon import strip_phone
+    from datamate.text import norm_key
+
+    out: set[str] = set()
+    frames = list(tables.values()) + ([sales] if sales is not None else [])
+    for df in frames:
+        for c in df.columns:
+            if df[c].dtype == object or pd.api.types.is_string_dtype(df[c]):
+                u = df[c].dropna().unique()
+                if len(u) <= 200_000:
+                    out.update(norm_key(v) for v in u)
+                    out.update(norm_key(strip_phone(v)) for v in u if isinstance(v, str) and v[-1:].isdigit() or str(v).endswith(")"))
+    return out
+
+
+def check_result(result: dict, names: set[str] | None) -> tuple[str | None, str | None]:
+    """(hard error, soft warning) for an executed answer; hard errors mean the answer is not usable."""
+    from datamate.text import fold, norm_key
+
+    t, a = result.get("type"), result.get("answer")
+
+    def bad_name(v) -> str | None:
+        if isinstance(v, bool) or (isinstance(v, str) and v.strip().lower() in _BOOLISH):
+            return f"{v!r} is a flag, not a name"
+        if isinstance(v, str) and names is not None and norm_key(v) not in names:
+            return f"{v!r} does not appear anywhere in the data"
+        return None
+
+    if t == "string":
+        why = bad_name(a)
+        if why:
+            return (f"answer_string: {why}. Return a name (or code) copied from the data, e.g. product_name or customer_name; "
+                    "if the data cannot answer, call unanswerable(reason) instead of explaining in a string."), None
+    if t == "list":
+        for v in a:
+            why = bad_name(v) if isinstance(v, (str, bool)) else None
+            if why:
+                return f"answer_list item {why}. Items must be names/codes copied from the data, or numbers.", None
+    if t == "table":
+        for r in a.get("rows", []):
+            why = bad_name(r[0]) if r and isinstance(r[0], (str, bool)) else None
+            if why:
+                return f"answer_table first column: {why}.", None
+    if t == "unanswerable" and result.get("_src") == "model" and _EMPTY_REASON.search(fold(result.get("reason", ""))):
+        return ("You called unanswerable() because your filter found no rows. An empty result here almost always means a bug "
+                "(wrong year, wrong column, exact string match instead of find(), date comparison). Print the data you filter on and fix it. "
+                "Only call unanswerable() when a needed table/column does not exist or the period is outside the data."), None
+    if t in ("number", "percent") and isinstance(a, (int, float)) and not isinstance(a, bool):
+        if a == 0:
+            return None, ("The answer is 0. If the shop has data in this period, 0 usually means a filter bug "
+                          "(wrong column, wrong year, case-sensitive match, a shift/flag that never matches). Double-check; keep 0 only if it is really 0.")
+        if t == "percent" and abs(a) > 1000:
+            return None, f"The percent is {a}, which is implausible. Check the base period and that you passed percent units."
+    return None, None
+
+
+def _execute(code: str, as_of: str, tables, cal, timeout: int, sales=None, names=None) -> dict:
     import numpy as np
     import pandas as pd
 
@@ -57,17 +122,20 @@ def _execute(code: str, as_of: str, tables, cal, timeout: int, sales=None) -> di
         if result is None:
             error = "The program finished without calling an answer_* function or unanswerable()."
     except dm.Unanswerable as e:
-        result = {"type": "unanswerable", "reason": str(e)}
+        result = {"type": "unanswerable", "reason": str(e), "_src": "guard"}
     except BaseException:
         error = _short_tb()
     finally:
         signal.alarm(0)
+    warning = None
     if result is not None:
         try:
             json.dumps(result, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as e:
             result, error = None, f"answer is not JSON-serializable: {e}"
-    return {"result": result if error is None else None, "error": error, "stdout": buf.getvalue()[-3000:]}
+    if result is not None and error is None:
+        error, warning = check_result(result, names)
+    return {"result": result if error is None else None, "error": error, "warning": warning, "stdout": buf.getvalue()[-3000:]}
 
 
 def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: int) -> None:
@@ -77,6 +145,7 @@ def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: i
     biz = load_business(Path(split_dir), biz_id, Path(cache_dir) if cache_dir else None)
     cal = load_calendar(Path(split_dir))
     sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
+    names = name_index(biz.tables, sales)
 
     def on_alarm(signum, frame):
         raise TimeoutError(f"program exceeded {timeout}s")
@@ -88,7 +157,7 @@ def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: i
         if msg is None:
             break
         code, as_of = msg
-        conn.send(_execute(code, as_of, biz.tables, cal, timeout, sales))
+        conn.send(_execute(code, as_of, biz.tables, cal, timeout, sales, names))
 
 
 class ExecPool:

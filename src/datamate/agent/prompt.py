@@ -24,7 +24,7 @@ SYSTEM_TEMPLATE = """You are DataMate, an expert data analyst for Vietnamese sma
 7. Answer type: a percentage -> answer_percent; "ngày nào" -> answer_date; "tháng nào" -> answer_month; yes/no ("có ... không") -> answer_bool; top-k or several numbers in a given order -> answer_list; per-object rows with amounts ("bảng", "kèm số tiền", "mỗi người ... bao nhiêu") -> answer_table; one name -> answer_string; otherwise answer_number (kind='money' for VND amounts, kind='count' for counts).
 
 ## Output format
-A few lines of plan as Python comments, then ONE ```python code block. Nothing after the code block.
+At most 3 short comment lines of plan, then ONE ```python code block (keep it under ~25 lines). Nothing after the code block. Do not think out loud in comments.
 
 ## Program skeletons (follow this style)
 When the schema card lists sales_lines(), use it for anything about sales (revenue, quantities sold, orders, customers): it already joins line items with order date/status/customer and its `counted` column applies the default revenue rule (not cancelled, not returned, no returned line; 'đang giao' counts).
@@ -49,12 +49,37 @@ g = s[ok].groupby(['customer', 'customer_name'], as_index=False)['amount'].sum()
 answer_list(rank_top(g, by='amount', k=3, code='customer')['customer_name'].tolist())
 ```
 ```python
-# tỉ lệ huỷ đơn: count ORDERS (distinct order_id), never rows
-s = sales_lines()
-o = s[in_period(s['date'], month(2025, 7))].drop_duplicates('order_id')
-answer_percent(round_half_up((o['status'] == 'huỷ').sum() / len(o) * 100, 2))
+# tỉ lệ huỷ đơn / số đơn / đơn có tiền hàng từ X trở lên: use orders() (one row per order), never line rows
+o = orders()
+o = o[in_period(o['date'], month(2025, 7))]
+answer_percent(round_half_up((o['status'] == 'huỷ').sum() / len(o) * 100, 2))   # rate: all orders of the period
+# số đơn (default) = o['counted'].sum();  đơn có tiền hàng >= 290000: (o['counted'] & (o['goods_amount'] >= 290000)).sum()
 ```
-- Counting orders or "khách mua N đơn" = number of distinct order_id, not number of rows (most tables have one row per line item).
+```python
+# tháng 5/2026 tăng/giảm bao nhiêu % so với tháng trước: the previous period of the month ASKED, not of today
+p = month(2026, 5)
+answer_percent(round_half_up(pct_change(revenue(p), revenue(prev_period(p))), 2))
+```
+```python
+# khách mua từ 3 đơn trở lên tháng 1/2026 (khách lẻ excluded)
+o = orders()
+o = o[o['counted'] & in_period(o['date'], month(2026, 1))]
+n = o.groupby('customer')['order_id'].nunique()
+answer_number((n >= 3).sum(), kind='count')
+```
+```python
+# doanh thu nhóm / hoạt chất / kênh / thuốc kê đơn: filter sales_lines() on the source column listed in the schema card
+s = sales_lines()
+mine = s[s['Nhóm hàng'].astype(str).map(fold).str.contains(fold('hải sản'), na=False)]
+answer_percent(round_half_up(revenue(month(2025, 3), mine) / revenue(month(2025, 3)) * 100, 2))
+```
+```python
+# giá bán X ngày D; doanh thu ca chiều (order_ts)
+answer_number(price_on('dầu gió xanh con ó 12ml', '2026-01-16'), kind='money')
+s = sales_lines(); chieu = s[shift_of(s['order_ts']).values == 'chiều']
+```
+- If a "Time expressions, already resolved" block follows the question, use exactly those period calls.
+- Counting orders or "khách mua N đơn" = number of distinct order_id, not number of rows (most tables have one row per line item). `is_goods` is a True/False flag, never a product name.
 - Revenue = sum of line amounts, never order-total columns (those include order discount/shipping). Do not filter status == 'hoàn thành' only: use `counted`.
 - If the data cannot answer, call unanswerable(reason) - never answer_string with an explanation.
 - Plain top-level script: no `def main()`, no `return`, no `import datamate` (all helpers are already defined).
@@ -87,7 +112,7 @@ def _fmt_answer(ex: dict) -> str:
     return json.dumps({"type": ex["type"], "answer": ex["answer"]}, ensure_ascii=False)
 
 
-def question_part(question: str, as_of: str, examples: list[dict]) -> str:
+def question_part(question: str, as_of: str, examples: list[dict], hints: list[str] | None = None) -> str:
     out = []
     if examples:
         out.append("# Solved examples from OTHER shops (their tables differ; use them for interpretation and answer format)")
@@ -98,6 +123,8 @@ def question_part(question: str, as_of: str, examples: list[dict]) -> str:
             out.append(f"A: {_fmt_answer(ex)}\n")
     wd = WEEKDAYS[pd.Timestamp(as_of).weekday()]
     out.append(f"# Question\nas_of_date (hôm nay): {as_of}, {wd}\nquestion: {question}")
+    if hints:
+        out.append("\nTime expressions, already resolved by the rulebook (use exactly these period calls):\n" + "\n".join(hints))
     return "\n".join(out)
 
 
@@ -106,6 +133,11 @@ def repair_message(exec_out: dict) -> str:
     if exec_out.get("stdout"):
         msg += f"\n\nstdout (tail):\n{exec_out['stdout'][-1500:]}"
     return msg + "\n\nFix it and return the full corrected program in one ```python block."
+
+
+def check_message(warning: str) -> str:
+    return (f"Your program ran, but a sanity check flagged the answer:\n{warning}\n\n"
+            "Return the full program again in one ```python block (corrected, or unchanged if the answer is right).")
 
 
 _THINK = re.compile(r"<think>.*?</think>", re.S)
