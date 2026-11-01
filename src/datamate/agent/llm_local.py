@@ -20,6 +20,8 @@ class LocalLLM:
         extra = {}
         if self.enable_thinking is not None:  # Qwen3-style chat templates on vLLM
             extra["chat_template_kwargs"] = {"enable_thinking": self.enable_thinking}
+            if not self.enable_thinking and ":11434" in str(self.client.base_url):  # Ollama ignores the template kwargs
+                extra["reasoning_effort"] = "none"
         r = self.client.chat.completions.create(
             model=self.model, messages=messages, temperature=temperature, seed=seed,
             max_tokens=self.max_tokens, extra_body=extra or None,

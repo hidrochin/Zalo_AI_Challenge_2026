@@ -8,9 +8,20 @@ from datamate.ingest.parsers import parse_date, parse_number, parse_unit, year_m
     ("55,000", 55000), ("55.000đ", 55000), ("55k", 55000), ("1,6256tr", 1625600), ("45,000.0000", 45000),
     ("422.400đ", 422400), ("3 chai", 3), ("18.6", 18.6), ("0,9", 0.9), ("-6", -6), (52000, 52000),
     ("1.234.567", 1234567), ("abc", None), ("ORD000001", None), (None, None),
+    ("1tr134", 1134000), ("2tr5", 2500000), ("12tr800", 12800000), ("1tr", 1000000),
 ])
 def test_parse_number(raw, expected):
     assert parse_number(raw) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("Không giao được", "huỷ"), ("hàng trả về", "trả hàng"), ("đang gửi", "đang giao"), ("Đổi trả", "trả hàng"),
+    ("Đã hoàn thành", "hoàn thành"), ("Hủy đơn", "huỷ"), ("shipping", "đang giao"),
+])
+def test_normalize_status(raw, expected):
+    from datamate.ingest.roles import normalize_status
+
+    assert normalize_status(raw) == expected
 
 
 def test_parse_unit():

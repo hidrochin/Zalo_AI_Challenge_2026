@@ -14,6 +14,7 @@ from datamate.agent.prompt import build_system, business_part, extract_code, que
 from datamate.agent.retrieve import ExampleBank
 from datamate.agent.sandbox import ExecPool
 from datamate.agent.vote import decide
+from datamate.canon import build_sales
 from datamate.eval.scorer import read_jsonl, score
 from datamate.ingest import load_business
 from datamate.ingest.schema_card import schema_card
@@ -26,7 +27,7 @@ class RunConfig:
     out_dir: Path = Path("outputs/run")
     cache_dir: Path = Path("cache/ingest")
     backend: str = "local"  # local | claude | dummy
-    model: str = "qwen3:8b"
+    model: str = "qwen3.5:9b"
     base_url: str = "http://localhost:11434/v1"
     samples: int = 1
     temperature: float = 0.6
@@ -144,7 +145,8 @@ def run(cfg: RunConfig) -> dict:
     with sub_path.open("a", encoding="utf-8") as sub, tqdm(total=len(todo), desc="questions") as bar:
         for biz_id in sorted(by_biz):
             biz = load_business(split_dir, biz_id, cfg.cache_dir)
-            biz_part = business_part(biz_id, biz.readme.text, schema_card(biz))
+            _, sales_desc = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
+            biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
             pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:

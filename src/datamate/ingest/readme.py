@@ -25,9 +25,19 @@ class Readme:
     def descs_for(self, file: str, sheet: str | None) -> dict[str, str]:
         out: dict[str, str] = {}
         for (f, sh), cols in self.columns.items():
-            if f == file and (sh is None or sh == sheet):
+            if _file_matches(f, file) and (sh is None or sh == sheet):
                 out.update(cols)
         return out
+
+
+def _file_matches(spec: str, file: str) -> bool:
+    """README file spec, possibly with placeholders (`BanHang_T<tháng>_<năm>.xlsx`), vs an actual file name."""
+    if spec == file:
+        return True
+    if "<" not in spec:
+        return False
+    rx = "".join(".+?" if part.startswith("<") else re.escape(part) for part in re.split(r"(<[^>]*>)", spec))
+    return re.fullmatch(rx, file) is not None
 
 
 def parse_readme(text: str) -> Readme:

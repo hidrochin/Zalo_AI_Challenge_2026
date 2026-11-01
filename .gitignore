@@ -2,6 +2,7 @@
 data/
 *.zip
 description/
+pdf_papers
 
 # python / uv
 .venv/
@@ -15,3 +16,4 @@ outputs/
 result/
 *.parquet
 .DS_Store
+.env

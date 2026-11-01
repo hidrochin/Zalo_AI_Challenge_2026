@@ -46,14 +46,18 @@ uv run datamate ingest --split public_test
 # plumbing check, no model needed
 uv run datamate run --backend dummy --limit 20 --out outputs/smoke_dummy
 
-# local model via Ollama (raise the context window first; the prompt is ~15-25k tokens)
-OLLAMA_CONTEXT_LENGTH=32768 ollama serve &
-ollama pull qwen3:8b                                 # or qwen3:14b / qwen3.5:9b
-uv run datamate run --backend local --model qwen3:8b --limit 30 --concurrency 1
+# local model via Ollama: Qwen3.5-9B with a 24k-context alias (prompts are up to ~16k tokens)
+ollama pull qwen3.5:9b
+printf 'FROM qwen3.5:9b\nPARAMETER num_ctx 24576\n' > /tmp/Modelfile && ollama create qwen3.5-9b-24k -f /tmp/Modelfile
+
+# stratified train dev set (120 q, all answer types, all 30 businesses), low-resource Mac run
+uv run datamate make-dev                             # -> assets/dev120.txt
+nice -n 10 uv run datamate run --model qwen3.5-9b-24k --thinking off --ids-file assets/dev120.txt \
+    --concurrency 1 --exec-workers 1 --out outputs/dev120_v1
 
 # a single business, or specific questions
-uv run datamate run --model qwen3:8b --biz biz_103 --limit 10
-uv run datamate run --model qwen3:8b --ids q_001883280e83 q_00195e1e4049
+uv run datamate run --model qwen3.5-9b-24k --thinking off --biz biz_103 --limit 10
+uv run datamate run --model qwen3.5-9b-24k --thinking off --ids q_001883280e83 q_00195e1e4049
 
 # Claude upper bound / example-bank builder (train only, needs ANTHROPIC_API_KEY, costs money)
 uv run datamate run --backend claude --model claude-opus-5-5 --limit 50 --out outputs/claude_50
@@ -71,7 +75,8 @@ start over.
 - `--samples 3`: greedy plus 2 seeded samples, then a vote
 - `--min-share` / `--unans-share`: abstention thresholds
 - `--k-examples`
-- `--thinking on|off`: Qwen3 on vLLM
+- `--thinking on|off`: Qwen3.5 thinking switch (vLLM chat template; `reasoning_effort` on Ollama)
+- `--ids-file assets/dev120.txt`: run a fixed question list
 - `--repair 0|1`
 
 ### On Kaggle (2× T4) or a rented GPU with vLLM
@@ -93,6 +98,20 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 - `/data` is read-only; caches and outputs live in `cache/` and `outputs/`.
 
 ---
+
+## Status (2026-11-01)
+
+**First real scores (Qwen3.5-9B Q4 via Ollama on an M2 Pro, thinking off, 1 sample, ~30 s/question)**
+- `outputs/dev120_v1` (baseline): PA = 0.100 (57 correct / 45 wrong / 18 abstain).
+  Main causes of wrong answers: revenue via order totals or `== 'hoàn thành'` (should be line
+  amounts, not cancelled/returned, 'đang giao' counts); status normalizer bugs (`Không giao được`,
+  `hàng trả về`); `1tr134` money not parsed; walk-in customers in rankings; counting rows instead of orders.
+- Fixes: canonical `sales_lines()` / `revenue(p)` / `is_walkin` helpers ([src/datamate/canon.py](src/datamate/canon.py)),
+  README placeholder file names (`BanHang_T<tháng>_<năm>.xlsx`), header-name role fallback, status
+  from `Ghi chú`, voucher/shipping lines excluded. Simple monthly/quarterly revenue now matches gold on
+  every train business that has line items.
+- `outputs/dev120_v2`: after these fixes (see below once finished).
+- Not yet covered by `sales_lines()`: dev_003/006/009/012, biz_110/123/124 (no line table, sqlite, or no order date).
 
 ## Status (end of 2026-10-30)
 
@@ -167,8 +186,8 @@ Status: ✅ done · 🟡 partial · ⬜ todo. Day numbers follow [docs/PROPOSAL.
 
 ### Phase 4: local model pipeline (D5–D7)
 - ✅ OpenAI-compatible local backend (Ollama / vLLM), sandbox pool, repair round, voting, resumable runs
-- ⬜ Model bake-off on `train-dev-300`: Qwen3.5-9B vs Qwen3-14B vs Qwen2.5-Coder-14B, thinking on/off, AWQ/FP8
-- ⬜ Stratified `train-dev-300` subset (by answer type and data family)
+- 🟡 Model: Qwen3.5-9B (older Qwen3 / Qwen2.5 options dropped); thinking on/off and quantization still to compare
+- ✅ Stratified dev subset `assets/dev120.txt` (`datamate make-dev`: all answer types, all 30 businesses)
 - ⬜ Adaptive sampling (stop early when the first samples agree)
 - ⬜ First public-test submission (baseline)
 

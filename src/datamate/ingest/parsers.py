@@ -9,6 +9,7 @@ import pandas as pd
 _MULT = {"tr": 1e6, "triệu": 1e6, "trieu": 1e6, "k": 1e3, "nghìn": 1e3, "ngàn": 1e3, "ng": 1e3}
 _CURRENCY = {"đ", "d", "vnd", "vnđ", "₫", "%"}
 _NUM_RE = re.compile(r"^([+-]?[\d.,]*\d)(tr|triệu|trieu|k|nghìn|ngàn|ng|đ|vnd|vnđ|₫|%)?\.?$")
+_TR_MID_RE = re.compile(r"^(\d{1,4})(?:tr|triệu|trieu)(\d{1,3})(?:đ|vnd|vnđ|₫)?$")
 _QTY_UNIT_RE = re.compile(r"^([+-]?\d+(?:[.,]\d+)?)\s+([^\d\s].{0,20})$")
 
 _EXCEL_EPOCH = pd.Timestamp("1899-12-30")
@@ -55,6 +56,9 @@ def parse_number(v):
     if isinstance(v, (dt.datetime, dt.date, pd.Timestamp)):
         return None
     s = str(v).strip().lower().replace("\xa0", "")
+    m = _TR_MID_RE.match(s.replace(" ", ""))
+    if m:  # '1tr134' = 1.134 triệu, '2tr5' = 2.5 triệu
+        return int(m.group(1)) * 1e6 + int(m.group(2).ljust(3, "0")) * 1e3
     m = _NUM_RE.match(s.replace(" ", ""))
     if m:
         suffix = m.group(2)

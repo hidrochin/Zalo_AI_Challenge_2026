@@ -29,11 +29,19 @@ DESC_RULES: list[tuple[str, str]] = [
 HEADER_RULES: list[tuple[str, str]] = [
     ("order_id", r"^(ma (don hang|hoa don|don|bill|hd)|so (hd|hoa don|phieu ban))$"),
     ("status", r"^(trang thai( don hang| don)?|tinh trang( don)?|status)$"),
-    ("order_date", r"^(ngay (ban|dat hang|giao dich|mua)|ngayban)$"),
-    ("product_name", r"^(ten (hang|san pham|hang hoa)|mat hang|san pham)$"),
+    ("order_date", r"^(ngay (ban|dat hang|giao dich|mua|lap|hd|hoa don)|ngayban|ngay|thoi gian|ngay gio)$"),
+    ("product_id", r"^ma (hang|sp|san pham|hh|hang hoa|mat hang|sku)$"),
+    ("product_name", r"^(ten (hang|san pham|hang hoa|mat hang)|mat hang|san pham)$"),
+    ("qty_base", r"^so luong (le|quy doi|co ban)$"),
     ("qty", r"^(so luong|sl)$"),
+    ("unit", r"^(dvt|don vi( tinh)?)$"),
+    ("unit_price", r"^(don gia|gia ban)$"),
+    ("line_amount", r"^(thanh tien|t\.? ?tien|tri gia|amount)$"),
+    ("customer_id", r"^ma (kh|khach( hang)?)$"),
     ("customer_name", r"^(ten )?khach hang$"),
 ]
+# Generic money headers mean the line amount only in a table that also has product lines.
+_LINE_AMOUNT_IF_PRODUCT = re.compile(r"^(tong tien|tien|tien ban|tien hang)$")
 
 _DESC = [(role, re.compile(p)) for role, p in DESC_RULES]
 _HEAD = [(role, re.compile(p)) for role, p in HEADER_RULES]
@@ -64,6 +72,12 @@ def assign_roles(columns: list[str], descs: dict[str, str]) -> dict[str, str]:
         if role and role not in used:
             out[c] = role
             used.add(role)
+    if "line_amount" not in used and used & {"product_name", "product_id"}:
+        for c in columns:
+            desc = descs.get(c) or folded.get(fold(c))
+            if c not in out and not desc and _LINE_AMOUNT_IF_PRODUCT.match(fold(c)):
+                out[c] = "line_amount"
+                break
     return out
 
 
@@ -77,10 +91,10 @@ def normalize_status(value) -> str | None:
     s = fold(value)
     if not s:
         return None
-    if re.search(r"huy|cancel", s):
+    if re.search(r"huy|cancel|khong giao duoc|giao (that bai|khong thanh cong)|failed", s):
         return "huỷ"
-    if re.search(r"tra (hang|lai)|hoan (hang|tra)|return|doi tra|khach tra", s):
+    if re.search(r"tra (hang|lai|ve)|hoan (hang|tra)|return|doi tra|khach tra", s):
         return "trả hàng"
-    if re.search(r"dang (giao|van chuyen|ship)|chua giao|cho giao|shipping|delivering", s):
+    if re.search(r"dang (giao|van chuyen|ship|gui)|chua giao|cho giao|shipping|delivering", s):
         return "đang giao"
     return "hoàn thành"

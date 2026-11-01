@@ -5,6 +5,7 @@ import io
 import json
 import multiprocessing as mp
 import queue
+import re
 import signal
 import traceback
 from pathlib import Path
@@ -19,13 +20,28 @@ def _short_tb() -> str:
     return "\n".join(keep[-6:] + [ln for ln in tail if ln not in keep])[-2000:]
 
 
-def _execute(code: str, as_of: str, tables, cal, timeout: int) -> dict:
+_DM_IMPORT = re.compile(r"^[ \t]*(from[ \t]+datamate[\w.]*[ \t]+import[^\n]*|import[ \t]+datamate[^\n]*)$", re.M)
+
+
+def _compile(code: str):
+    """Forgive harmless slips: `datamate` imports (helpers are pre-loaded) and top-level `return`."""
+    code = _DM_IMPORT.sub("pass", code)
+    try:
+        return compile(code, "<program>", "exec")
+    except SyntaxError as e:
+        if "outside function" not in str(e):
+            raise
+        body = "\n".join("    " + ln for ln in code.splitlines())
+        return compile(f"def __program_main():\n{body}\n__program_main()\n", "<program>", "exec")
+
+
+def _execute(code: str, as_of: str, tables, cal, timeout: int, sales=None) -> dict:
     import numpy as np
     import pandas as pd
 
     from datamate import dm
 
-    dm.set_context(as_of, cal)
+    dm.set_context(as_of, cal, sales)
     ns = {"__name__": "__program__", "pd": pd, "np": np, "dm": dm, "AS_OF": dm.AS_OF, "CAL": cal,
           "T": {k: v.copy(deep=False) for k, v in tables.items()}}
     ns.update({n: getattr(dm, n) for n in dm.__all__})
@@ -34,7 +50,9 @@ def _execute(code: str, as_of: str, tables, cal, timeout: int) -> dict:
     signal.alarm(timeout)
     try:
         with contextlib.redirect_stdout(buf):
-            exec(compile(code, "<program>", "exec"), ns)
+            exec(_compile(code), ns)
+            if dm._RESULT is None and callable(ns.get("main")):  # defined main() but never called it
+                ns["main"]()
         result = dm._RESULT
         if result is None:
             error = "The program finished without calling an answer_* function or unanswerable()."
@@ -53,10 +71,12 @@ def _execute(code: str, as_of: str, tables, cal, timeout: int) -> dict:
 
 
 def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: int) -> None:
+    from datamate.canon import build_sales
     from datamate.ingest import load_business, load_calendar
 
     biz = load_business(Path(split_dir), biz_id, Path(cache_dir) if cache_dir else None)
     cal = load_calendar(Path(split_dir))
+    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
 
     def on_alarm(signum, frame):
         raise TimeoutError(f"program exceeded {timeout}s")
@@ -68,7 +88,7 @@ def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: i
         if msg is None:
             break
         code, as_of = msg
-        conn.send(_execute(code, as_of, biz.tables, cal, timeout))
+        conn.send(_execute(code, as_of, biz.tables, cal, timeout, sales))
 
 
 class ExecPool:

@@ -60,13 +60,16 @@ def cmd_run(a) -> None:
 
     out = a.out or f"outputs/{a.split}_{a.backend}_{time.strftime('%m%d_%H%M%S')}"
     think = {"on": True, "off": False, "default": None}[a.thinking]
+    ids = list(a.ids or [])
+    if a.ids_file:
+        ids += [ln.strip() for ln in Path(a.ids_file).read_text(encoding="utf-8").splitlines() if ln.strip()]
     cfg = RunConfig(
         split=a.split, data_root=Path(a.data_root), out_dir=Path(out), cache_dir=Path(a.cache_dir),
         backend=a.backend, model=a.model, base_url=a.base_url, samples=a.samples, temperature=a.temperature,
         max_tokens=a.max_tokens, enable_thinking=think, effort=a.effort, concurrency=a.concurrency,
         exec_workers=a.exec_workers, timeout=a.timeout, repair=a.repair, k_examples=a.k_examples,
         examples_path=Path(a.examples) if a.examples else None, min_share=a.min_share, unans_share=a.unans_share,
-        seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=a.ids or [], resume=not a.no_resume,
+        seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=ids, resume=not a.no_resume,
     )
     summary = run(cfg)
     print(f"\nrun dir: {out}  ({summary['new']} new questions, {summary['seconds']}s)")
@@ -78,6 +81,22 @@ def cmd_score(a) -> None:
     from datamate.agent.pipeline import score_run
 
     _print_score(score_run(Path(a.run), Path(a.data_root) / a.split))
+
+
+def cmd_make_dev(a) -> None:
+    from collections import Counter
+
+    from datamate.eval.devset import make_devset
+    from datamate.eval.scorer import read_jsonl
+
+    ids = make_devset(Path(a.data_root) / "train", n=a.n, seed=a.seed)
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(a.out).write_text("\n".join(ids) + "\n", encoding="utf-8")
+    types = {r["id"]: r["type"] for r in read_jsonl(Path(a.data_root) / "train" / "answers.jsonl")}
+    bizs = {q["id"]: q["business_id"] for q in read_jsonl(Path(a.data_root) / "train" / "questions.jsonl")}
+    print(f"{len(ids)} ids -> {a.out}")
+    print("types:", dict(Counter(types[i] for i in ids).most_common()))
+    print("businesses:", len({bizs[i] for i in ids}))
 
 
 def cmd_export(a) -> None:
@@ -104,7 +123,7 @@ def main(argv=None) -> None:
     s = sub.add_parser("run", help="answer questions and (on train) score them")
     s.add_argument("--split", default="train")
     s.add_argument("--backend", choices=["local", "claude", "dummy"], default="local")
-    s.add_argument("--model", default="qwen3:8b")
+    s.add_argument("--model", default="qwen3.5:9b")
     s.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible server (Ollama, vLLM, ...)")
     s.add_argument("--samples", type=int, default=1, help="1 greedy + (samples-1) seeded samples, then vote")
     s.add_argument("--temperature", type=float, default=0.6)
@@ -123,6 +142,7 @@ def main(argv=None) -> None:
     s.add_argument("--limit", type=int)
     s.add_argument("--biz", nargs="*")
     s.add_argument("--ids", nargs="*")
+    s.add_argument("--ids-file", help="file with one question id per line (e.g. assets/dev120.txt)")
     s.add_argument("--out")
     s.add_argument("--no-resume", action="store_true")
     s.set_defaults(func=cmd_run)
@@ -131,6 +151,12 @@ def main(argv=None) -> None:
     s.add_argument("run")
     s.add_argument("--split", default="train")
     s.set_defaults(func=cmd_score)
+
+    s = sub.add_parser("make-dev", help="write a stratified train subset (all types, all businesses)")
+    s.add_argument("--n", type=int, default=120)
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--out", default="assets/dev120.txt")
+    s.set_defaults(func=cmd_make_dev)
 
     s = sub.add_parser("export-examples", help="add correct programs from train runs to the example bank")
     s.add_argument("runs", nargs="+")

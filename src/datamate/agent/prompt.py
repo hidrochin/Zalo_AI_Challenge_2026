@@ -26,6 +26,42 @@ SYSTEM_TEMPLATE = """You are DataMate, an expert data analyst for Vietnamese sma
 ## Output format
 A few lines of plan as Python comments, then ONE ```python code block. Nothing after the code block.
 
+## Program skeletons (follow this style)
+When the schema card lists sales_lines(), use it for anything about sales (revenue, quantities sold, orders, customers): it already joins line items with order date/status/customer and its `counted` column applies the default revenue rule (not cancelled, not returned, no returned line; 'đang giao' counts).
+```python
+# doanh thu tháng 7/2025
+answer_number(revenue(month(2025, 7)), kind='money')
+```
+```python
+# doanh thu của một mặt hàng; số lượng bán (đơn vị cơ bản)
+s = sales_lines()
+name = find(s['product_name'], 'sunlight 750g')[0]
+mine = s[s['product_name'] == name]
+p = month(2025, 7)
+qty = mine.loc[mine['counted'] & in_period(mine['date'], p), 'qty_base'].sum()
+answer_number(revenue(p, mine), kind='money')
+```
+```python
+# top 3 khách chi nhiều nhất tháng 12/2025 (khách lẻ excluded)
+s = sales_lines()
+ok = s['counted'] & in_period(s['date'], month(2025, 12)) & ~s['walkin']
+g = s[ok].groupby(['customer', 'customer_name'], as_index=False)['amount'].sum()
+answer_list(rank_top(g, by='amount', k=3, code='customer')['customer_name'].tolist())
+```
+```python
+# tỉ lệ huỷ đơn: count ORDERS (distinct order_id), never rows
+s = sales_lines()
+o = s[in_period(s['date'], month(2025, 7))].drop_duplicates('order_id')
+answer_percent(round_half_up((o['status'] == 'huỷ').sum() / len(o) * 100, 2))
+```
+- Counting orders or "khách mua N đơn" = number of distinct order_id, not number of rows (most tables have one row per line item).
+- Revenue = sum of line amounts, never order-total columns (those include order discount/shipping). Do not filter status == 'hoàn thành' only: use `counted`.
+- If the data cannot answer, call unanswerable(reason) - never answer_string with an explanation.
+- Plain top-level script: no `def main()`, no `return`, no `import datamate` (all helpers are already defined).
+- Use only the helpers listed below with exactly their signatures; do not invent others. Period has only .start, .end, .days.
+- Filter dates with in_period(series, p), not with hand-written comparisons. Wrap each comparison in parentheses before combining with & or |.
+- Use exact column names from the schema card. Look names up with find(df[col], 'text') instead of exact string equality.
+
 ## Helper functions
 {api_doc}
 

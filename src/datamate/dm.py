@@ -15,12 +15,14 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 
+from datamate.canon import is_walkin as _is_walkin
 from datamate.ingest.parsers import parse_date
 from datamate.text import fold, norm_key
 
 AS_OF: pd.Timestamp | None = None
 CAL: pd.DataFrame | None = None
 _RESULT: dict | None = None
+_SALES: pd.DataFrame | None = None
 
 
 class Unanswerable(Exception):
@@ -28,6 +30,7 @@ class Unanswerable(Exception):
 
 
 class Period(NamedTuple):
+    """Inclusive date range: fields .start and .end (pd.Timestamp, midnight) and .days. Build it with the period helpers below (month, this_month, ...), not with Period(...)."""
     start: pd.Timestamp
     end: pd.Timestamp
 
@@ -39,11 +42,12 @@ class Period(NamedTuple):
         return f"Period({self.start:%Y-%m-%d} .. {self.end:%Y-%m-%d})"
 
 
-def set_context(as_of, cal: pd.DataFrame | None) -> None:
-    global AS_OF, CAL, _RESULT
+def set_context(as_of, cal: pd.DataFrame | None, sales: pd.DataFrame | None = None) -> None:
+    global AS_OF, CAL, _RESULT, _SALES
     AS_OF = pd.Timestamp(as_of).normalize()
     CAL = cal
     _RESULT = None
+    _SALES = sales
 
 
 def _d(x) -> pd.Timestamp:
@@ -249,6 +253,25 @@ def find(candidates, text: str, n: int = 5, cutoff: float = 0.5) -> list[str]:
     return out[:n]
 
 
+def sales_lines() -> pd.DataFrame:
+    """Canonical sold lines of this shop (see the 'sales_lines()' note in the schema card): date, order_id, status, counted, amount, qty_base, product_name, customer, walkin."""
+    if _SALES is None:
+        raise Unanswerable("sales_lines() is not available for this shop; use T directly")
+    return _SALES.copy(deep=False)
+
+
+def revenue(p: Period, lines: pd.DataFrame | None = None) -> float:
+    """Default-rule revenue in p: sum of `amount` over counted lines dated in p (pass filtered lines to restrict, e.g. one product)."""
+    s = sales_lines() if lines is None else lines
+    require_coverage(sales_lines()["date"], p, "sales")
+    return float(s.loc[s["counted"] & in_period(s["date"], p).values, "amount"].sum())
+
+
+def is_walkin(names) -> pd.Series:
+    """True for walk-in / anonymous customers (Khách lẻ, lẻ, vãng lai, blank); exclude them from customer rankings."""
+    return _is_walkin(names)
+
+
 def same_name(a, b) -> bool:
     """True if two names differ only in case, spacing, punctuation or diacritics."""
     return fold(norm_key(a)) == fold(norm_key(b))
@@ -344,7 +367,8 @@ __all__ = [
     "Period", "Unanswerable", "day", "today", "yesterday", "between", "until", "month", "month_auto",
     "this_month", "prev_month_same_days", "last_month", "week_this", "week_prev", "last_n_days", "quarter",
     "quarter_auto", "year", "ytd", "tet", "pre_tet", "in_period", "require", "require_coverage", "shift_of",
-    "count_weekday", "pct_change", "round_half_up", "rank_top", "find", "same_name", "fold", "norm_key",
+    "count_weekday", "pct_change", "round_half_up", "rank_top", "find", "sales_lines", "revenue", "is_walkin",
+    "same_name", "fold", "norm_key",
     "answer_number", "answer_percent", "answer_string", "answer_date", "answer_month", "answer_bool",
     "answer_list", "answer_table", "unanswerable",
 ]
