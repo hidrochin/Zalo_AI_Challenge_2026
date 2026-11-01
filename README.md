@@ -140,12 +140,11 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 - Still without `sales_lines()`: dev_003/009/012, biz_110/124 (no line table or no order date).
 
 **In flight / next steps (handoff)**
-- `outputs/dev120_v4` (local, normal priority, `--concurrency 2`) was running at the time of the
-  commit. Score it with `uv run datamate score outputs/dev120_v4` and compare with v2 (PA 0.208).
-  If it was interrupted, rerun the same command; runs resume.
-- **Pending fix:** a 0 answer that a re-check does not confirm (re-check crashed, or 0 again) should
-  **abstain**. Only 4 of about 2,460 gold number/percent answers are 0. Today the fallback in
-  `solve_question` keeps the flagged 0. It was not changed mid-run, to keep v4 consistent.
+- `outputs/dev120_v4`: **PA 0.375** (72 correct / 27 wrong / 21 abstain, precision 73%), 32 min at about
+  16 s/question. v2 was 0.208. By type: number +0.52, percent +0.48, string +0.50, list −0.38,
+  table −0.75. Transitions from v2: 14 wrong → right, 13 abstain → right, 7 right → wrong.
+- **Fixed after v4:** a 0 (or implausible percent) still flagged after its re-check now abstains. All 4
+  zero answers in v4 were wrong, so this is worth about +0.03. Kaggle v5 was pushed before this fix.
 - **Kaggle public run** ([kaggle/](kaggle/)): `kaggle/push.sh update` uploads the current code and data
   as the private dataset `hydrochii/datamate-bundle` and runs the kernel `hydrochii/datamate-public-run`
   on 2× T4 (P100 cannot run vLLM). By default it answers **only the public test** (`DM_STAGES=public`).

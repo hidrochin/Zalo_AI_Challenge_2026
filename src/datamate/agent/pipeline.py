@@ -113,9 +113,8 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
                 break
             msg = repair_message(out) if out["error"] else check_message(out["warning"])
             history += [{"role": "assistant", "content": text}, {"role": "user", "content": msg}]
-        flagged = next((a["result"] for a in sample["attempts"] if a.get("warning") and a.get("result")), None)
-        if out["result"] is None and flagged is not None:  # the re-check broke a program that only had a soft warning
-            out = {**out, "result": flagged, "error": None}
+        if out["result"] is not None and out.get("warning"):  # still suspicious after the re-check (0 is rarely right): abstain
+            out = {**out, "result": None, "error": f"unconfirmed: {out['warning']}"}
         sample["result"], sample["error"] = out["result"], out["error"]
         samples.append(sample)
     final, vote = decide([s["result"] for s in samples], cfg.min_share, cfg.unans_share)

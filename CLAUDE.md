@@ -223,7 +223,7 @@ profit uses the **cost recorded on the sale line**.
   steps" list first.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
   - dev120 scores: v1 PA 0.100 → v2 PA 0.208. v4 adds question time hints, richer `sales_lines()` /
-    `orders()` and answer checks; it was running at handoff (`outputs/dev120_v4`).
+    `orders()` and answer checks; v4 scores **PA 0.375** (`outputs/dev120_v4`).
   - Kaggle (2× T4, vLLM) public-test runner in `kaggle/`; no successful run yet.
   - The prompt is about 13–16k tokens, so a local server needs ≥ 24k context (set `num_ctx` through
     a Modelfile).
