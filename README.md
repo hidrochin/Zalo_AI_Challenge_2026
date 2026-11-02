@@ -163,6 +163,21 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
     `sales_lines` per business and the host's memory and OOM state.
   - Sandbox workers get an address-space cap (`DM_WORKER_MEM_GB`, default +4 GB).
   - An unanswerable whose reason is about a helper being unavailable goes to repair.
+- **Preprocessing review and fixes (2026-11-03, `INGEST_VERSION` 11).** The audit scripts are in `debug/`
+  (gitignored); `debug/regress.py` holds the train-gold regression checks.
+  - Fixes:
+    - status `Đang vận chuyển` → huỷ bug
+    - subtotal and note rows dropped
+    - header roles for unseen layouts and README order keys, so biz_124 and dev_003 now have `sales_lines`
+    - base-unit conversion
+  - Gold checks: monthly revenue 166 → 168, cancel count/rate 202 → 204 of 208, top-k 25 → 32 of 33,
+    and nothing broke.
+  - Still open:
+    - phone-shop abbreviations: the `Ghi tắt` sheet is joined as an attribute, but abbreviated names are not
+      mapped to full names
+    - repair-shop normalization (mechanic nicknames, plate and model in one cell)
+    - order-only shops (biz_110, dev_009)
+    - the "topping in the same cell" rule
 - **Then:** debt helper (`debt_at`, aging, per-customer flow); the 19 questions wrong in every run
   (`outputs/wrong_v3`); PROPOSAL_V2 Path A (typed plan executor) on top of the new helpers.
 
