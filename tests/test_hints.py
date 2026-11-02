@@ -68,3 +68,35 @@ def test_check_result():
     assert check_result({"type": "unanswerable", "reason": "No sales data in Oct 2025", "_src": "model"}, names)[0]
     assert check_result({"type": "unanswerable", "reason": "dữ liệu không có cột giới tính", "_src": "model"}, names) == (None, None)
     assert check_result({"type": "number", "answer": 0}, names)[1]
+    for reason in ["sales_lines() is not available for this shop; use T directly", "Không có helper orders() cho shop này"]:
+        assert check_result({"type": "unanswerable", "reason": reason, "_src": "model"}, names)[0]
+    assert check_result({"type": "unanswerable", "reason": "Dữ liệu không có cột ghi lý do huỷ đơn.", "_src": "model"}, names) == (None, None)
+
+
+def test_llm_retry_then_stop(monkeypatch):
+    from datamate.agent import pipeline
+
+    class Down:
+        calls = 0
+
+        def generate(self, *a, **kw):
+            Down.calls += 1
+            raise ConnectionError("refused")
+
+    class Rejected(Exception):
+        status_code = 400
+
+    class Bad:
+        def generate(self, *a, **kw):
+            raise Rejected("prompt too long")
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    pipeline._LLM_DOWN.clear()
+    cfg = pipeline.RunConfig(llm_retries=2)
+    with pytest.raises(Rejected):  # a 4xx is the question's own error: no retry, the run goes on
+        pipeline._generate(Bad(), cfg)
+    assert not pipeline._LLM_DOWN.is_set()
+    with pytest.raises(pipeline.LLMUnavailable):
+        pipeline._generate(Down(), cfg)
+    assert Down.calls == 3 and pipeline._LLM_DOWN.is_set()
+    pipeline._LLM_DOWN.clear()

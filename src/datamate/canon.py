@@ -60,7 +60,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     cands = [n for n, r in roles_by_table.items()
              if "line_amount" in r.values() and n in tables and not re.search(r"nhap|import|ncc", fold(n))]
     if not cands:
-        return None, "sales_lines(): not available (no table with line amounts); compute from T directly."
+        return None, ("sales_lines(): not built for this shop (no table with line amounts). Compute sales from the T tables directly; "
+                      "this does not make sales questions unanswerable.")
     line_t = max(cands, key=lambda n: (("product_name" in roles_by_table[n].values()) or ("product_id" in roles_by_table[n].values()), len(tables[n])))
     lroles = roles_by_table[line_t]
     lr = _role_cols(lroles)
@@ -152,7 +153,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     if "order_date" not in out.columns and "order_ts" in out.columns:
         out["order_date"] = out["order_ts"]
     if "order_date" not in out.columns:
-        return None, f"sales_lines(): not available (no order date found for {sources[0]}); compute from T directly."
+        return None, (f"sales_lines(): not built for this shop (no order date found for {sources[0]}). Compute sales from the T tables "
+                      "directly; this does not make sales questions unanswerable.")
     if "order_ts" not in out.columns and _has_time(out["order_date"]):
         out["order_ts"] = pd.to_datetime(out["order_date"], errors="coerce")
     out["date"] = pd.to_datetime(out["order_date"], errors="coerce").dt.normalize()

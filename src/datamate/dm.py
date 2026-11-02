@@ -292,7 +292,8 @@ def find(candidates, text: str, n: int = 5, cutoff: float = 0.5) -> list[str]:
 def sales_lines() -> pd.DataFrame:
     """Canonical sold lines of this shop (see the 'sales_lines()' note in the schema card): date, order_id, status, counted, amount, qty_base, product_name, customer, walkin + source columns."""
     if _SALES is None:
-        raise RuntimeError("sales_lines() is not available for this shop; compute from T directly")
+        raise RuntimeError("sales_lines() helper is not built for this shop, but the sales data is in T: "
+                           "compute from the T tables in the schema card (this is not a reason for unanswerable())")
     return _SALES.copy(deep=False)
 
 

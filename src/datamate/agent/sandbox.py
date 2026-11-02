@@ -37,6 +37,7 @@ def _compile(code: str):
 
 _EMPTY_REASON = re.compile(r"khong (tim thay|co (don|dong|giao dich|du lieu ban|ban|ghi nhan|ban ghi))|no (sales|rows?|records?|orders?|data|transactions?)( |$)"
                            r"|not found|empty|chua co (don|giao dich)|khong ban duoc")
+_HELPER_REASON = re.compile(r"sales_lines|orders\(\)|helper|use t directly|compute from t|not available for this shop")
 _BOOLISH = {"true", "false", "none", "nan", "null", ""}
 
 
@@ -87,6 +88,10 @@ def check_result(result: dict, names: set[str] | None) -> tuple[str | None, str 
             why = bad_name(r[0]) if r and isinstance(r[0], (str, bool)) else None
             if why:
                 return f"answer_table first column: {why}.", None
+    if t == "unanswerable" and result.get("_src") == "model" and _HELPER_REASON.search(fold(result.get("reason", ""))):
+        return ("You called unanswerable() because a helper (sales_lines()/orders()) is not available. That is not a reason: "
+                "the data is still in T. Compute the answer from the T tables listed in the schema card. "
+                "Only call unanswerable() when a needed table/column does not exist or the period is outside the data."), None
     if t == "unanswerable" and result.get("_src") == "model" and _EMPTY_REASON.search(fold(result.get("reason", ""))):
         return ("You called unanswerable() because your filter found no rows. An empty result here almost always means a bug "
                 "(wrong year, wrong column, exact string match instead of find(), date comparison). Print the data you filter on and fix it. "
@@ -138,6 +143,21 @@ def _execute(code: str, as_of: str, tables, cal, timeout: int, sales=None, names
     return {"result": result if error is None else None, "error": error, "warning": warning, "stdout": buf.getvalue()[-3000:]}
 
 
+def _limit_memory(extra_gb: float = 4.0) -> None:
+    """Cap the worker's address space at its current size + extra_gb (Linux), so a runaway program (e.g. a huge merge)
+    gets a MemoryError instead of pushing the host into the OOM killer, which may kill the model server."""
+    import os
+    import resource
+
+    try:
+        with open("/proc/self/statm") as f:
+            vm_bytes = int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+        cap = vm_bytes + int(float(os.environ.get("DM_WORKER_MEM_GB", extra_gb)) * 2**30)
+        resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+    except (OSError, ValueError):  # no /proc (macOS) or limit not allowed: run without a cap
+        pass
+
+
 def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: int) -> None:
     from datamate.canon import build_sales
     from datamate.ingest import load_business, load_calendar
@@ -146,6 +166,7 @@ def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: i
     cal = load_calendar(Path(split_dir))
     sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
     names = name_index(biz.tables, sales)
+    _limit_memory()
 
     def on_alarm(signum, frame):
         raise TimeoutError(f"program exceeded {timeout}s")
