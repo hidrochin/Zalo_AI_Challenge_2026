@@ -17,6 +17,8 @@ def test_parse_number(raw, expected):
 @pytest.mark.parametrize("raw,expected", [
     ("Không giao được", "huỷ"), ("hàng trả về", "trả hàng"), ("đang gửi", "đang giao"), ("Đổi trả", "trả hàng"),
     ("Đã hoàn thành", "hoàn thành"), ("Hủy đơn", "huỷ"), ("shipping", "đang giao"),
+    ("Đang vận chuyển", "đang giao"), ("chuyển khoản", "hoàn thành"), ("Huỳnh", "hoàn thành"), ("khách mang trả", "trả hàng"),
+    ("Khách trả", "trả hàng"), ("Đã hủy đơn", "huỷ"), ("khách hủy", "huỷ"),
 ])
 def test_normalize_status(raw, expected):
     from datamate.ingest.roles import normalize_status

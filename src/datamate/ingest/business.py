@@ -15,10 +15,10 @@ from datamate.ingest.roles import assign_roles, normalize_status
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 10
+INGEST_VERSION = 11
 META_COLS = ("_file", "_sheet")
 
-_DATE_NAME = re.compile(r"\b(ngay|date|thoi gian|time|thoi diem|hsd|han su dung|han dung|gio|sinh nhat|ngay sinh)\b")
+_DATE_NAME = re.compile(r"\b(ngay|date|thoi gian|time|thoi diem|hsd|han su dung|han dung|han tra|han thanh toan|gio|sinh nhat|ngay sinh)\b")
 _CODE_NAME = re.compile(
     r"\b(ma|id|sdt|so dt|dien thoai|phone|di dong|imei|cccd|cmnd|mst|ma so thue|bien so|barcode|ean|so ct|so phieu|so hd|so hoa don|lo)\b"
 )
