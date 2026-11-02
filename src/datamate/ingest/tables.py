@@ -1,6 +1,7 @@
 """Read raw files into sheets, find the header row, and cut out the data table."""
 
 import csv
+import datetime as dt
 import re
 import sqlite3
 import warnings
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from datamate.ingest.parsers import _is_null, parse_date, parse_number
+from datamate.ingest.parsers import _is_null, is_explicit_date, parse_date, parse_number
 from datamate.text import fold
 
 DATA_SUFFIXES = {".csv", ".xlsx", ".xls", ".sqlite", ".db"}
@@ -85,7 +86,26 @@ def detect_header(raw: pd.DataFrame, known: set[str], scan: int = 15) -> int | N
     return best
 
 
-_TOTAL = re.compile(r"^(tong cong|tong|cong|total)\b")
+# Folded, the surname "Tống" and products like "Công tắc …" also start with tong / cong: a bare prefix is not a total.
+_TOTAL = re.compile(r"^(tong cong|total)\b|^(tong|cong)$")
+# subtotal / note rows inside the data: "Tổng ngày 01/03", "Cộng ngày 01/05/2025", "TỔNG THÁNG", "tổng 01/05", "Ghi chú: …"
+_SUBTOTAL = re.compile(r"^(tong|cong) (ngay|thang|tuan|ca)( \d|$)|^(tong|cong) \d{1,2}[/-]\d{1,2}|^ghi chu ?:")
+
+
+def _subtotal_rows(df: pd.DataFrame) -> pd.Series:
+    """Rows with a subtotal/note label and no date anywhere (a sale by customer "Tống Thắng" still has its date)."""
+    cand = pd.Series(False, index=df.index)
+    for c in df.columns:
+        u = df[c].dropna().unique()
+        hits = {v for v in u if isinstance(v, str) and _SUBTOTAL.match(fold(v))}
+        if hits:
+            cand |= df[c].isin(hits)
+    if not cand.any():
+        return cand
+    dated = df[cand].apply(lambda r: any(isinstance(v, (dt.date, dt.datetime)) or (isinstance(v, str) and is_explicit_date(v))
+                                         for v in r), axis=1)
+    cand[cand] = ~dated
+    return cand
 
 
 def extract_table(sheet: RawSheet, known: set[str]) -> pd.DataFrame | None:
@@ -125,5 +145,5 @@ def extract_table(sheet: RawSheet, known: set[str]) -> pd.DataFrame | None:
     first = df.apply(lambda r: next((v for v in r if v is not None), None), axis=1)
     sparse = df.notna().sum(axis=1) <= max(1, len(names) // 2)
     is_total = first.map(lambda v: isinstance(v, str) and bool(_TOTAL.match(fold(v)))) & sparse
-    df = df[~(is_hdr | is_total)]
+    df = df[~(is_hdr | is_total | _subtotal_rows(df))]
     return df.reset_index(drop=True)

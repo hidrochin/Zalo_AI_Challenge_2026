@@ -50,3 +50,19 @@ def test_year_month_hint():
     assert year_month_hint("Thang 02 2025") == (2025, 2)
     assert year_month_hint("04.2025") == (2025, 4)
     assert year_month_hint("Sheet1", "SoBanHang_2026.xlsx") == (2026, None)
+
+
+def test_subtotal_and_note_rows_dropped():
+    from datamate.ingest.tables import RawSheet, extract_table
+
+    raw = pd.DataFrame([
+        ["Ngày", "Khách", "Hàng", "Tiền"],
+        ["01/03/2025", "Tống Thắng", "Công tắc 1 chiều", "50000"],
+        [None, "Tổng ngày 01/03", None, "50000"],
+        [None, "Cộng ngày 02/03/2025", None, "10"],
+        [None, "TỔNG THÁNG", None, "60"],
+        ["Ghi chú: số liệu ghi tay", None, None, None],
+        ["02/03/2025", "Tống Thắng Thu", "Ống nước", "10"],
+    ])
+    df = extract_table(RawSheet("f.xlsx", "T3-2025", raw, False), set())
+    assert df["Khách"].tolist() == ["Tống Thắng", "Tống Thắng Thu"]
