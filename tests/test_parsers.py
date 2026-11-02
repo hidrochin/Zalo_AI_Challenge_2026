@@ -52,6 +52,23 @@ def test_year_month_hint():
     assert year_month_hint("Sheet1", "SoBanHang_2026.xlsx") == (2026, None)
 
 
+def test_header_roles_and_readme_order_key():
+    from datamate.ingest.readme import parse_readme
+    from datamate.ingest.roles import assign_roles
+
+    cols = ["Đơn số", "Hàng hóa", "S.L", "SL (ĐV cơ bản)", "Thành tiền (đ)", "Trạng thái giao", "Khách hàng (tên)", "Giờ tạo đơn"]
+    assert assign_roles(cols, {}) == {
+        "Đơn số": "order_id", "Hàng hóa": "product_name", "S.L": "qty", "SL (ĐV cơ bản)": "qty_base",
+        "Thành tiền (đ)": "line_amount", "Trạng thái giao": "status", "Khách hàng (tên)": "customer_name", "Giờ tạo đơn": "order_ts"}
+    # an unmatched description falls back to the header, but never for money roles
+    assert assign_roles(["Ngày", "Thành tiền"], {"Ngày": "ngày sửa", "Thành tiền": "tổng tiền đơn"}) == {"Ngày": "order_date"}
+    # "số thứ tự dòng trong đơn" is a line number, not the order id
+    assert assign_roles(["No.", "Mã bill"], {"No.": "số thứ tự dòng trong đơn", "Mã bill": "mã đơn"}) == {"Mã bill": "order_id"}
+    r = parse_readme("- **Đơn**: các dòng cùng **STT** là một đơn; khách, bớt lặp lại ở mọi dòng.")
+    assert r.order_keys == {"stt"}
+    assert assign_roles(["Ngày", "STT", "Hàng"], {}, r.order_keys)["STT"] == "order_id"
+
+
 def test_subtotal_and_note_rows_dropped():
     from datamate.ingest.tables import RawSheet, extract_table
 

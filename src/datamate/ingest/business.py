@@ -117,7 +117,7 @@ def build_business(split_dir: Path, biz_id: str) -> Business:
             for k, v in readme.descs_for(sh.file, sh.sheet).items():
                 descs.setdefault(k, v)
         sources = [(sh.file, sh.sheet) for sh, _ in members]
-        ti = TableInfo(name=name, sources=sources, descs=descs, roles=assign_roles(cols, descs))
+        ti = TableInfo(name=name, sources=sources, descs=descs, roles=assign_roles(cols, descs, readme.order_keys))
         df = _clean(df, ti)
         tables[name] = df
         info[name] = ti

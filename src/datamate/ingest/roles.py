@@ -11,7 +11,7 @@ from datamate.text import fold
 # (role, regex on the folded README description). First match wins.
 DESC_RULES: list[tuple[str, str]] = [
     ("qty_base", r"^so luong (da )?(doi|quy) ra don vi co ban|^so luong .*\(dvt co ban\)|^so luong .*\(don vi co ban\)"),
-    ("order_id", r"^ma (don|hoa don|bill|chung tu)\b(?!.*nhap)|^so (hoa don|hd)\b"),
+    ("order_id", r"^ma (don|hoa don|bill|chung tu)\b(?!.*nhap)|^so (hoa don|hd)\b|^so thu tu (don|hoa don)\b"),
     ("order_date", r"^ngay (ban|dat|giao dich|mua)"),
     ("order_ts", r"^(thoi diem|thoi gian|gio) (dat|tao) don|^gio dat don"),
     ("status", r"^trang thai (don|xu ly)"),
@@ -27,20 +27,23 @@ DESC_RULES: list[tuple[str, str]] = [
 ]
 
 HEADER_RULES: list[tuple[str, str]] = [
-    ("order_id", r"^(ma (don hang|hoa don|don|bill|hd)|so (hd|hoa don|phieu ban))$"),
-    ("status", r"^(trang thai( don hang| don)?|tinh trang( don)?|status)$"),
-    ("order_ts", r"^thoi gian (lap|tao)( don| hoa don)?$"),
+    ("order_id", r"^(ma (don hang|hoa don|don|bill|hd|giao dich)|so (hd|hoa don|phieu ban|ct|chung tu)|don so|order id)$"),
+    ("status", r"^(trang thai( don hang| don| giao)?|tinh trang( don)?|status)$"),
+    ("order_ts", r"^(thoi gian (lap|tao)( don| hoa don)?|gio (tao|dat|lap) (don|hoa don))$"),
     ("order_date", r"^(ngay (ban|dat hang|giao dich|mua|lap|hd|hoa don)|ngayban|ngay|thoi gian|ngay gio)$"),
     ("product_id", r"^ma (hang|sp|san pham|hh|hang hoa|mat hang|sku)$"),
-    ("product_name", r"^(ten (hang|san pham|hang hoa|mat hang)|mat hang|san pham)$"),
-    ("qty_base", r"^(so luong|sl) (le|quy doi|co ban)$"),
-    ("qty", r"^(so luong|sl)$"),
-    ("unit", r"^(dvt|don vi( tinh)?)$"),
-    ("unit_price", r"^(don gia|gia ban|gia don vi)$"),
-    ("line_amount", r"^(thanh tien|t\.? ?tien|tri gia|amount)$"),
-    ("customer_id", r"^ma (kh|khach( hang)?)$"),
-    ("customer_name", r"^(ten )?khach hang$"),
+    ("product_name", r"^(ten (hang|san pham|hang hoa|mat hang|sp)|mat hang|san pham|hang hoa|hang ban|hang)$"),
+    ("qty_base", r"^(so luong|sl|s\.l) (le|quy doi|co ban)$|^(so luong|sl|s\.l) \((dv|don vi|dvt) co ban\)$"),
+    ("qty", r"^(so luong|sl|s\.l|slg)$"),
+    ("unit", r"^(dvt|dv|don vi( tinh)?)$"),
+    ("unit_price", r"^(don gia|gia ban|gia don vi|gia 1 dv)$"),
+    ("line_amount", r"^(thanh tien|t\.? ?tien|tri gia|amount)( \((d|vnd)\))?$"),
+    ("customer_id", r"^(ma (kh|khach( hang)?)( mua)?|customer id)$"),
+    ("customer_name", r"^((ten )?khach hang( \(ten\))?|ten (kh|khach)|khach)$"),
 ]
+# A README description that matches no DESC rule falls back to the header, except for money roles:
+# "Thành tiền" described as "tổng tiền đơn" is an order total, not a line amount.
+_NO_HEADER_FALLBACK = {"line_amount", "unit_price"}
 # Generic money headers mean the line amount only in a table that also has product lines.
 _LINE_AMOUNT_IF_PRODUCT = re.compile(r"^(tong tien|tien|tien ban|tien hang)$")
 
@@ -62,20 +65,28 @@ def role_for(column: str, desc: str | None) -> str | None:
         for role, rx in _DESC:
             if rx.search(d):
                 return role
-        return None
     h = header_key(column)
     for role, rx in _HEAD:
         if rx.search(h):
-            return role
+            return None if desc and role in _NO_HEADER_FALLBACK else role
     return None
 
 
-def assign_roles(columns: list[str], descs: dict[str, str]) -> dict[str, str]:
-    """Return {column: role}; each role is given to at most one column (first wins)."""
+def assign_roles(columns: list[str], descs: dict[str, str], order_keys: set[str] = frozenset()) -> dict[str, str]:
+    """Return {column: role}; each role is given to at most one column (first wins).
+
+    order_keys: columns the README names as the order key ("các dòng cùng **STT** là một đơn")."""
     folded = {fold(k): v for k, v in descs.items()}
     out: dict[str, str] = {}
     used: set[str] = set()
     for c in columns:
+        if fold(c) in order_keys:
+            out[c] = "order_id"
+            used.add("order_id")
+            break
+    for c in columns:
+        if c in out:
+            continue
         desc = descs.get(c) or folded.get(fold(c))
         role = role_for(c, desc)
         if role and role not in used:
