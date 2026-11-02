@@ -153,6 +153,16 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
     the file to upload to the leaderboard is `submission.jsonl` in that folder.
   - Earlier attempts failed in setup (dataset auto-unzipped; vLLM installed into the wrong venv).
     Both are fixed, but no run has finished yet, so the vLLM-on-T4 path is still unverified.
+- **First public submission (2026-11-02): PA −0.110.** The vLLM server stopped answering partway through dev_008, and
+  the pipeline wrote abstain for every later question (dev_009–014, 340 questions). 43 answers were also
+  "unanswerable" with the reason "sales_lines() not available". Diagnosis: [DATA.md](DATA.md) §4.1.
+- **Fixes (2026-11-03), Kaggle kernel v6 pushed:**
+  - The pipeline retries model-server errors, then stops without writing (`LLMUnavailable`; resume picks the
+    questions up again).
+  - `run_kaggle.py` restarts vLLM with the same model and resumes until every question is answered. It logs
+    `sales_lines` per business and the host's memory and OOM state.
+  - Sandbox workers get an address-space cap (`DM_WORKER_MEM_GB`, default +4 GB).
+  - An unanswerable whose reason is about a helper being unavailable goes to repair.
 - **Then:** debt helper (`debt_at`, aging, per-customer flow); the 19 questions wrong in every run
   (`outputs/wrong_v3`); PROPOSAL_V2 Path A (typed plan executor) on top of the new helpers.
 

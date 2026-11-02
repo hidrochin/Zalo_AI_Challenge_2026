@@ -279,10 +279,14 @@ week boundaries.
 ### 4.1 What the first public submission actually shows **[E]** (`debug/sub_stats.txt`)
 Score −0.110. Of the 1000 lines, 456 are abstain and 544 are answers.
 
-1. **The run didn't finish.** Businesses are processed in sorted order. dev_009 through dev_014 (**340 questions**)
-   are 100% abstain, and dev_008 is 40% answered. A run cut off partway through dev_008 explains both. The
-   downloaded Kaggle folder holds no per-question logs, so the cause is unconfirmed. Possible causes: the Kaggle
-   time limit, a crash, or a stage timeout. **[E]** pattern / **[H]** cause.
+1. **The LLM server stopped answering partway through dev_008, and the pipeline kept going.** Businesses are
+   processed in sorted order. dev_009 through dev_014 (**340 questions**) are 100% abstain, and dev_008 is 40%
+   answered. The Kaggle stdout shows the run *finished*: 1000/1000 in about 48 min, with the last ~290 questions at
+   about 7 questions/s, which is too fast for any LLM call. Its `wrapt` messages appear at questions 710 and 731,
+   exactly where dev_009 and dev_010 start. In `solve_question`, an exception from `llm.generate` ends the sample,
+   so the vote abstains silently. **[E]** Why vLLM stopped (an engine crash, or the host OOM killer acting on a
+   runaway generated program) is unconfirmed. The answer is in `out/vllm_Qwen3.5-9B.log` of that kernel version.
+   **[H]**
    - The 340 skipped questions include all 4 new-industry businesses (dev_011–014) and dev_012, which has no line
      items. So the −0.11 says **nothing yet about unseen industries**.
 2. **Precision on the attempted part was below 50%.** With 544 answers and PA = −0.11: ≈ 217 correct, ≈ 327 wrong,
@@ -321,14 +325,14 @@ Score −0.110. Of the 1000 lines, 456 are abstain and 544 are answers.
 ### 4.3 Compute and scalability risks
 - **Throughput is unmeasured on the target hardware.** Measured so far:
   - Mac M2 Pro, Qwen 9B Q4, 1 sample: ~16–30 s/question.
-  - Kaggle 2× T4: didn't finish 1000 questions.
+  - Kaggle 2× T4, concurrency 16: the first ~710 questions took ~47 min, about 4 s/question in wall time.
 
   The prompt is 13–16k tokens per question. Prefix caching helps only if the prompt prefix is shared per business.
-  If the private test has ~3000 questions, the current per-question cost is very likely over budget. **[E]**
-  measurements / **[H]** extrapolation.
+  At the T4 rate, 3000 private questions would take about 3.3 h with one sample. The 5090s should be faster, but
+  sampling 3× or adding repair rounds multiplies the cost. **[E]** measurements / **[H]** extrapolation.
 - **A time-limit cutoff costs abstains, not errors.** Questions that are never written score 0. Processing order
-  decides *which* questions are lost. In the public run, sorted business order meant the new industries were lost.
-  **[E]**
+  decides *which* questions are lost. In the public run, a mid-run failure combined with sorted business order meant
+  that all the new-industry businesses were lost. **[E]**
 - **Ingestion cost.** openpyxl over the train XLSX took over 10 min; calamine plus a cache helps. Private data has
   to be ingested cold inside the 6 h, with no cache. **[E]**
 
@@ -379,8 +383,8 @@ The ideal property is *recognizing* "I don't cover this" (→ abstain), not prod
 ## 6. Open questions and information gaps
 
 **Can be answered now from existing artifacts or cheap experiments**
-1. Why did the Kaggle run stop partway through dev_008? Time limit, crash or timeout? There are no per-question logs
-   in the downloaded output.
+1. Why did the vLLM server stop answering partway through dev_008 (§4.1)? Check the vLLM log and the per-question
+   `llm_error` fields of that kernel version.
 2. Why does Kaggle-side dev_006 lack `sales_lines()` when the local ingest has it? Stale bundle, cache version,
    dependency versions or different code?
 3. Measured seconds per question and tokens per question on 2× T4, and the projection to 2× 5090.
