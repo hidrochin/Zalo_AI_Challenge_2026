@@ -3,6 +3,7 @@ data/
 *.zip
 description/
 pdf_papers
+debug/
 
 # python / uv
 .venv/
