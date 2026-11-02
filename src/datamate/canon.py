@@ -55,6 +55,57 @@ def _has_time(s: pd.Series) -> bool:
     return bool(len(t)) and bool((t != t.dt.normalize()).any())
 
 
+_FACTOR = re.compile(r"^(ti le quy doi|he so( qd| quy doi)?|quy doi|bang)$")
+_CONV_UNIT = re.compile(r"^(don vi quy doi|dv quy doi|dv nhap|dv lon|loai dv|quy cach|don vi( tinh)?|dvt|dv)$")
+_BASE_UNIT = re.compile(r"^(don vi co ban|dv co ban|dv nho|dv goc|don vi goc)$")
+
+
+def unit_factors(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]], keys: dict[str, pd.Series],
+                 skip: str) -> tuple[dict, str, str] | None:
+    """(factors, key, description) from a unit-conversion table, or None; factors = {(folded product key, folded unit):
+    base units per unit}.
+
+    keys: the sales lines' product columns ({"product_id": ..., "product_name": ...}); the conversion table's key column is
+    the one whose values match them best. A factor cell with its own unit ("15 vỉ") is resolved through the same
+    product's row for that unit (hộp = 15 vỉ = 15 × 12 viên)."""
+    for n, t in tables.items():
+        if n == skip or "order_id" in roles_by_table.get(n, {}).values():
+            continue
+        heads = {c: header_key(c) for c in t.columns if not str(c).startswith("_")}
+        fcol = next((c for c, h in heads.items() if _FACTOR.match(h) and pd.api.types.is_numeric_dtype(t[c])), None)
+        ucol = next((c for c, h in heads.items() if _CONV_UNIT.match(h) and not _BASE_UNIT.match(h)
+                     and roles_by_table.get(n, {}).get(c) != "base_unit"), None)
+        if fcol is None or ucol is None:
+            continue
+        best = None
+        for kname, kvals in keys.items():
+            ref = set(kvals.dropna().astype(str).map(fold))
+            for c in heads:
+                if c in (fcol, ucol) or pd.api.types.is_numeric_dtype(t[c]):
+                    continue
+                vals = t[c].dropna().astype(str).map(fold)
+                share = vals.isin(ref).mean() if len(vals) else 0.0
+                if share > 0.8 and (best is None or share > best[2]):
+                    best = (kname, c, share)
+        if best is None:
+            continue
+        kname, kcol, _ = best
+        sub = f"{fcol}__unit" if f"{fcol}__unit" in t.columns else None
+        raw = {(fold(k), fold(u)): (float(f), fold(s) if sub and isinstance(s, str) else None)
+               for k, u, f, s in zip(t[kcol], t[ucol], t[fcol], t[sub] if sub else [None] * len(t))
+               if pd.notna(k) and pd.notna(u) and pd.notna(f)}
+        factors = {}
+        for (k, u), (f, s) in raw.items():
+            seen = {u}
+            while s and (k, s) in raw and s not in seen:  # nested: hộp -> vỉ -> viên
+                seen.add(s)
+                g, s = raw[(k, s)]
+                f *= g
+            factors[(k, u)] = f
+        return factors, kname, f"T['{n}'] (`{fcol}` per `{ucol}`, keyed by {kname})"
+    return None
+
+
 def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]]) -> tuple[pd.DataFrame | None, str]:
     """Return (sales_lines frame or None, one-paragraph description for the prompt)."""
     cands = [n for n, r in roles_by_table.items()
@@ -174,6 +225,14 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         neg, out["is_goods"] = pd.to_numeric(out["line_amount"], errors="coerce") < 0, True
     if "qty_base" not in out.columns and "qty" in out.columns:
         out["qty_base"] = out["qty"]
+        keys = {k: out[k] for k in ("product_id", "product_name") if k in out.columns}
+        conv = unit_factors(tables, roles_by_table, keys, line_t) if "unit" in out.columns and keys else None
+        if conv:  # rulebook: a unit without a conversion row is the base unit (factor 1)
+            factors, kname, how = conv
+            f = [factors.get((fold(k), fold(u)), 1.0) if pd.notna(k) and pd.notna(u) else 1.0
+                 for k, u in zip(out[kname], out["unit"])]
+            out["qty_base"] = pd.to_numeric(out["qty"], errors="coerce") * pd.Series(f, index=out.index)
+            sources.append(f"qty_base = qty × unit factor ({how})")
     if "order_id" in out.columns:
         bad_orders = set(out.loc[bad | neg, "order_id"].dropna())
         out["order_ok"] = ~out["order_id"].isin(bad_orders) & ~bad
