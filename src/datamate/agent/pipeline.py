@@ -43,11 +43,40 @@ class RunConfig:
     examples_path: Path | None = Path("assets/examples.jsonl")
     min_share: float = 0.5
     unans_share: float = 0.6
+    llm_retries: int = 6  # server errors: back off 5..120 s, then stop the run (a resumed run retries)
     seed: int = 0
     limit: int | None = None
     businesses: list[str] = field(default_factory=list)
     ids: list[str] = field(default_factory=list)
     resume: bool = True
+
+
+class LLMUnavailable(RuntimeError):
+    """The model server kept failing. The run stops without writing these questions, so a resumed run answers them."""
+
+
+_LLM_DOWN = threading.Event()  # set once one thread gives up, so the other threads stop too
+
+
+def _generate(llm, cfg: "RunConfig", *args, **kw) -> str:
+    """llm.generate with backoff on connection/5xx errors; 4xx (e.g. prompt too long) is the question's own error."""
+    delay = 5
+    for attempt in range(cfg.llm_retries + 1):
+        if _LLM_DOWN.is_set():
+            raise LLMUnavailable("model server is down")
+        try:
+            return llm.generate(*args, **kw)
+        except Exception as e:
+            status = getattr(e, "status_code", None)
+            if status is not None and 400 <= status < 500 and status != 429:
+                raise
+            if attempt == cfg.llm_retries:
+                _LLM_DOWN.set()
+                raise LLMUnavailable(repr(e)) from e
+            print(f"LLM error ({e!r}); retry in {delay}s", flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 120)
+    raise AssertionError("unreachable")
 
 
 class DummyLLM:
@@ -98,8 +127,10 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
         out = {"result": None, "error": "not run", "stdout": ""}
         for attempt in range(1 + cfg.repair):
             try:
-                text = llm.generate(system, user_parts, history, temperature=temperature, seed=cfg.seed + s)
-            except Exception as e:  # network/model errors: record and stop this sample
+                text = _generate(llm, cfg, system, user_parts, history, temperature=temperature, seed=cfg.seed + s)
+            except LLMUnavailable:
+                raise
+            except Exception as e:  # request rejected by the model server: record and stop this sample
                 out = {"result": None, "error": f"LLM error: {e!r}", "stdout": ""}
                 sample["attempts"].append({"llm_error": repr(e)})
                 break
@@ -144,6 +175,7 @@ def run(cfg: RunConfig) -> dict:
     cal = load_calendar(split_dir)
     lock = threading.Lock()
     t_start = time.time()
+    _LLM_DOWN.clear()
 
     by_biz: dict[str, list[dict]] = {}
     for q in todo:
@@ -159,7 +191,12 @@ def run(cfg: RunConfig) -> dict:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
                     futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal) for q in by_biz[biz_id]]
                     for f in as_completed(futs):
-                        rec = f.result()
+                        try:
+                            rec = f.result()
+                        except LLMUnavailable:
+                            _LLM_DOWN.set()
+                            ex.shutdown(wait=True, cancel_futures=True)
+                            raise
                         with lock:
                             final = {k: v for k, v in rec["final"].items() if not k.startswith("_")}
                             sub.write(json.dumps({"id": rec["id"], **final}, ensure_ascii=False) + "\n")

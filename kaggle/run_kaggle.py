@@ -61,13 +61,15 @@ def _get(path, data=None, timeout=10):
         return json.loads(r.read() or b"{}") if path != "/health" else {}
 
 
-def start_server():
+def start_server(only=None):
     for model, extra in MODELS:
+        if only and model != only:
+            continue
         log(f"starting vLLM with {model}")
         args = [f"{ENV}/bin/vllm", "serve", model, "--served-model-name", "qwen", "--port", str(PORT),
                 "--tensor-parallel-size", "2", "--max-model-len", "24576", "--gpu-memory-utilization", "0.92",
                 "--max-num-seqs", "16", "--enable-prefix-caching", "--seed", "0", *extra]
-        logf = open(f"{OUT}/vllm_{model.split('/')[-1]}.log", "w")
+        logf = open(f"{OUT}/vllm_{model.split('/')[-1]}.log", "a")  # append: keep the log of a crashed server
         proc = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT)
         t0 = time.time()
         while proc.poll() is None and time.time() - t0 < 1800:
@@ -95,16 +97,61 @@ def start_server():
     sys.exit("no model could be served")
 
 
-def run_stage(name, args):
-    log(f"stage {name}: start")
-    t0 = time.time()
-    p = subprocess.run(f"cd {PROJ} && uv run --no-sync datamate run --base-url http://localhost:{PORT}/v1 --model qwen "
-                       f"--thinking off --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} 2>&1 | tail -60",
-                       shell=True, capture_output=True, text=True)
-    print(p.stdout, flush=True)
-    with open(f"{OUT}/{name}.txt", "w") as f:
-        f.write(p.stdout)
-    log(f"stage {name}: done in {time.time() - t0:.0f}s")
+def server_ok(proc) -> bool:
+    if proc.poll() is not None:
+        return False
+    try:
+        _get("/health")
+        return True
+    except Exception:
+        return False
+
+
+def log_host_state(why):
+    """Free memory, GPU state and the kernel's OOM-killer lines, to explain a dead model server."""
+    log(f"diagnostics ({why})")
+    subprocess.run(f"(free -g; nvidia-smi; dmesg 2>/dev/null | grep -iE 'killed process|out of memory' | tail -5) "
+                   f">> {OUT}/kaggle_run.txt 2>&1", shell=True)
+
+
+def run_stage(name, args, n_expected, model, proc, max_restarts=3):
+    """Run until every question has a line; if the model server dies, restart it and resume the run."""
+    sub = f"{OUT}/{name}/submission.jsonl"
+    for attempt in range(1 + max_restarts):
+        log(f"stage {name}: start (attempt {attempt + 1})")
+        t0 = time.time()
+        p = subprocess.run(f"cd {PROJ} && uv run --no-sync datamate run --base-url http://localhost:{PORT}/v1 --model qwen "
+                           f"--thinking off --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} 2>&1 "
+                           f"| grep -v -e sitecustomize -e \"No module named 'wrapt'\" | tail -60",
+                           shell=True, capture_output=True, text=True)
+        print(p.stdout, flush=True)
+        with open(f"{OUT}/{name}.txt", "a") as f:
+            f.write(p.stdout)
+        n = sum(1 for _ in open(sub)) if os.path.exists(sub) else 0
+        log(f"stage {name}: {n}/{n_expected} answered after {time.time() - t0:.0f}s")
+        if n >= n_expected:
+            return proc
+        log_host_state(f"stage {name} stopped early")
+        if not server_ok(proc):
+            log("model server is down; restarting it")
+            proc.kill()
+            proc.wait()
+            time.sleep(15)
+            _, proc = start_server(only=model)  # same model, so all answers come from one model
+    log(f"stage {name}: incomplete after {max_restarts} restarts")
+    return proc
+
+
+def sales_lines_report(split):
+    """Which businesses get a sales_lines() table: a quick check that the bundle ingests as it does locally."""
+    code = ("from pathlib import Path\nfrom datamate.canon import build_sales\nfrom datamate.ingest import load_business\n"
+            f"d=Path('data/{split}')\n"
+            "for b in sorted(p.name for p in (d/'data').iterdir() if p.is_dir()):\n"
+            "    biz=load_business(d,b,Path('cache/ingest'))\n"
+            "    s,_=build_sales(biz.tables,{n:t.roles for n,t in biz.info.items()})\n"
+            "    print(b,'sales_lines' if s is not None else 'NO sales_lines')\n")
+    p = subprocess.run(["uv", "run", "--no-sync", "python", "-c", code], cwd=PROJ, capture_output=True, text=True)
+    log("sales_lines per business:\n" + p.stdout + p.stderr[-500:])
 
 
 def main():
@@ -112,10 +159,13 @@ def main():
     model, proc = start_server()
     log(f"using {model}")
     if "dev120" in STAGES:
-        run_stage("dev120", "--split train --ids-file assets/dev120.txt")
+        n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
+        proc = run_stage("dev120", "--split train --ids-file assets/dev120.txt", n, model, proc)
     if "public" in STAGES:
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split public_test --workers 4 | tail -20")
-        run_stage("public", "--split public_test")
+        sales_lines_report("public_test")
+        n = sum(1 for _ in open(f"{PROJ}/data/public_test/questions.jsonl"))
+        proc = run_stage("public", "--split public_test", n, model, proc)
         sh(f"cp {OUT}/public/submission.jsonl {W}/submission.jsonl && wc -l {W}/submission.jsonl")
     proc.terminate()
 

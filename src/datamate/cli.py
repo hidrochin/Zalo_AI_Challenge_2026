@@ -56,7 +56,7 @@ def _print_score(s: dict) -> None:
 
 
 def cmd_run(a) -> None:
-    from datamate.agent.pipeline import RunConfig, run
+    from datamate.agent.pipeline import LLMUnavailable, RunConfig, run
 
     out = a.out or f"outputs/{a.split}_{a.backend}_{time.strftime('%m%d_%H%M%S')}"
     think = {"on": True, "off": False, "default": None}[a.thinking]
@@ -70,8 +70,12 @@ def cmd_run(a) -> None:
         exec_workers=a.exec_workers, timeout=a.timeout, repair=a.repair, k_examples=a.k_examples,
         examples_path=Path(a.examples) if a.examples else None, min_share=a.min_share, unans_share=a.unans_share,
         seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=ids, resume=not a.no_resume,
+        llm_retries=a.llm_retries,
     )
-    summary = run(cfg)
+    try:
+        summary = run(cfg)
+    except LLMUnavailable as e:
+        raise SystemExit(f"model server unavailable ({e}); run the same command again to resume") from e
     print(f"\nrun dir: {out}  ({summary['new']} new questions, {summary['seconds']}s)")
     if "score" in summary:
         _print_score(summary["score"])
@@ -138,6 +142,7 @@ def main(argv=None) -> None:
     s.add_argument("--examples", default="assets/examples.jsonl")
     s.add_argument("--min-share", type=float, default=0.5)
     s.add_argument("--unans-share", type=float, default=0.6)
+    s.add_argument("--llm-retries", type=int, default=6, help="retries on model-server errors before the run stops")
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--limit", type=int)
     s.add_argument("--biz", nargs="*")
