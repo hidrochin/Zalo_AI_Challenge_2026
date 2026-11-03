@@ -23,7 +23,7 @@ MODELS = [  # first one that starts and answers sanely is used
     ("Qwen/Qwen3.5-9B", ["--dtype", "half", "--limit-mm-per-prompt", '{"image":0,"video":0}']),
     ("Qwen/Qwen3-14B-AWQ", ["--dtype", "half", "--quantization", "awq"]),
 ]
-STAGES = os.environ.get("DM_STAGES", "public").split(",")  # add "dev120" for a train sanity check
+STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | train (all 3000, scored); push.sh sets it
 
 
 def sh(cmd, **kw):
@@ -161,6 +161,11 @@ def main():
     if "dev120" in STAGES:
         n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
         proc = run_stage("dev120", "--split train --ids-file assets/dev120.txt", n, model, proc)
+    if "train" in STAGES:
+        sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -20")
+        sales_lines_report("train")
+        n = sum(1 for _ in open(f"{PROJ}/data/train/questions.jsonl"))
+        proc = run_stage("train", "--split train", n, model, proc)
     if "public" in STAGES:
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split public_test --workers 4 | tail -20")
         sales_lines_report("public_test")

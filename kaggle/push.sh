@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Upload code + data as a private Kaggle dataset, then push and run the kernel on 2x T4.
-# Usage: kaggle/push.sh            (first time: creates the dataset)
-#        kaggle/push.sh update     (new dataset version with the current code)
+# Usage: kaggle/push.sh                     (first time: creates the dataset)
+#        kaggle/push.sh update              (new dataset version with the current code)
+#        DM_STAGES=train kaggle/push.sh update   (all 3000 train questions, scored against gold)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 USER=$(uvx --with six kaggle config view 2>/dev/null | awk '/username/{print $NF}')
@@ -20,7 +21,9 @@ else
   uvx --with six kaggle datasets create -p "$STAGE" -q   # private by default
 fi
 
-cp kaggle/run_kaggle.py "$KERNEL/"
+# stages the kernel runs: DM_STAGES=train kaggle/push.sh update (default: public)
+sed "s/os.environ.get(\"DM_STAGES\", \"public\")/os.environ.get(\"DM_STAGES\", \"${DM_STAGES:-public}\")/" \
+  kaggle/run_kaggle.py > "$KERNEL/run_kaggle.py"
 cat > "$KERNEL/kernel-metadata.json" <<EOF
 {"id": "$USER/datamate-public-run", "title": "datamate-public-run", "code_file": "run_kaggle.py",
  "language": "python", "kernel_type": "script", "is_private": true, "enable_gpu": true,
