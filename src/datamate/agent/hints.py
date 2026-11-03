@@ -33,13 +33,13 @@ RELATIVE = [
     (re.compile(r"\b(hom qua|hqua|bua qua|hom wa|hum qua|qua hom|ngay hom qua)\b"), "yesterday()"),
     (re.compile(r"\btuan (nay|hien tai)\b"), "week_this()"),
     (re.compile(r"\btuan (truoc|roi|vua roi|vua qua|qua|trc)\b"), "week_prev()"),
-    (re.compile(r"\btu dau nam\b|\bnam nay\b"), "ytd()"),
+    (re.compile(r"\btu dau nam\b|\bnam nay\b|\bdau nam (?:toi|den)\b|\btu (?:ngay )?0?1/0?1\b"), "ytd()"),
     (re.compile(r"\bnam (ngoai|truoc|roi|vua roi|qua|trc)\b"), "year({py})"),
 ]
 _SAME_LAST_YEAR = re.compile(r"\bcung ky (nam|nam ngoai|nam truoc|nam trc|nam roi|nam ngoai)\b|\bcung thang (nam|nam ngoai|nam truoc|nam trc)\b")
 _THIS_MONTH = re.compile(r"\bthang (nay|hien tai)\b|\btu dau thang\b")
 _PREV_MONTH = re.compile(r"\b(?:thang|th) (truoc|roi|vua roi|vua qua|lien truoc|lien trc|trc|qua)\b|\bky truoc\b")
-_UNTIL = re.compile(r"\b(den|toi|tinh den|tinh toi|cuoi|het)\s*(het\s*)?(ngay\s*)?(hom nay|nay)\b|\bhet hom nay\b|\bcuoi ngay hom nay\b")
+_UNTIL = re.compile(r"\b(den|toi|tinh den|tinh toi|cuoi|het)\s*(het\s*)?(ngay\s*)?(hom nay|nay|bay gio|gio)\b|\bhet hom nay\b|\bcuoi ngay hom nay\b")
 _UNTIL_D = re.compile(r"\b(?:den|toi|tinh den|tinh toi|cuoi)\s*(?:het\s*)?(?:ngay\s*)?(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})")
 
 
@@ -90,6 +90,13 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
                 d = _ok_date(t.year - 1, mm, dd)
             if d is not None:
                 add(m, f"day('{d:%Y-%m-%d}')")
+        for m in _QUARTER.finditer(f):
+            if not free(m):
+                continue
+            q = int(m.group(1))
+            yy = int(m.group(2)) if m.group(2) else dm.quarter_auto(q).start.year
+            add(m, f"quarter({yy}, {q})")
+            anchor = anchor or f"quarter({yy}, {q})"
         for rx in (_MONTH_Y, _MONTH_BARE_Y):
             for m in rx.finditer(f):
                 mm, yy = int(m.group(1)), _year(m.group(2))
@@ -102,13 +109,6 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
                 p = dm.month_auto(mm)
                 add(m, f"month({p.start.year}, {mm})")
                 anchor = anchor or f"month({p.start.year}, {mm})"
-        for m in _QUARTER.finditer(f):
-            if not free(m):
-                continue
-            q = int(m.group(1))
-            yy = int(m.group(2)) if m.group(2) else dm.quarter_auto(q).start.year
-            add(m, f"quarter({yy}, {q})")
-            anchor = anchor or f"quarter({yy}, {q})"
         for m in _YEAR.finditer(f):
             if free(m):
                 add(m, f"year({m.group(1)})")
@@ -130,7 +130,7 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
             for m in _BEFORE_D.finditer(f):
                 if free(m):
                     add(m, f"days_before({d0}, {int(m.group(1))})")
-        range_end = re.search(r"\btu dau\b|\btu ngay\b|\bthang nay\b|\btuan nay\b", f)
+        range_end = re.search(r"\btu dau\b|\btu ngay\b|\bthang nay\b|\btuan nay\b|\bdau (?:nam|thang|tuan)\b|\btu \d{1,2}/\d{1,2}\b", f)
         for m in _UNTIL.finditer(f):
             if free(m) and not range_end:
                 add(m, "until()  # point-in-time: everything from the start of the data to the end of today")
@@ -141,7 +141,7 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
         if ly and free(ly):
             add(ly, f"same_period_last_year({anchor or 'this_month()'})")
         pm = _PREV_MONTH.search(f)
-        if pm and free(pm):
+        if pm and free(pm) and not re.search(r"\bthang sau\b", f):  # "tháng sau cao hơn tháng trước": within the range
             if this_m:
                 add(pm, "prev_month_same_days()  # 'tháng này' vs the same days of last month")
             elif anchor:
