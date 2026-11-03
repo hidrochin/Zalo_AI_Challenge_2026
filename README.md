@@ -4,7 +4,8 @@ An offline agent that answers everyday Vietnamese questions over a small busines
 SQLite files.
 
 - Rules and data analysis: [CLAUDE.md](CLAUDE.md)
-- Plan of record: [docs/PROPOSAL.md](docs/PROPOSAL.md)
+- Plan of record: [docs/PROPOSAL.md](docs/PROPOSAL.md); current research plan (Vietnamese, for the mentor):
+  [docs/PROPOSAL_V3.md](docs/PROPOSAL_V3.md), semantic-aware code generation and experiments E0–E4
 
 ## Architecture
 
@@ -12,30 +13,35 @@ SQLite files.
   data/<biz>/  CSV · XLSX · SQLite · README.md
         │
         ▼
- ┌─────────────┐   once per business, cached in cache/ingest/
- │ 1. Ingest   │──► cleaned tables + schema card
- └─────────────┘                    │
-                                    ▼
- question + as_of ──────────► ┌─────────────┐ ◄── rulebook.md, business README,
-   (time hints resolved       │ 2. Prompt   │     schema card, retrieved train
-    deterministically)        └──────┬──────┘     examples
+ ┌──────────────┐   once per business, cached in cache/ingest/
+ │ 1. Ingest    │──► cleaned tables + schema card + shop name index
+ └──────────────┘                    │
                                      ▼
-                              ┌─────────────┐
-                              │ 3. LLM      │  Qwen3.5-9B (vLLM on Kaggle, Ollama on Mac)
-                              │ writes a    │  writes a short pandas program using
-                              │ program     │  dm.py / canon.py helpers
-                              └──────┬──────┘
-                                     ▼                 error or failed check
-                              ┌─────────────┐ ───────────────────────────┐
-                              │ 4. Sandbox  │                            │
-                              │ run + check │ ◄── one repair round ──────┘
-                              └──────┬──────┘
-                                     ▼
-                              ┌─────────────┐
-                              │ 5. Vote     │──► answer │ unanswerable │ abstain
-                              └──────┬──────┘
-                                     ▼
-                     submission.jsonl  +  logs/<id>.json
+ raw question ──► ┌──────────────┐  rules: Telex residue, abbreviations / teen-code /
+                  │ 2. Preprocess│  dialect / English, money + dates, shop names
+                  │              │  + 1 LLM call: standard Vietnamese, answer type,
+                  └──────┬───────┘  top-k, sub-questions
+                         ▼
+                  ┌──────────────┐ ◄── rulebook.md, business README, schema card,
+                  │ 3. Prompt    │     train examples, time hints, original +
+                  └──────┬───────┘     normalized question
+                         ▼
+                  ┌──────────────┐  Qwen3.5-9B (vLLM on Kaggle, Ollama on Mac)
+                  │ 4. LLM       │  writes a short pandas program using
+                  │ writes code  │  dm.py / canon.py helpers
+                  └──────┬───────┘
+                         ▼                  error, or the answer contradicts
+                  ┌──────────────┐ ───────── the question (type, month/day, ──┐
+                  │ 5. Sandbox   │           period, top-k)                   │
+                  │ run + checks │ ◄──────── one repair / re-check round ─────┘
+                  └──────┬───────┘
+                         ▼
+                  ┌──────────────┐
+                  │ 6. Vote +    │──► answer │ unanswerable │ abstain
+                  │ postprocess  │    in the exact output format
+                  └──────┬───────┘
+                         ▼
+           submission.jsonl  +  logs/<id>.json
 ```
 
 ## How it works (current MVP)
@@ -52,22 +58,51 @@ SQLite files.
    - adds normalized status columns (`<col>__norm`)
 
    It writes a **schema card** per business to `outputs/ingest/<split>/<biz>.md`.
-2. **Prompt** ([src/datamate/agent/prompt.py](src/datamate/agent/prompt.py)). Built in this order:
+2. **Preprocess** ([src/datamate/preprocess/](src/datamate/preprocess/)). Deterministic rules first, then one
+   short LLM call:
+   - `telex.py`: Telex keys left in the text (`soos` → số, `dduwowcj` → được, `cuwar` → cửa). A token is
+     decoded only into a well-formed syllable (onset + a rhyme from `assets/vi_rhymes.txt`), so `check`,
+     `plus` and brand words stay.
+   - `entities.py`: product / customer / staff / supplier / group names of the shop found in the question,
+     with diacritics respected (`tháng` is not `Thắng`). Exact matches get the data spelling and are
+     protected from the other rules; partial product matches are listed for the model to check.
+   - `lexicon.py`: abbreviations, teen-code, dialect and English (`dthu`, `bnhiu`, `z`, `mik`, `mô`, `ni`,
+     `rứa`, `revenue`, `bill`, `hot`), the ambiguous ones only in context (`k` after a number is money).
+   - `amounts.py`: `3tr7` → 3.700.000 đồng, `152k`, `18 triệu`; `th7/26`, `3/25`, `6-2025` → tháng M/YYYY,
+     `quý 2/2025` → quý 2 năm 2025.
+   - `rewrite.py`: one LLM call (greedy, ≤ 400 tokens) returns `{normalized, answer_type, top_k,
+     sub_questions, entities}`. A rewrite that changes a number, loses an exact name or drops a word of
+     the shop's names is discarded.
+
+   Time hints, retrieval and the answer expectation all use the rule text; the solver sees the original
+   question and the normalized one.
+3. **Prompt** ([src/datamate/agent/prompt.py](src/datamate/agent/prompt.py)). Built in this order:
    - system: contract, helper API and the split's `rulebook.md`
    - per business: README and schema card
-   - per question: retrieved train examples, the question, and the time hints from
-     [src/datamate/agent/hints.py](src/datamate/agent/hints.py) (`th7/26`, `tuần rồi`, Tết, … resolved to
-     exact periods)
-3. **LLM** writes a short pandas program that ends with an `answer_*()` / `unanswerable()` call.
+   - per question: retrieved train examples, the question (original + normalized, sub-questions, expected
+     answer, shop names, amounts) and the time hints from [src/datamate/agent/hints.py](src/datamate/agent/hints.py)
+4. **LLM** writes a short pandas program that ends with an `answer_*()` / `unanswerable()` call.
    It can use the helpers in [src/datamate/dm.py](src/datamate/dm.py): periods (`week_prev`,
    `this_month`, `tet`, …), `rank_top`, `find`, and answer formatting with rounding.
-4. **Sandbox** ([src/datamate/agent/sandbox.py](src/datamate/agent/sandbox.py)) runs each program in
+5. **Sandbox** ([src/datamate/agent/sandbox.py](src/datamate/agent/sandbox.py)) runs each program in
    worker processes that hold the tables in memory, with a timeout. On an error the model gets one
-   repair round with the traceback.
-5. **Vote** ([src/datamate/agent/vote.py](src/datamate/agent/vote.py)) takes N samples and returns
-   the answer, unanswerable or abstain. Results go to `submission.jsonl`, one log per question
-   goes to `logs/`, and on train the run is scored with
-   [src/datamate/eval/scorer.py](src/datamate/eval/scorer.py) (an exact PA re-implementation).
+   repair round with the traceback. [src/datamate/postprocess.py](src/datamate/postprocess.py) then checks
+   the answer against the question; a contradiction gets one re-check round:
+   - answer type and month vs day, from cue patterns that are 100% precise on train gold (808 questions);
+     if the re-check keeps it, the question abstains. The rewrite's type guess is only a soft check.
+   - a date answer must lie inside the asked period (train gold: 141/141)
+   - a top-k list or table has at most k items (train gold: 120/120)
+   - data-free invariants (`invariants`): rates in [0, 100], integer counts, day counts within the period, a
+     sign only when the question asks for a difference, money under 1000 đ, walk-in customers in rankings
+   - semantic shadow check (`shadow_check` in the sandbox): when the question asks exactly one contract
+     quantity ([src/datamate/eval/semantic.py](src/datamate/eval/semantic.py)) over exactly one period, the
+     answer is recomputed with the `dm` primitive; a mismatch gets the re-check with the right call
+6. **Vote** ([src/datamate/agent/vote.py](src/datamate/agent/vote.py)) takes N samples and returns
+   the answer, unanswerable or abstain. `finalize()` writes it in the official format (integers for whole
+   numbers, percent to 2 dp, `YYYY-MM[-DD]`, column-major tables transposed, anything malformed → abstain).
+   Results go to `submission.jsonl`, one log per question (with the preprocessing record) goes to `logs/`,
+   and on train the run is scored with [src/datamate/eval/scorer.py](src/datamate/eval/scorer.py) (an exact PA
+   re-implementation).
 
 ## Quickstart
 
@@ -98,6 +133,14 @@ uv run datamate run --backend claude --model claude-opus-5-5 --limit 50 --out ou
 uv run datamate export-examples outputs/claude_50    # verified programs -> assets/examples.jsonl
 
 uv run datamate score outputs/<run_dir>              # re-score a run
+
+uv run datamate normalize --split public_test        # rule preprocessing of every question -> outputs/normalize/
+uv run datamate validate outputs/submission_v2.jsonl # submission format and ids
+uv run datamate build-lexicon                        # rebuild assets/vi_rhymes.txt from train text
+
+uv run datamate compare outputs/<run_a> outputs/<run_b>   # paired ΔPA, bootstrap CI, transitions, outcomes
+uv run datamate eval-checks outputs/<run> ...        # offline: answer checks on gold (false alarms) and on logged runs
+uv run datamate semantic-check                       # contract tests of dm primitives against train gold (~18 s, no LLM)
 ```
 
 **Run directory contents:** `submission.jsonl`, `logs/<id>.json` (prompt examples, every
@@ -112,6 +155,7 @@ start over.
 - `--thinking on|off`: Qwen3.5 thinking switch (vLLM chat template; `reasoning_effort` on Ollama)
 - `--ids-file assets/dev120.txt`: run a fixed question list
 - `--repair 0|1`
+- `--normalize off|rules|llm`: question preprocessing (default `llm` = rules + one rewrite call)
 
 ### On Kaggle (2× T4) or a rented GPU with vLLM
 
@@ -132,6 +176,36 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 - `/data` is read-only; caches and outputs live in `cache/` and `outputs/`.
 
 ---
+
+## Status (2026-11-03, evening)
+
+**Committed** (`bc808d8` … `33d0413`): hints fixes, preprocess, postprocess, `avg_order_value` +
+`SEMANTIC_VERSION`, eval tools (compare / eval-checks / semantic-check), pipeline wiring, Kaggle train stage.
+157 tests pass.
+
+**E0 in flight: full train (3000 questions) on Kaggle.** Kernel `hydrochii/datamate-public-run` version 8,
+`DM_STAGES=train`, commit `33d0413` (pipeline `98d4c7b`), Qwen3.5-9B fp16 on 2× T4, `--normalize llm`,
+1 greedy sample, concurrency 16. Expected about 4–5 h. Fetch and score:
+```bash
+uvx --with six kaggle kernels status hydrochii/datamate-public-run
+uvx --with six kaggle kernels output hydrochii/datamate-public-run -p outputs/kaggle/result_train
+uv run datamate score outputs/kaggle/result_train/out/train   # report.json is also written by the run
+```
+This run is the baseline for error analysis by type / business / family / intent (PROPOSAL_V3 §5). The next
+public run needs `DM_STAGES=public kaggle/push.sh update` (the default).
+
+**E1 (normalize off vs llm on dev120) paused:** stopped at 75/120 of the `off` arm (`outputs/e1_off`,
+snapshot before the E2/E3 changes) to free the Mac. It is superseded by running E1 on Kaggle at full-train size.
+
+**Semantic layer (E2) and result validation (E3), measured offline:**
+- `datamate semantic-check` at `SEMANTIC_VERSION` 2026-11-03.1, computed cases all exact:
+  avg_order_value 167/167, revenue 259/259, order_count 136/136, cancel_count 100/100,
+  cancel_rate 104/104. Not covered: 25 questions on shops without `sales_lines`, 33 with several periods.
+- Invariants: 0/2930 false alarms on gold, 4/113 wrong answers of logged runs caught.
+- Shadow check: 16/16 in-scope wrong answers flagged, 0/44 false alarms on correct ones.
+- Risk: the shadow check assumes the private rulebook keeps these definitions; gate each contract on its
+  rulebook clause before the private submission.
+- To do for clean E2/E3 arms: a `--checks off|structural|all` flag (both layers are always on now).
 
 ## Status (2026-11-03)
 
@@ -169,14 +243,37 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
   - dev_012 "Doanh thu tháng 4/2026 … %": the model said a repair shop records no revenue, but repair tickets
     carry money.
 
+**Preprocessing and postprocessing modules (2026-11-03, committed in the evening, not yet scored)**
+- New: [src/datamate/preprocess/](src/datamate/preprocess/) and [src/datamate/postprocess.py](src/datamate/postprocess.py);
+  see "How it works" steps 2, 5 and 6. Default `--normalize llm`. 156 unit tests pass.
+- Rules alone change 2505 of the 4000 train + public questions in 0.15 s (`datamate normalize`):
+  - Telex residue: about 100 questions
+  - `dthu` 646, `bnhiu` 396, `bn` 222, `z` 155, `dc`/`đc` 274
+  - compressed dates: 1284
+- Time hints on the rule text vs the raw question: 3898 of 4000 identical, 58 gain a period, and the rest
+  are fixes:
+  - `quý 2/2026` was `month(2026, 2)` on every such train question
+  - `thangs 6 năm 2025` was `year(2025)`
+  - `N ngày ngay trc` now gets `days_before`
+- `hints.py` fixes: quarter before month; no `prev_period` for "tháng sau … tháng trước"; `đầu năm tới giờ` =
+  `ytd()`; `tới giờ` = until now.
+- LLM rewrite (Qwen3.5-9B on Ollama, 3 samples of train questions, 44 in total):
+  - answer type right 43/44; the miss has an unanswerable gold answer
+  - ~2–3 s per question on the Mac
+  - 0 of 16 rewrites discarded in the last sample, after the checks were tuned
+- Replayed on `submission_v2.jsonl`:
+  - the hard checks flag 7 answers that are certainly wrong: 4 lists for "tháng nào", and 3 days outside the
+    asked month
+  - `finalize` repairs or abstains 5 malformed lines (2 transposed tables)
+- 8-question end-to-end run with the local model works (PA +0.125, 4/3/1). That is too few to compare
+  with v4.
+
 **Next steps (handoff)**
-1. Save the v6 kernel output with its per-question logs (`uvx --with six kaggle kernels output
-   hydrochii/datamate-public-run -p outputs/kaggle/result_v6`). They give precision per business and type,
-   plus timing on 2× T4.
-2. Fix the time hints above: quarter with `/year`, no `prev_period` for an explicit "từ … tới …" range, and
-   dialect "tới chừ" / "đến giờ" = up to as-of.
-3. Raise precision before coverage. At ~52% precision, abstention is the biggest lever (Phase 5).
-4. Still open from 2026-11-01: phone-shop abbreviations, repair-shop normalization, order-only shops, debt
+1. A/B on dev120: `--normalize off` vs `llm` (about 35 min each on the Mac). Then a Kaggle public run, saving
+   the per-question logs (`uvx --with six kaggle kernels output hydrochii/datamate-public-run -p
+   outputs/kaggle/result_v7`).
+2. Raise precision before coverage. At ~52% precision, abstention is the biggest lever (Phase 5).
+3. Still open from 2026-11-01: phone-shop abbreviations, repair-shop normalization, order-only shops, debt
    helper.
 
 ## Status (2026-11-01)

@@ -219,20 +219,27 @@ profit uses the **cost recorded on the sale line**.
 
 - **Tasks and run commands:** [README.md](README.md). Its "Status" section is the handoff point
   between sessions; read it first.
-- **Status (2026-11-01):** see the README "Status (2026-11-01)" section and its "In flight / next
-  steps" list first.
+- **Research plan (2026-11-03):** [docs/PROPOSAL_V3.md](docs/PROPOSAL_V3.md) (Vietnamese): pandas code
+  generation + a tested semantic layer + result validation; experiments E0–E4.
+- **Status (2026-11-03):** see the README "Status (2026-11-03, evening)" section first.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
-  - dev120 scores: v1 PA 0.100 → v2 PA 0.208. v4 adds question time hints, richer `sales_lines()` /
-    `orders()` and answer checks; v4 scores **PA 0.375** (`outputs/dev120_v4`).
-  - Kaggle (2× T4, vLLM) public-test runner in `kaggle/`; no successful run yet.
+  - Public leaderboard: PA −0.110 (kernel v5) → **0.040** (kernel v6, precision ≈ 52%). dev120_v4: PA 0.375.
+  - E0 in flight: all 3000 train questions on Kaggle (kernel v8, `DM_STAGES=train`, commit `33d0413`).
+  - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train kaggle/push.sh update`.
   - The prompt is about 13–16k tokens, so a local server needs ≥ 24k context (set `num_ctx` through
     a Modelfile).
 - **Layout:**
   - `src/datamate/ingest/`: raw files → cleaned tables + schema card, cached in `cache/ingest/`
   - `src/datamate/dm.py`: helpers available to generated programs
+  - `src/datamate/preprocess/`: question cleanup (Telex, abbreviations/dialect, amounts/dates, shop names)
+    + one LLM rewrite
+  - `src/datamate/postprocess.py`: answer expectations and checks, official output format
   - `src/datamate/agent/`: prompt, retrieval, local and Claude backends, sandbox, vote, pipeline
-  - `src/datamate/eval/scorer.py`: exact PA scorer
-  - `src/datamate/cli.py`: `datamate ingest | run | score | export-examples`
+  - `src/datamate/eval/`: exact PA scorer (`scorer.py`), paired run comparison (`compare.py`), offline
+    answer-check eval (`checks.py`), semantic contract tests of `dm` primitives (`semantic.py`)
+  - `src/datamate/cli.py`: `datamate ingest | run | score | compare | eval-checks | semantic-check |
+    normalize | validate | export-examples`
+- Bump `dm.SEMANTIC_VERSION` whenever a primitive's definition changes, and re-run `datamate semantic-check`.
 - **Commands:**
   - `uv run pytest -q`: unit tests
   - `uv run datamate ingest --split train`: writes `outputs/ingest/<split>/<biz>.md` cards
