@@ -1,371 +1,567 @@
-# DataMate: Đề xuất v3, sinh mã có nhận thức ngữ nghĩa (Semantic-aware Code Generation)
+# DataMate: Đề xuất giải pháp và kế hoạch thí nghiệm
 
-**Trạng thái:** bản nháp ngày 2026-11-03, dùng để trao đổi với mentor.
-**Thay cho:** §2.2–2.6 của [PROPOSAL_V2.md](PROPOSAL_V2.md). Các phần sau giữ nguyên như [PROPOSAL.md](PROPOSAL.md): ingestion (§2.1), Docker (§2.5), tuân thủ (§9) và các ràng buộc (một người làm, chỉ prompting, tổng ≤ 15B tham số, chạy offline).
-**Bằng chứng:** [DATA.md](../DATA.md) (phân tích dữ liệu), các lượt chạy trong `outputs/` và hai lần nộp public.
-**Câu hỏi nghiên cứu:** *Một semantic layer tất định cải thiện được bao nhiêu về độ chính xác, độ tin cậy khi thực thi và khả năng tái lập của chương trình do LLM sinh ra, trong bài toán hỏi đáp trên dữ liệu có cấu trúc?*
-
----
-
-## 0. Tóm tắt
-
-- **Bài toán thật sự** gồm ba phần:
-  1. hiểu đúng các file lộn xộn;
-  2. tính đúng *con số mà ban tổ chức tính theo rulebook*;
-  3. quyết định trả lời hay bỏ qua dưới metric có phạt.
-
-  Phần khó nhất không nằm ở ngôn ngữ mà ở **định nghĩa nghiệp vụ**: đơn nào được tính, doanh thu là gì, đơn vị nào, làm tròn ra sao.
-- **Kết quả hiện tại:**
-  - public PA **0,040**, precision ≈ 52%;
-  - dev120 trên train PA **0,375**, precision ≈ 73%.
-
-  Khoảng cách giữa dev và public là vấn đề chính. Với metric +1/0/−1, precision quyết định điểm nhiều hơn coverage.
-- **Hướng đề xuất:** giữ LLM sinh mã pandas (kiến trúc A), nhưng gom kiến thức nghiệp vụ vào một **semantic layer có kiểm thử**: primitive, kiểu, đơn vị, bất biến, version. Thêm **tiền xử lý câu hỏi** và **kiểm tra kết quả** tách thành hai tầng, cấu trúc và ngữ nghĩa.
-- **Không làm:**
-  - predefined intent tools, vì không biết phân phối của tập private;
-  - hybrid agent, vì tốn kém và khó tái lập;
-  - Text-to-SQL chỉ thử khi lỗi thực thi còn cao (E4, có điều kiện).
-- **Thí nghiệm:**
-  - E0: baseline trên toàn bộ train, chạy trên Kaggle, **đang chạy**;
-  - E1: thêm tiền xử lý;
-  - E2: mở rộng semantic layer;
-  - E3: kiểm tra kết quả;
-  - E4: DuckDB, có điều kiện.
-
-  E2 và E3 được cài song song nhưng **đánh giá tách riêng**.
+**Bối cảnh:** Zalo AI Challenge 2026, đề bài DataMate.
+**Ngày:** 2026-11-04 (bản nháp để trao đổi với mentor).
+**Câu hỏi nghiên cứu:** *Một semantic layer tất định (các định nghĩa nghiệp vụ được cài sẵn và kiểm thử) cải thiện được bao nhiêu về độ chính xác, độ tin cậy khi thực thi và khả năng tái lập của chương trình do LLM sinh ra, trong bài toán hỏi đáp trên dữ liệu có cấu trúc? Fine-tune bộ sinh mã có cải thiện thêm hay không?*
 
 ---
 
-## 1. Bài toán và thước đo
+## Tóm tắt
 
-| khía cạnh | nội dung |
+Hệ thống nhận một câu hỏi tiếng Việt đời thường về dữ liệu bán hàng của một cửa hàng nhỏ và phải trả về một đáp án có kiểu, hoặc từ chối trả lời. Dữ liệu là các file CSV, Excel và SQLite xuất ra từ phần mềm bán hàng hoặc ghi tay.
+
+Về hình thức, đây là bài toán gần với Text-to-SQL, nhưng khác ở ba điểm quyết định:
+1. **Không có cơ sở dữ liệu sạch.** Mỗi cửa hàng một định dạng, tên cột và layout đều lộn xộn.
+2. **Đáp án đúng là con số do ban tổ chức tính theo một "rulebook"** (định nghĩa doanh thu, đơn nào được tính, làm tròn...). Một cách hiểu hợp lý khác vẫn bị tính là sai.
+3. **Metric phạt câu sai** (+1 / 0 / −1), nên biết khi nào *không* trả lời quan trọng ngang với trả lời đúng.
+
+Đề xuất của nhóm:
+- Giữ hướng **LLM sinh chương trình** trên các bảng đã chuẩn hoá.
+- Đưa toàn bộ định nghĩa nghiệp vụ vào một **semantic layer có kiểm thử**: các hàm tất định, mỗi hàm có định nghĩa, kiểu, đơn vị và test so với đáp án mẫu.
+- Bao quanh LLM bằng **tiền xử lý câu hỏi** và **kiểm tra kết quả** để biến câu sai thành câu bỏ qua.
+- Ngoài prompting, xem xét **fine-tune bộ sinh mã** và một **mô hình quyết định trả lời / bỏ qua** học từ dữ liệu train.
+
+Thí nghiệm được xếp theo mức ưu tiên ở mục 5.
+
+---
+
+## 1. Bài toán
+
+### 1.1 Đầu vào và đầu ra
+
+Mỗi câu hỏi đi kèm:
+- `business_id`, tức thư mục dữ liệu của một cửa hàng (vài file CSV / XLSX / SQLite và một README mô tả dữ liệu);
+- `as_of_date`: "hôm nay" của câu hỏi. File có thể chứa bản ghi sau ngày này, và những bản ghi đó coi như chưa xảy ra;
+- cho cả bộ dữ liệu: một `rulebook.md` (quy ước nghiệp vụ) và một `calendar.csv` (lịch dương–âm, ngày lễ).
+
+Ví dụ (minh hoạ):
+
+| câu hỏi | đáp án mong đợi |
 |---|---|
-| Đầu vào | `{id, business_id, question, as_of_date}`, thư mục dữ liệu của cửa hàng (CSV / XLSX / SQLite và README), cộng `rulebook.md` và `calendar.csv` của split |
-| Đầu ra | một dòng JSON có kiểu: number, percent, string, date, boolean, list, table, unanswerable hoặc abstain |
-| So khớp | kiểu phải đúng, giá trị khớp chính xác (percent làm tròn 2 chữ số, chuỗi chuẩn hoá nhưng phải đúng dấu) |
-| Metric | **Penalized Accuracy**: +1 đúng, 0 abstain, −1 sai. Chỉ nên trả lời khi P(đúng) > 0,5 |
-| Ràng buộc | model mở trọng số, tổng ≤ 15B; offline; 2× RTX 5090; ≤ 6 giờ cho toàn bộ private; chạy lại phải lệch \|ΔPA\| ≤ 0,03 |
-| Private test | có **loại hình kinh doanh chưa thấy** và rulebook riêng |
+| `dthu th3/25 bnhiu z` | `{"type": "number", "answer": 184250000}` |
+| `Tỉ lệ đơn bị huỷ tháng 5/2026 là bao nhiêu %?` | `{"type": "percent", "answer": 3.16}` |
+| `Top 3 sp bán chạy nhất tuần trước` | `{"type": "list", "answer": ["Bia Tiger lon", "Coca 330ml", "Mì Hảo Hảo"]}` |
+| `Tháng nào trong quý 1/2026 doanh thu cao nhất?` | `{"type": "date", "answer": "2026-02"}` |
+| `Khách nữ mua bao nhiêu tiền tháng trước?` (cửa hàng không ghi giới tính) | `{"type": "unanswerable", "reason": "..."}` |
 
-**Hệ quả của metric.** Mỗi câu được trả lời có giá trị kỳ vọng 2p − 1:
+Các kiểu đáp án: number, percent, string, date, boolean, list, table, unanswerable, và **abstain** (bỏ qua). Đáp án phải đúng kiểu và khớp chính xác:
+- tiền là số nguyên VND;
+- percent làm tròn 2 chữ số;
+- tên phải đúng như trong dữ liệu, kể cả dấu.
+
+### 1.2 Khác gì so với Text-to-SQL thông thường
+
+| | Text-to-SQL (Spider, BIRD) | DataMate |
+|---|---|---|
+| Dữ liệu | một DB sạch, có schema, khoá | file thô xuất từ phần mềm hoặc ghi tay; tiêu đề nhiều dòng, mỗi tháng một sheet, tiền dạng `55k`, ngày trộn nhiều định dạng |
+| Schema | cho sẵn | phải tự khôi phục: cột nào là mã đơn, số lượng, trạng thái... |
+| Ngữ nghĩa | câu hỏi gần như đủ nghĩa; BIRD có thêm "evidence" | câu hỏi rất thiếu; phần nghĩa còn lại nằm trong rulebook dài khoảng 20 nghìn ký tự |
+| Đánh giá | execution accuracy | khớp chính xác với giá trị tham chiếu, sai bị **−1** |
+| Câu hỏi | tiếng Anh chuẩn | tiếng Việt không dấu, viết tắt, teen-code, phương ngữ |
+| Phân phối test | cùng miền | tập private có **ngành hàng chưa từng thấy** và rulebook riêng |
+
+### 1.3 Metric và ràng buộc
+
+**Penalized Accuracy:** PA = (số câu đúng − số câu sai) / N; câu bỏ qua được 0 điểm.
+
+Nếu xác suất đúng của một câu là p, trả lời câu đó có giá trị kỳ vọng 2p − 1. Vì vậy chỉ nên trả lời khi p > 0,5. Ví dụ:
 - precision 80%: mỗi câu trả lời đáng +0,6;
-- precision 52% (public hiện tại): chỉ đáng +0,04.
+- precision 55%: chỉ đáng +0,1.
 
-Vì vậy mọi thay đổi phải báo cáo cả số câu **sai**, không chỉ PA.
+**Precision quan trọng hơn coverage.**
+
+Ràng buộc của cuộc thi:
+- chỉ dùng model mở trọng số phát hành trước 2026-10-01, **tổng ≤ 15 tỉ tham số cho mọi model dùng khi suy luận**;
+- chạy **offline** trong Docker trên 2× RTX 5090;
+- xử lý toàn bộ tập private trong **≤ 6 giờ**, kể cả nạp model;
+- ban tổ chức chạy lại và kết quả phải lệch |ΔPA| ≤ 0,03, nên pipeline phải tất định;
+- được sinh và chạy mã trong container;
+- chỉ được huấn luyện trên train, dữ liệu tổng hợp hoặc dữ liệu công khai; **không được huấn luyện trên test**;
+- không có logic gắn với ID câu hỏi hay cửa hàng.
 
 ---
 
-## 2. Phân tích dữ liệu và hệ quả cho thiết kế
+## 2. Dữ liệu: những đặc điểm dẫn đến lựa chọn thiết kế
 
-Mỗi mục có ba phần: điều quan sát được, con số đo, và lựa chọn thiết kế hoặc thí nghiệm mà nó dẫn tới.
+Các bộ dữ liệu:
+- **train:** 30 cửa hàng, 3000 câu, có đáp án;
+- **public test:** 14 cửa hàng, 1000 câu, không có đáp án;
+- **private test:** chưa biết, có ngành mới.
 
-### 2.1 File dữ liệu (CSV / XLSX / SQLite)
+Mục này chỉ nêu những đặc điểm *có ảnh hưởng tới thiết kế*; mỗi đặc điểm kèm quyết định mà nó dẫn tới (→).
 
-**Quan sát**
+### 2.1 File dữ liệu
 
-| đặc điểm | số liệu (train) |
-|---|---|
-| Số cửa hàng, số file | 30 cửa hàng; 107 xlsx, 20 csv, 1 sqlite |
-| Số bảng mỗi cửa hàng | từ 1 (sổ bán hàng phẳng) đến 17 (`pos.sqlite`) |
-| Kích thước | 6 nghìn – 306 nghìn dòng sau làm sạch; mỗi cửa hàng có 12–20 tháng dữ liệu |
-| "Họ" định dạng lặp lại | khoảng 9 họ: KiotViet-like, Sapo-like, "Sổ chi tiết bán hàng", sổ tay 2 dòng tiêu đề, CSV phẳng, CSV quan hệ, chỉ có hoá đơn, SQLite POS, nguồn hỗn hợp |
-| Public so với train | 9/14 cửa hàng thuộc họ đã gặp; 5 cửa hàng mới (điện thoại, sửa xe, mẹ và bé, "3 danh sách") |
+**D1. Cùng một loại dữ liệu xuất hiện dưới nhiều "họ định dạng".** Ở train có khoảng 9 họ:
+- phần mềm kiểu KiotViet (bảng hoá đơn và bảng chi tiết nối bằng mã);
+- kiểu Sapo (mỗi dòng một mặt hàng; thông tin đơn chỉ ở dòng đầu);
+- "Sổ chi tiết bán hàng" có dòng tiêu đề;
+- sổ ghi tay tiêu đề hai dòng, mỗi tháng một sheet;
+- CSV phẳng; CSV quan hệ; file chỉ có hoá đơn mà không có dòng hàng;
+- SQLite của máy POS (17 bảng);
+- nguồn hỗn hợp (phần mềm cộng sổ tay).
 
-Dữ liệu bị làm bẩn có chủ ý:
-- tên cột bị đổi, viết tắt, trộn Anh–Việt (`Thanh tien`, `T.Tiền`, `Slg`);
-- có dòng tiêu đề, dòng lọc và dòng trống; tiêu đề gộp 2 dòng; mỗi tháng một sheet;
-- ngày trộn nhiều định dạng trong cùng một cột (`01/02/2025`, số serial Excel, `1 thg 1 2025`);
-- tiền viết `55k` hay `1,6256tr`; số lượng kèm đơn vị (`3 chai`);
-- trạng thái đơn chỉ nằm trong ghi chú; dòng tiếp theo của một đơn bỏ trống nghĩa là giống dòng đầu;
-- dòng trùng nằm trong cùng một đơn.
+Ở public, 9/14 cửa hàng thuộc họ đã gặp, 5 cửa hàng thuộc họ hoặc ngành mới (điện thoại, sửa xe, mẹ và bé).
 
-Khả năng của dữ liệu cũng khác nhau rất nhiều giữa các cửa hàng. Tồn kho, nhập hàng, lô, khách, công nợ, nhân viên và quy đổi đơn vị mỗi thứ chỉ có ở một số cửa hàng; biz_113 không có thứ nào, biz_124 có tất cả. Có cửa hàng **không có dòng hàng** (biz_110, dev_009), và dev_012 là phiếu sửa xe ghi việc làm bằng văn bản tự do.
+→ Tách bài toán thành hai tầng. **Tầng ingestion tất định** đưa mọi họ về một **canonical schema**. **Tầng hỏi đáp** chỉ làm việc trên schema đó. Đánh giá tổng quát hoá phải tính theo **họ định dạng và ngành**, không theo từng cửa hàng.
 
-Ngoài ra, file chứa cả **bản ghi sau `as_of_date`**. 75–79% câu có as-of bằng ngày cuối của dữ liệu, nên lỗi quên cắt theo as-of bị che trên tập dev nhỏ.
+**D2. Bẩn có chủ ý, ở mức giá trị.** Ví dụ:
+- tên cột viết tắt hoặc trộn Anh–Việt (`T.Tiền`, `Slg`, `Amount`);
+- tiền dạng `55k`, `1,6256tr`, `55.000đ`; số lượng kèm đơn vị (`3 chai`), cần quy đổi về đơn vị gốc theo bảng quy đổi;
+- ngày trộn định dạng trong một cột (`01/02/2025`, số serial Excel, `1 thg 1 2025`);
+- dòng tiếp theo của một đơn bỏ trống, nghĩa là "giống dòng trên"; dòng trùng trong cùng một đơn là lỗi xuất file, chỉ tính một lần;
+- trạng thái đơn có khi chỉ nằm trong cột ghi chú.
 
-**Hệ quả**
-1. **Ingestion và canonical schema phải chạy tất định, trước khi có LLM.** Đọc bằng calamine, dò dòng tiêu đề, gán vai trò cột từ từ vựng README, forward-fill, khử trùng lặp, chuẩn hoá trạng thái, quy đổi đơn vị gốc, rồi cache một lần cho mỗi cửa hàng. Phần này đã có, ở `INGEST_VERSION` 11.
-2. **Chọn pandas, không chọn SQL làm mặc định.** Dữ liệu ≤ 306 nghìn dòng vừa trong bộ nhớ. Phần khó là làm sạch và định nghĩa, và SQL không giải quyết được cả hai. Sau ingestion, đa số câu chỉ cần 1–2 bảng chuẩn (`sales_lines`, `orders`). DuckDB chỉ đáng thử nếu lỗi thực thi pandas còn cao (E4).
-3. **Câu hỏi có trả lời được hay không phụ thuộc vào schema và khoảng thời gian, không vào câu chữ.** Cùng một mẫu câu có thể trả lời được ở cửa hàng này mà không ở cửa hàng kia. Vì vậy quyết định unanswerable phải dựa trên khả năng của dữ liệu (capability flags) và việc kỳ hỏi có giao với dữ liệu hay không.
-4. **Đơn vị phân tích của tổng quát hoá là họ định dạng và ngành hàng.** Đánh giá chỉ trên các cửa hàng train dễ cho kết quả lạc quan, và đây là lý do giải thích một phần khoảng cách giữa dev và public.
+→ Các lỗi này **không nên để LLM xử lý** ở mỗi câu hỏi, vì nó sẽ làm sai không nhất quán. Ingestion giải quyết chúng một lần cho mỗi cửa hàng rồi cache lại.
+
+**D3. Dữ liệu nhỏ, nhưng khả năng thì rất khác nhau giữa các cửa hàng.**
+- Mỗi cửa hàng có 6 nghìn – 306 nghìn dòng, phủ 12–20 tháng; từ 1 đến 17 bảng.
+- Tồn kho, nhập hàng, lô thuốc, khách hàng, công nợ, nhân viên, quy đổi đơn vị: mỗi thứ chỉ có ở một phần các cửa hàng. Có cửa hàng không có thứ nào, có cửa hàng có tất cả.
+- Có cửa hàng không có dòng hàng, chỉ có tổng tiền mỗi hoá đơn.
+
+→ Dữ liệu đủ nhỏ để nằm gọn trong bộ nhớ, nên **pandas trong một sandbox** là đủ và không cần hệ quản trị CSDL.
+
+→ **Câu hỏi có trả lời được hay không phụ thuộc vào schema, không vào câu chữ.** Cùng một mẫu câu có thể trả lời được ở cửa hàng này mà không ở cửa hàng kia. Vì vậy quyết định "unanswerable" phải dựa trên việc dữ liệu có trường cần thiết và có phủ kỳ được hỏi hay không.
+
+**D4. File chứa bản ghi sau `as_of_date`.** 75–79% câu có as-of bằng ngày cuối dữ liệu, số còn lại lùi tới khoảng 1,5 năm.
+
+→ Việc cắt theo as-of phải nằm **trong hàm dùng chung**, không để LLM tự nhớ. Lỗi này lại bị che trên tập dev nhỏ, vì phần lớn câu không cần cắt.
 
 ### 2.2 Rulebook
 
-**Quan sát**
-- Rulebook khác nhau giữa các split: train 18,5 nghìn ký tự, public 23,8 nghìn.
-- Public thêm các ngành mẹ và bé, sửa xe, điện thoại, cùng định nghĩa cho các câu "nhất". Public cũng bỏ một số quy tắc có trong train.
-- Quy tắc rất cụ thể và trái trực giác. Ví dụ: doanh thu loại đơn có *bất kỳ* dòng bị trả; doanh thu không trừ voucher cấp đơn; giá trị trung bình một đơn làm tròn half-up đến đồng; tuần tính từ thứ Hai đến Chủ nhật; Tết là 23 tháng Chạp đến mùng 10 tháng Giêng.
+**D5. Phần lớn "nghĩa" của câu hỏi nằm trong rulebook, và các quy tắc khá trái trực giác.** Một số quy tắc mặc định:
+- doanh thu = tổng tiền dòng sau chiết khấu dòng; **không** trừ voucher cấp đơn, không tính VAT và phí ship;
+- **loại đơn huỷ và cả đơn có bất kỳ dòng nào bị trả**;
+- đơn được gán theo ngày đặt;
+- "bán chạy" tính theo số lượng quy đổi về đơn vị gốc;
+- "tuần trước" là tuần đầy đủ từ thứ Hai đến Chủ nhật;
+- "tháng này" so với *cùng số ngày* của tháng trước;
+- Tết là từ 23 tháng Chạp đến mùng 10 tháng Giêng;
+- giá trị trung bình một đơn làm tròn half-up đến đồng;
+- khách lẻ bị loại khỏi xếp hạng khách;
+- hoà thì xếp theo mã tăng dần.
 
-**Hệ quả**
-1. **Các mặc định dùng chung** (đơn được tính, doanh thu, đơn vị gốc, làm tròn, as-of, khách lẻ) được cài **một lần** trong semantic layer và kiểm thử với gold của train. LLM không phải suy luận lại chúng ở mỗi câu.
-2. **Không được giả định rulebook private giống train.** Rulebook vẫn nằm trong prompt và LLM đọc nó lúc inference. Mỗi primitive ghi rõ nó dựa trên định nghĩa nào, kèm `SEMANTIC_VERSION`. Một primitive mà định nghĩa của nó không còn trong rulebook của split phải bị tắt (xem rủi ro R1).
-3. Đây là lý do **không** xây intent tool theo câu hỏi (`cancel_rate()`, `top_products()`, ...). Chúng mã hoá cả cách diễn giải câu hỏi lẫn quy tắc của train, nên gãy khi intent hoặc quy tắc mới xuất hiện. Primitive cấp thấp hơn (đơn, dòng, doanh thu, kỳ) có thể ghép lại cho các intent mới.
+Một câu như "doanh thu tháng 3" có thể sai theo khoảng 6 cách khác nhau mà kết quả vẫn trông hợp lý.
+
+→ Các định nghĩa dùng chung được **cài một lần, kiểm thử với đáp án train**, và đưa cho LLM dưới dạng hàm (semantic layer, mục 4.3).
+
+**D6. Rulebook khác nhau giữa các bộ dữ liệu.** Rulebook public (23,8 nghìn ký tự) thêm các phần cho ngành điện thoại, sửa xe, mẹ và bé, cùng các định nghĩa "nhất" (khách trung thành nhất, ngày đắt khách nhất...), và bỏ một vài quy tắc của train. Rulebook private sẽ có quy tắc chưa ai thấy.
+
+→ Rulebook **luôn nằm trong prompt** để LLM đọc lúc suy luận. Semantic layer chỉ chứa các định nghĩa *ổn định*, và mỗi hàm gắn với mệnh đề rulebook tương ứng để có thể tắt khi mệnh đề đó thay đổi.
+
+→ **Không** xây "tool theo intent" (ví dụ `cancel_rate()`, `top_products()`). Các tool như vậy mã hoá cứng cả cách hiểu câu hỏi lẫn quy tắc của train.
 
 ### 2.3 Câu hỏi
 
-**Quan sát** (train có 3000 câu, trừ khi ghi khác)
+**D7. Câu hỏi rất nhiễu.** Trên 3000 câu train:
+- 25,8% viết không dấu;
+- viết tắt và teen-code: `dthu` (646 câu), `bnhiu` (396), `bn` (222), `z` (155), `dc/đc` (274);
+- dư phím Telex khi gõ sai (`nhaats`, `cuwar`): khoảng 100 câu;
+- trộn tiếng Anh (`revenue`, `bill`, `top`, `hot`): khoảng 7–8%;
+- ngày và tiền viết nén (`th7/26`, `3/25`, `6-2025`, `3tr7`, `152k`): khoảng 780 câu;
+- tập public còn có phương ngữ (`ni`, `rứa`, `mô`, `chừ`).
 
-| hiện tượng | số liệu | ví dụ |
-|---|---|---|
-| Không dấu | 25,8% train, 26,2% public | `doanh thu thang 3 bao nhieu` |
-| Viết tắt, teen-code | `dthu` 646 câu, `bnhiu` 396, `bn` 222, `z` 155, `dc/đc` 274 | `dthu th7/26 bnhiu z` |
-| Dư phím Telex (gõ sai) | khoảng 100 câu | `nhaats`, `cuwar`, `ddeens` |
-| Phương ngữ (public) | `ni`, `rứa`, `mô`, `chừ`, `dề` | `tháng ni bán răng rồi` |
-| Trộn tiếng Anh | khoảng 7,6% (regex thô) | `revenue`, `bill`, `top`, `hot` |
-| Ngày và tiền nén | 781 câu có ngày được chuẩn hoá | `th7/26`, `3/25`, `6-2025`, `quý 2/2025`, `3tr7`, `152k` |
-| Nhắc tên trong danh mục | 678 câu có tên khớp chính xác danh mục | `Thuoc la Vinataba` → `Thuốc lá Vinataba` |
-| Nhiều kỳ trong một câu | 389 câu (13%) có ≥ 2 kỳ thời gian | "tháng 3 so với tháng 2", "từ th1 tới th3 … tháng sau cao hơn tháng trước" |
-| Câu ghép | khoảng 10% có từ nối ("kèm", "lần lượt", "so với", "cùng kỳ") | "liệt kê 5 khách nợ nhiều nhất, kèm số tiền" |
-| Trùng bề mặt public với train | chỉ 4,2% câu public khớp nguyên văn một khung câu train; Jaccard trung vị 0,46 | |
-| Phân phối intent lệch | public có câu về khách gấp khoảng 2 lần, câu về lợi nhuận gấp khoảng 7 lần, câu về huỷ và tồn ít hơn | |
+Tên mặt hàng hoặc khách thường viết không dấu và phải khớp đúng tên trong danh mục: 678 câu.
 
-Cùng một intent có thể đòi kiểu đáp án khác nhau: "bn đơn bị huỷ" cần một số đếm, "tỉ lệ huỷ" cần phần trăm. Sai kiểu là sai cả câu.
+→ Cần một bước **chuẩn hoá câu hỏi** trước khi sinh mã. Phần lớn làm được bằng quy tắc, vừa rẻ vừa tất định; một lần gọi LLM ngắn xử lý phần còn lại.
 
-**Hệ quả**
-1. **Tiền xử lý bằng thuật toán trước, sau đó đúng một lần gọi LLM.** Phần quy tắc:
-   - bộ giải Telex có kiểm tra âm tiết hợp lệ (âm đầu + vần), dựa trên 118 vần lấy từ train;
-   - từ điển viết tắt, teen-code và phương ngữ, kèm quy tắc theo ngữ cảnh (`k` sau một số là nghìn);
-   - chuẩn hoá tiền và ngày;
-   - nhận diện tên trong danh mục cửa hàng, có tôn trọng dấu (`tháng` không phải `Thắng`).
+**D8. Kỳ thời gian là tham số quan trọng nhất và hay bị hiểu sai.** 13% câu có từ 2 kỳ trở lên ("tháng 3 so với tháng 2", "từ tháng 1 tới tháng 3, tháng sau có cao hơn tháng trước không"). Một số cách viết dễ đọc nhầm: `5/25` là tháng 5/2025 chứ không phải ngày 25/5; `quý 2/2025` không phải tháng 2.
 
-   Lần gọi LLM trả về JSON `{normalized, answer_type, top_k, sub_questions, entities}`. Một lần viết lại sẽ bị **loại** nếu làm đổi một con số, mất một tên chính xác, hoặc bỏ một từ thuộc tên trong danh mục.
-2. **Giải thời gian bằng quy tắc** (`hints.py`): tạo lời gọi kỳ (`month(2025, 3)`, `quarter(2025, 2)`, `prev_period(...)`, `ytd()`), đã khớp gold ở 164/164 câu "% so với kỳ trước". Bộ giải thời gian dùng bản đã qua quy tắc. Solver thấy **cả câu gốc lẫn câu đã chuẩn hoá**, và câu gốc thắng nếu hai bản mâu thuẫn.
-3. **Truy xuất ví dụ theo khung câu đã chuẩn hoá** thay vì câu thô, vì độ trùng bề mặt thấp.
-4. **Thí nghiệm E1** đo xem tiền xử lý có thật sự giúp không. Phân tích lỗi trước đây cho thấy lỗi hiểu sai câu là **thứ yếu** so với lỗi định nghĩa, nên kỳ vọng mức cải thiện vừa phải.
+→ Chuyển kỳ thời gian sang lời gọi hàm tất định, ví dụ `month(2025, 3)` hay `quarter(2025, 2)`, rồi đưa cho LLM ngay cạnh câu hỏi. Đây là hướng tương tự "evidence" của BIRD.
 
-### 2.4 Câu trả lời
+**D9. Câu hỏi public ít trùng bề mặt với train.** Chỉ 4,2% câu public khớp nguyên văn một khung câu train (sau khi bỏ dấu và che số). Intent thì lặp lại, nhưng cách diễn đạt và tỉ trọng intent thay đổi: public có câu về khách gấp khoảng 2 lần, câu về lợi nhuận gấp khoảng 7 lần.
 
-**Quan sát** (gold train)
+→ Ví dụ few-shot nên truy xuất theo **câu đã chuẩn hoá**. Hệ thống phải tổng quát hoá theo *intent*, không theo *mẫu câu*. Đây cũng là lập luận chống lại các tool theo intent cố định.
 
-| number | percent | list | date | string | unanswerable | boolean | table |
-|---|---|---|---|---|---|---|---|
-| 1884 (62,8%) | 578 (19,3%) | 193 | 145 | 88 | 70 (2,3%) | 23 | 19 |
+### 2.4 Đáp án
 
-- **82% là number hoặc percent**, và phải khớp chính xác: lệch 1 đồng hay dùng một định nghĩa doanh thu khác đều tính −1.
-- Mọi đáp án number đều là số nguyên. 49% có giá trị ≥ 10⁶ (tiền VND). **Chỉ 2/1884 bằng 0**, nên một đáp án 0 gần như chắc chắn là lỗi lọc hoặc join.
-- Percent: 23,5% âm (thay đổi so với kỳ trước); chỉ 8 câu có |x| > 100.
-- List chỉ dài 2, 3 hoặc 5. Date có dạng `YYYY-MM-DD` (129 câu) hoặc `YYYY-MM` (16 câu, câu hỏi "tháng nào").
-- Unanswerable có 70 câu, nguyên nhân: thiếu trường dữ liệu (khoảng 45), kỳ nằm ngoài dữ liệu (khoảng 16), câu hỏi chủ quan (khoảng 8), cần kiến thức ngoài (1). Câu có kỳ giao một phần với dữ liệu **vẫn trả lời được**.
+**D10. 82% đáp án là số** (number 62,8%, percent 19,3%), và phải khớp chính xác. Phân bố các kiểu còn lại: list 193, date 145, string 88, unanswerable 70 (2,3%), boolean 23, table 19.
 
-Ngoài ra có những gợi ý trong câu hỏi gần như quyết định hoàn toàn kiểu đáp án, đo trên gold train:
-- "tháng nào" → `YYYY-MM`;
-- "%" hoặc "tỉ lệ" → percent;
-- "top N" → list có tối đa N phần tử.
+→ Trọng tâm là **tính toán chính xác theo định nghĩa**, không phải sinh văn bản.
 
-Các gợi ý này đúng 100% trên 808 câu. Ngoài ra, đáp án dạng ngày luôn nằm trong kỳ được hỏi (141/141), và đáp án top-k luôn có tối đa k phần tử (120/120).
+**D11. Đáp án có những quy luật rất mạnh** (đo trên đáp án train):
+- **chỉ 2/1884 đáp án number bằng 0**, nên một đáp án 0 gần như chắc chắn là lỗi lọc rỗng;
+- mọi đáp án number đều là số nguyên;
+- gợi ý trong câu hỏi gần như quyết định kiểu đáp án: "tháng nào" → `YYYY-MM`, "%" hoặc "tỉ lệ" → percent, "top N" → list có ≤ N phần tử. Các gợi ý này đúng **100% trên 808 câu**;
+- đáp án dạng ngày luôn nằm trong kỳ được hỏi (141/141);
+- tỉ lệ nằm trong [0, 100];
+- số đếm là số nguyên.
 
-**Hệ quả**
-1. **Hậu xử lý bảo đảm đúng format** (`finalize`):
-   - số nguyên khi giá trị là nguyên; percent làm tròn 2 chữ số, chuẩn hoá −0 thành 0;
-   - ngày đúng regex; bảng lưu theo cột thì chuyển vị;
-   - bất cứ thứ gì sai dạng → abstain.
+→ Các quy luật này dùng được làm **bộ kiểm tra kết quả không cần dữ liệu** (mục 4.6). Cái giá báo nhầm gần như bằng 0.
 
-   Không bao giờ để một lỗi format biến thành −1.
-2. **Kỳ vọng về đáp án từ câu hỏi** (kiểu, tháng hay ngày, k):
-   - gợi ý đạt 100% trên gold là kiểm tra **cứng**: được 1 vòng kiểm lại, sau đó abstain;
-   - suy đoán của LLM chỉ là kiểm tra **mềm**.
-3. **Kiểm tra kết quả** (mục 4.5), gồm bất biến cấu trúc và tính lại ngữ nghĩa, nhắm vào loại lỗi tệ nhất dưới PA: con số *trông hợp lý nhưng sai*.
-4. **Unanswerable cần bằng chứng tất định** (thiếu trường, kỳ ngoài dữ liệu). Khi không chắc thì abstain, không tuyên bố unanswerable.
+**D12. Unanswerable có nguyên nhân rõ ràng:**
+- thiếu trường (giới tính, địa chỉ, lý do huỷ, không có file tồn kho...): khoảng 45/70;
+- kỳ nằm ngoài dữ liệu: khoảng 16;
+- câu hỏi chủ quan ("nhân viên tận tâm nhất"): khoảng 8;
+- cần kiến thức ngoài: 1.
 
-### 2.5 Kết quả hiện tại và phân tích lỗi
+Câu có kỳ giao một phần với dữ liệu **vẫn phải trả lời**, tính trên phần có dữ liệu.
 
-| lượt chạy | PA | đúng / sai / abstain | precision |
+→ Chỉ tuyên bố unanswerable khi có bằng chứng tất định (thiếu trường, kỳ ngoài dữ liệu). Khi không chắc thì **abstain** chứ không đoán unanswerable.
+
+### 2.5 Tóm tắt: đặc điểm → quyết định
+
+| đặc điểm | quyết định |
+|---|---|
+| D1–D3: nhiều họ định dạng, bẩn ở mức giá trị, dữ liệu nhỏ | ingestion tất định → canonical schema; pandas trong sandbox |
+| D4–D6: nghĩa nằm trong rulebook; rulebook thay đổi | semantic layer (hàm định nghĩa có kiểm thử) + rulebook luôn trong prompt; không dùng tool theo intent |
+| D7–D9: câu hỏi nhiễu, kỳ thời gian khó, ít trùng train | chuẩn hoá câu hỏi (quy tắc + 1 lần LLM); kỳ → lời gọi hàm tất định |
+| D10–D12: đáp án số chính xác, quy luật mạnh, unanswerable có nguyên nhân | kiểm tra kết quả hai tầng; finalize đúng format; abstain khi nghi ngờ |
+
+---
+
+## 3. Các hướng tiếp cận và lựa chọn
+
+### 3.1 Các hướng dựa trên prompting
+
+| hướng | mô tả | đánh giá theo dữ liệu | quyết định |
 |---|---|---|---|
-| dev120 v1 (baseline) | 0,100 | 57 / 45 / 18 | 56% |
-| dev120 v2 (`sales_lines`, sửa ingestion) | 0,208 | 56 / 31 / 33 | 64% |
-| dev120 v4 (gợi ý thời gian, `orders()`, kiểm tra đáp án) | **0,375** | 72 / 27 / 21 | 73% |
-| public lần 1 (kernel v5) | −0,110 | khoảng 217 / 327 / 456 | khoảng 40% |
-| public lần 2 (kernel v6) | **0,040** | khoảng 415 / 375 / 210 | khoảng 52% |
+| **A. LLM sinh mã pandas** | LLM đọc rulebook, schema và câu hỏi, viết chương trình Python ngắn, chạy trong sandbox | tổng quát nhất: intent mới hay ngành mới vẫn viết được mã. Điểm yếu là logic nghiệp vụ nằm trong mã sinh ra, nên khó kiểm soát và khó debug | **giữ làm khung**; bù điểm yếu bằng semantic layer và kiểm tra kết quả |
+| **B. Tool theo intent** | viết sẵn hàm cho từng loại câu (`cancel_rate`, `top_products`...); LLM chỉ chọn tool và điền tham số | precision cao trên intent đã biết, nhưng gãy với intent và quy tắc mới (D6, D9). Một tool áp quy tắc cũ sẽ **sai một cách tự tin** (−1) | **bỏ**; thay bằng *primitive* cấp thấp hơn mà LLM ghép lại |
+| **C. Text-to-SQL bằng prompting** | LLM viết SQL trên các bảng đã chuẩn hoá | SQL không giải quyết hai nguồn lỗi chính là ingestion (D2) và định nghĩa (D5). Các bước nghiệp vụ như quy đổi đơn vị, kỳ âm lịch, làm tròn half-up hay tie-break theo mã viết bằng SQL dài và dễ sai hơn gọi một hàm Python | không ưu tiên khi chỉ dùng prompting (xem 3.3 cho trường hợp fine-tune) |
+| **D. Agent nhiều bước** | LLM điều phối nhiều công cụ và nhiều vòng | nhiều lời gọi LLM mỗi câu, trong khi ngân sách chỉ khoảng 7 giây mỗi câu nếu private có khoảng 3000 câu; khó tái lập (\|ΔPA\| ≤ 0,03); model khoảng 9B điều phối kém | **bỏ** |
 
-Lần nộp public đầu tiên còn chịu lỗi hạ tầng: server LLM dừng giữa chừng, 340 câu bị abstain. Lần thứ hai không còn lỗi đó.
+### 3.2 Các hướng ngoài prompting
 
-Phân loại 27 câu sai của dev120 v4 và triage các câu sai v1–v3 cho thấy ba nhóm lỗi:
+Cuộc thi cho phép huấn luyện trên train, dữ liệu tổng hợp và dữ liệu công khai. Có ba hướng đáng cân nhắc, xếp theo tiềm năng:
 
-| nhóm lỗi | ví dụ | cách xử lý đề xuất |
+1. **Fine-tune bộ sinh mã** (SQL hoặc Python) trên dữ liệu sinh từ train. Phân tích chi tiết ở 3.3.
+2. **Mô hình quyết định trả lời / bỏ qua.** Học P(đúng) từ các đặc trưng có sẵn sau mỗi câu, rồi chọn ngưỡng tối đa hoá PA. Các đặc trưng gồm:
+   - kiểu đáp án và nhóm intent;
+   - câu hỏi có đi qua kiểm tra nào không, có phải sửa lỗi không;
+   - kết quả 0 hoặc rỗng;
+   - các mẫu có đồng thuận không;
+   - cửa hàng thuộc họ định dạng đã gặp hay chưa.
+
+   Mô hình rất nhỏ (logistic regression hoặc cây quyết định) nên gần như không tốn ngân sách tham số. Nó tấn công trực tiếp vào điểm yếu "precision ≈ ngưỡng hoà vốn". Dữ liệu huấn luyện là kết quả chạy toàn bộ train (thí nghiệm E0).
+3. **Học gán vai trò cột cho layout mới.** Một bộ phân loại nhỏ dựa trên tên cột, giá trị mẫu và README giúp ingestion khi gặp từ vựng lạ (ngành mới ở private). Hướng này để sau; chỉ làm nếu E0 cho thấy lỗi ingestion chiếm tỉ trọng đáng kể.
+
+### 3.3 Fine-tune Text-to-SQL có cải thiện kết quả không?
+
+**Có thể huấn luyện được không.** Train có 3000 câu kèm đáp án nhưng **không có chương trình mẫu** (gold SQL hay code). Có thể tạo dữ liệu huấn luyện theo kiểu *rejection-sampling fine-tuning* (STaR / RFT):
+1. cho model hiện tại sinh nhiều chương trình cho mỗi câu train;
+2. chạy từng chương trình;
+3. giữ lại những chương trình cho kết quả **khớp đáp án**;
+4. dùng các cặp (prompt, chương trình đúng) để fine-tune LoRA cho chính model đó.
+
+Dữ liệu như vậy hợp lệ (sinh từ train) và không cần model thầy bên ngoài. Có thể bổ sung chương trình từ một model mở lớn hơn chạy offline lúc huấn luyện. Ràng buộc 15B chỉ áp dụng khi suy luận, nhưng điều này cần xác nhận lại với luật.
+
+**Kỳ vọng cải thiện ở đâu**
+
+| loại lỗi | fine-tune có giúp không | lý do |
 |---|---|---|
-| **Logic nghiệp vụ**: định nghĩa sai, chiếm đa số | trung bình một đơn lệch ×2 (chia cho số dòng thay vì số đơn); "đơn ≥ X" ra 22381 trong khi gold là 1215 (đếm dòng); tỉ lệ huỷ 44,94% trong khi gold là 3,16% (map trạng thái sai); lợi nhuận gộp ×3; khách lẻ lọt vào bảng xếp hạng | semantic layer: primitive có định nghĩa rõ, kiểm thử với gold, cùng kiểm tra ngữ nghĩa (shadow) |
-| **Lỗi sinh mã**: KeyError, TypeError, lọc rỗng | quên cột `counted`, quên `in_period`, sai tên cột; lọc rỗng → 0 hoặc "không có dữ liệu" | canonical schema ổn định, ép kiểu khi ingest, API helper nhỏ và ổn định, 1 vòng sửa lỗi |
-| **Suy luận hoặc hiểu câu** | đọc `quý 2/2025` thành tháng 2; nhầm `5/25` là ngày 25/5; trả sai kiểu (percent thay vì số đếm) | chuẩn hoá tham số (tiền xử lý, gợi ý thời gian), kiểm tra kiểu đáp án, abstention |
+| Lỗi sinh mã (sai tên cột, sai kiểu, dùng sai hàm, quên lọc as-of) | **có, nhiều** | model học đúng "phương ngữ" của API và canonical schema; đây là chỗ fine-tune mạnh nhất trong các báo cáo Text-to-SQL với model 7B–14B (CodeS, OmniSQL) |
+| Định nghĩa nghiệp vụ của train (D5) | **có, trên các họ đã gặp** | model học thuộc các mặc định của rulebook train. 9/14 cửa hàng public thuộc họ đã gặp, nên có thể có lợi đáng kể ở public |
+| Quy tắc hoặc ngành mới ở private (D6) | **không chắc, có thể hại** | model đã fine-tune có xu hướng làm theo thói quen đã học thay vì đọc rulebook mới trong prompt (xung đột tri thức) |
+| Tốc độ | **có** | model đã fine-tune cần ít ví dụ few-shot hơn, nên prompt ngắn hơn và nhanh hơn. Điều này quan trọng với ngân sách 6 giờ |
+| Quyết định trả lời / bỏ qua | ít | đây là bài toán hiệu chỉnh xác suất, giải quyết tốt hơn bằng hướng 2 ở mục 3.2 |
 
-Đáng chú ý là **44,94% vẫn là một đáp án hợp lệ về cấu trúc**: kiểm tra cấu trúc không bắt được lỗi định nghĩa, chỉ kiểm tra ngữ nghĩa mới bắt được.
+**SQL hay Python làm ngôn ngữ đích**
+
+| | SQL | Python với semantic layer |
+|---|---|---|
+| Dữ liệu huấn luyện bổ sung | có các corpus Text-to-SQL công khai (Spider, BIRD) và model đã fine-tune sẵn | chỉ có dữ liệu tự sinh từ train |
+| Các phép nghiệp vụ (quy đổi đơn vị, kỳ âm lịch, làm tròn half-up, tie-break) | phải cài thành view hoặc macro trên một SQL engine nhúng chạy trên bảng đã chuẩn hoá | đã có sẵn dưới dạng hàm Python |
+| Khoảng cách miền | lớn: corpus công khai là tiếng Anh với DB sạch, khác nhiều với câu hỏi tiếng Việt nhiễu và dữ liệu thô | nhỏ |
+| Pipeline hiện có | phải viết lại phần thực thi và kiểm tra | dùng lại nguyên vẹn |
+
+**Đánh giá:**
+- Fine-tune nhiều khả năng **giảm lỗi sinh mã và tăng tốc độ**, và **tăng độ chính xác trên các họ định dạng đã gặp**.
+- Với ngành và quy tắc mới, lợi ích chưa chắc chắn, thậm chí có thể âm.
+- Lợi thế duy nhất của SQL là các corpus công khai. Corpus này lệch miền khá xa, nên nhóm đề xuất fine-tune trên **cùng không gian chương trình Python và semantic layer** trước, để tách riêng tác động của fine-tune khỏi tác động của việc đổi ngôn ngữ.
+
+Hai điều kiện để có kết luận đúng:
+1. **Đánh giá leave-family-out:** huấn luyện trên một số họ định dạng, đo trên các họ còn lại, để mô phỏng private.
+2. **Tăng cường bằng biến thể rulebook:** sửa một quy tắc trong rulebook (ví dụ "tính cả đơn có hàng trả"), tính lại đáp án bằng semantic layer với định nghĩa tương ứng, rồi đưa vào dữ liệu huấn luyện. Mục đích là dạy model *đọc* rulebook thay vì học thuộc.
+
+Vì dữ liệu huấn luyện phụ thuộc vào API của semantic layer, fine-tune chỉ nên làm **sau khi semantic layer ổn định** (thí nghiệm E5, mục 5).
+
+### 3.4 Lựa chọn
+
+**Khung chính:** A (LLM sinh mã Python) + semantic layer có kiểm thử + kiểm tra kết quả + mô hình quyết định trả lời / bỏ qua.
+
+**Hướng mở rộng:** fine-tune bộ sinh mã. Không dùng B (tool theo intent) và D (agent). C chỉ đáng xét lại nếu fine-tune cho thấy lợi ích và cần tận dụng corpus SQL công khai.
 
 ---
 
-## 3. Phản biện các kiến trúc thay thế
+## 4. Giải pháp đề xuất
 
-Bốn phương án ban đầu được đối chiếu với các quan sát ở mục 2.
-
-| phương án | đánh giá | quyết định |
-|---|---|---|
-| **A. LLM + pandas sandbox** | tổng quát nhất và đã có sẵn. Điểm yếu là logic nghiệp vụ nằm trong mã sinh ra, nên khó kiểm soát và khó debug | **giữ làm khung**; bù điểm yếu bằng semantic layer (E2) và kiểm tra kết quả (E3) |
-| **B. LLM + predefined tools theo intent** | precision cao trên các intent đã biết. Nhưng private có ngành và quy tắc mới, chỉ 4,2% khung câu public trùng train, và new intent (bảo hành, hoa hồng, thu cũ đổi mới) đã xuất hiện ngay ở public. Một tool áp quy tắc cũ sẽ **sai một cách tự tin** | **bỏ**; thay bằng *primitive* cấp thấp mà LLM ghép lại |
-| **C. LLM + Text-to-SQL (DuckDB)** | SQL không giải quyết ingestion và định nghĩa, vốn là hai nguồn lỗi chính. Dữ liệu nhỏ, pandas đủ. Lợi thế duy nhất có thể có: model sinh SQL ít lỗi thực thi hơn pandas | **có điều kiện (E4)**: chỉ thử nếu lỗi thực thi > khoảng 10% sau E2, và giữ nguyên mọi yếu tố khác |
-| **D. Hybrid agent** (SQL, tools, sandbox, điều phối nhiều bước) | nhiều lời gọi LLM cho mỗi câu; khó tái lập khi yêu cầu \|ΔPA\| ≤ 0,03; ngân sách khoảng 7 giây mỗi câu; model 9B điều phối kém | **bỏ** |
-
-Hướng còn lại là **A cộng một semantic layer có kiểm thử**: LLM vẫn linh hoạt khi gặp intent mới, còn phần định nghĩa được kiểm soát tập trung.
-
----
-
-## 4. Pipeline đề xuất
+### 4.1 Tổng quan
 
 ```
- Raw files (CSV · XLSX · SQLite · README)
+ File thô của cửa hàng (CSV · XLSX · SQLite · README)
         │
         ▼
- ┌─────────────────────────────┐
- │ 1. Ingestion & Preprocessing│  tất định, cache mỗi cửa hàng; INGEST_VERSION
- └──────────────┬──────────────┘
-                ▼
- ┌─────────────────────────────┐
- │ 2. Canonical Schema         │  sales_lines(), orders(), products, customers, …
- └──────────────┬──────────────┘  vai trò cột, đơn vị gốc, trạng thái chuẩn
-                ▼
- ┌─────────────────────────────┐
- │ 3. Semantic Layer           │  định nghĩa · primitive · kiểu/đơn vị · bất biến
- │    (dm.py, SEMANTIC_VERSION)│  kiểm thử hợp đồng với gold train
- └──────────────┬──────────────┘
-                │        Câu hỏi ──► Tiền xử lý câu hỏi (quy tắc + 1 lần LLM)
-                │                    └► gợi ý thời gian, tên danh mục, kỳ vọng đáp án
-                ▼                          │
- ┌─────────────────────────────┐ ◄─────────┘
- │ 4. Prompt + LLM sinh mã     │  rulebook, README, schema card, ví dụ train,
- │    (Qwen3.5-9B, greedy)     │  câu gốc + câu chuẩn hoá
- └──────────────┬──────────────┘
-                ▼
- ┌─────────────────────────────┐   lỗi thực thi → 1 vòng sửa
- │ 5. Sandbox                  │   (worker giữ bảng trong bộ nhớ, timeout, giới hạn RAM)
- └──────────────┬──────────────┘
-                ▼
- ┌─────────────────────────────┐   cứng: mâu thuẫn → 1 vòng kiểm lại → abstain
- │ 6. Result Validation        │   cấu trúc: kiểu, kỳ, k, bất biến
- │                             │   ngữ nghĩa: tính lại bằng primitive (shadow)
- └──────────────┬──────────────┘
-                ▼
- ┌─────────────────────────────┐
- │ 7. Finalize + Abstention    │──► answer │ unanswerable │ abstain
- └─────────────────────────────┘    submission.jsonl + logs/<id>.json
+ ① Ingestion ─────────► ② Canonical schema
+   (một lần / cửa hàng,     sales_lines · orders · các bảng đã làm sạch
+    tất định, cache)        (sản phẩm, khách, nhập, tồn, lô, công nợ…)
+                                   │
+                                   ▼
+                            ③ Semantic layer
+                              hàm kỳ thời gian · hàm định nghĩa (doanh thu,
+                              trung bình đơn…) · hàm xếp hạng / tìm tên ·
+                              hàm xuất đáp án (kiểu, làm tròn)
+                                   │
+ Câu hỏi ──► ④ Chuẩn hoá câu hỏi ──┤
+             (quy tắc + 1 lần LLM)  │
+             → câu chuẩn, kỳ thời   │
+               gian, tên, kỳ vọng   ▼
+               về đáp án     ⑤ LLM sinh chương trình ──► ⑥ Sandbox chạy
+                                   ▲                          │
+                                   │  lỗi chạy, hoặc đáp án   ▼
+                                   └── mâu thuẫn (1 vòng) ◄─ ⑦ Kiểm tra kết quả
+                                                              │
+                                                              ▼
+                                                     ⑧ Finalize + quyết định
+                                                       đáp án │ unanswerable │ abstain
 ```
 
-### 4.1 Ingestion và canonical schema (đã có)
-Bước này biến mỗi cửa hàng thành các bảng sạch, kèm một schema card cho prompt. Từ đó dựng `sales_lines()` (dòng hàng đã nối với header đơn, đơn vị gốc, cờ `counted`) và `orders()` (một dòng mỗi đơn).
+### 4.2 Ví dụ xuyên suốt (minh hoạ)
 
-Các kiểm thử hồi quy so với gold train hiện đạt:
-- doanh thu tháng 168 câu;
-- số đơn huỷ và tỉ lệ huỷ 204/208;
-- top-k 32/33.
+Câu hỏi: `dthu tb moi don th3/25 bnhiu z`, với `as_of_date` = 2025-06-30.
 
-### 4.2 Semantic layer, một hợp đồng ngữ nghĩa có kiểm thử
-Mỗi primitive phải thoả bốn điều kiện:
-1. định nghĩa nghiệp vụ được ghi trong docstring và trích từ rulebook;
-2. quy tắc tập trung ở một chỗ (đơn được tính, đơn vị gốc, as-of, làm tròn);
-3. kiểu và đơn vị rõ ràng (tiền là số nguyên VND, percent đã nhân 100, số đếm là số nguyên);
-4. có **kiểm thử hợp đồng** với gold train, và mọi thay đổi định nghĩa phải tăng `SEMANTIC_VERSION`.
+| bước | kết quả |
+|---|---|
+| ④ quy tắc | `Doanh thu trung bình mỗi đơn tháng 3/2025 bao nhiêu vậy` (`dthu` → doanh thu, `tb` → trung bình, `th3/25` → tháng 3/2025, `bnhiu` → bao nhiêu, `z` → vậy) |
+| ④ LLM | `{"normalized": "...", "answer_type": "number", "top_k": null, "sub_questions": [...]}` |
+| ④ kỳ thời gian | `"tháng 3/2025" -> month(2025, 3) = 2025-03-01..2025-03-31` |
+| ④ kỳ vọng | đáp án kiểu number, là tiền VND |
+| ⑤ LLM sinh | `answer_number(avg_order_value(month(2025, 3)), kind='money')` |
+| ⑥ chạy | 187 500 |
+| ⑦ kiểm tra | đúng kiểu; số nguyên; ≥ 1000 đ; tính lại độc lập bằng `avg_order_value(month(2025, 3))` cũng ra 187 500, nên đồng thuận |
+| ⑧ finalize | `{"type": "number", "answer": 187500}` |
 
-Lệnh `datamate semantic-check` chạy các kiểm thử này trong 18 giây, không cần LLM. Kết quả ở `SEMANTIC_VERSION` 2026-11-03.1:
+Nếu LLM tự viết `doanh thu / số dòng hàng` thay vì `/ số đơn`, kết quả sẽ lệch khoảng ×2 mà vẫn "trông hợp lý". Bước ⑦ phát hiện ra sự khác biệt này nhờ tính lại bằng hàm định nghĩa, và gửi lại cho LLM một lần (xem 4.7).
 
-| hợp đồng | câu khớp mẫu | tính được | khớp gold | bỏ qua |
-|---|---|---|---|---|
-| `avg_order_value(p)` (mới) | 167 | 167 | **167/167** | 0 |
-| `revenue(p)` | 291 | 259 | **259/259** | 14 cửa hàng không có `sales_lines`, 18 câu có nhiều kỳ |
-| số đơn (`orders()` + `counted`) | 167 | 136 | **136/136** | 11 không có `sales_lines`, 15 nhiều kỳ |
-| số đơn huỷ | 100 | 100 | **100/100** | 0 |
-| tỉ lệ huỷ | 104 | 104 | **104/104** | 0 |
+### 4.3 Ingestion và canonical schema
 
-Ứng viên tiếp theo cho E2, ưu tiên theo tần suất câu hỏi và lỗi đã gặp:
-- `customer_sales(p)`: loại khách lẻ, định danh theo mã, gộp các biến thể tên;
-- `qty_sold(p)`: theo đơn vị gốc;
-- `debt_at(d)` và `debt_aging`;
-- `gross_profit(p)`: lấy giá vốn ghi trên dòng bán;
-- `stock_at(d)`.
+**Ingestion** (đã có) làm các việc sau cho mỗi cửa hàng, rồi cache kết quả:
+- tìm dòng tiêu đề thật, bỏ dòng tiêu đề phụ, dòng lọc và dòng trống;
+- gộp các sheet theo tháng và các file bị chia nhỏ;
+- đọc tiền, số lượng kèm đơn vị và ngày trộn định dạng;
+- gán **vai trò** cho từng cột (mã đơn, ngày, sản phẩm, số lượng, đơn vị, thành tiền, khách, trạng thái...) dựa trên từ vựng của README và tên cột;
+- điền lại ô trống ở dòng tiếp theo của một đơn; bỏ dòng trùng trong một đơn;
+- chuẩn hoá trạng thái về một bộ nhãn chung (hoàn thành, huỷ, trả hàng, đang giao...).
 
-Primitive **không** phải intent tool. Nó trả về một đại lượng hoặc một bảng, còn LLM vẫn tự lọc, nhóm, xếp hạng và định dạng.
+**Canonical schema** là một vài bảng có tên cột và ý nghĩa cố định, *giống nhau ở mọi cửa hàng*, để LLM và các hàm định nghĩa không phải đoán.
 
-### 4.3 Tiền xử lý câu hỏi (đã có, chưa đo trên dev)
-Chi tiết ở mục 2.3. Các quy tắc làm thay đổi 1873/3000 câu train trong khoảng 0,1 giây.
-
-Lần gọi LLM viết lại tốn khoảng 2–3 giây mỗi câu trên Mac. Ở 44 câu mẫu, nó đoán đúng kiểu đáp án 43/44; câu sai có gold là unanswerable. Một lần viết lại không qua kiểm tra sẽ bị bỏ, và pipeline dùng bản đã qua quy tắc.
-
-### 4.4 Sinh mã và sandbox (đã có)
-Mô hình là Qwen3.5-9B, chạy greedy, tắt thinking. LLM viết một chương trình pandas ngắn và kết thúc bằng `answer_*()` hoặc `unanswerable()`. Chương trình chạy trong worker process có timeout và giới hạn bộ nhớ; nếu lỗi, có 1 vòng sửa kèm traceback.
-
-### 4.5 Kiểm tra kết quả (mới): cấu trúc và ngữ nghĩa
-| tầng | kiểm tra gì | đo offline (log các lượt chạy trước + gold) |
+| bảng | một dòng là | các cột chính |
 |---|---|---|
-| Kỳ vọng từ câu hỏi (cứng) | kiểu đáp án, tháng hay ngày, đáp án ngày nằm trong kỳ hỏi, độ dài top-k | gợi ý đúng 100% trên 808 câu; kỳ 141/141; top-k 120/120 trên gold |
-| Bất biến cấu trúc (không cần dữ liệu) | tỉ lệ trong [0, 100]; số đếm nguyên; số ngày ≤ độ dài kỳ; dấu âm chỉ khi câu hỏi về chênh lệch hoặc lãi lỗ; tiền < 1000 đ là sai đơn vị; khách lẻ trong xếp hạng | **0/2930** báo nhầm trên gold; bắt được **4/113** câu sai |
-| Ngữ nghĩa (shadow) | nếu câu hỏi đúng một đại lượng có hợp đồng và đúng một kỳ, tính lại bằng primitive; nếu lệch thì gợi ý lời gọi đúng cho vòng kiểm lại | bắt **16/16** câu sai trong phạm vi; **0/44** báo nhầm trên câu đúng |
+| `sales_lines()` | một mặt hàng trong một đơn bán | `order_id`, `date` (ngày đặt), `product_id`, `product_name`, `qty` / `qty_base` (số lượng, và số lượng quy về đơn vị gốc), `amount` (thành tiền sau chiết khấu dòng), `customer_id` / `customer_name`, `walkin` (khách lẻ), `status`, `counted` (dòng có được tính vào doanh thu theo rulebook: đơn không huỷ, không có dòng trả, là hàng hoá chứ không phải phí hay voucher), cộng các thuộc tính của đơn (kênh, hình thức thanh toán) và của sản phẩm (nhóm, giá vốn, hoạt chất...) |
+| `orders()` | một đơn | `order_id`, `date`, `status`, khách, `goods_amount` (tiền hàng của đơn), `counted` |
+| các bảng khác | tuỳ cửa hàng | sản phẩm, khách, phiếu nhập, tồn kho, lô thuốc, công nợ, nhân viên, ca: là bảng gốc đã làm sạch và gán vai trò cột. Dự kiến chuẩn hoá thêm các bảng `customers`, `stock`, `debt` khi có hàm định nghĩa tương ứng |
 
-Số liệu này xác nhận điều đã nêu ở mục 2.5: kiểm tra cấu trúc rất an toàn nhưng chỉ bắt được ít lỗi, còn kiểm tra ngữ nghĩa bắt gần hết lỗi định nghĩa nhưng chỉ áp dụng cho các đại lượng có hợp đồng.
+Ingestion cũng sinh một **schema card** cho mỗi cửa hàng: danh sách bảng, cột, vai trò và giá trị mẫu. Schema card được đưa vào prompt.
 
-### 4.6 Finalize và abstention
-`finalize` bảo đảm format như mục 2.4. Kiểm tra cứng không qua sau vòng kiểm lại dẫn tới abstain. Unanswerable chỉ được đưa ra khi có bằng chứng tất định, nếu không thì abstain.
+### 4.4 Semantic layer
 
-Câu hỏi mở cho Phase 5: hiệu chỉnh ngưỡng abstain theo precision của từng nhóm intent, dùng chính E0 (mục 5).
+**Primitive là gì.** Primitive là một hàm tất định trả về *một đại lượng nghiệp vụ hoặc một tập dữ liệu đã áp định nghĩa*, không phải đáp án của một loại câu hỏi. LLM vẫn tự lọc, nhóm, xếp hạng và định dạng, nhưng không phải tự cài lại các định nghĩa.
+
+| nhóm | hàm (ví dụ) | ý nghĩa |
+|---|---|---|
+| Kỳ thời gian | `month(y, m)`, `quarter(y, q)`, `week_prev()`, `this_month()`, `prev_month_same_days()`, `ytd()`, `last_n_days(n)`, `tet(y)`, `prev_period(p)`, `same_period_last_year(p)`, `in_period(dates, p)` | trả về một khoảng ngày, **đã cắt theo as-of**, theo đúng quy ước của rulebook (tuần từ thứ Hai, Tết theo lịch âm...) |
+| Dữ liệu đã định nghĩa | `sales_lines()`, `orders()` | các bảng canonical ở 4.3 |
+| Đại lượng | `revenue(p)`, `avg_order_value(p)`, `price_on(product, day)` | doanh thu theo định nghĩa mặc định; doanh thu / số đơn được tính, làm tròn half-up; giá bán tại một ngày |
+| Tiện ích | `rank_top(...)`, `find(name)`, `is_walkin(...)`, `pct_change(a, b)`, `round_half_up(x, n)` | xếp hạng với tie-break theo mã; tìm tên trong danh mục; nhận diện khách lẻ; phần trăm thay đổi |
+| Xuất đáp án | `answer_number(x, kind='money')`, `answer_percent`, `answer_list`, `answer_table`, `answer_month`, `unanswerable(reason)` | ép đúng kiểu, làm tròn và format |
+
+**Mỗi primitive là một hợp đồng.** Một primitive phải có:
+1. định nghĩa nghiệp vụ viết rõ, trích từ rulebook;
+2. quy tắc đặt ở một chỗ duy nhất;
+3. kiểu và đơn vị rõ ràng (tiền là số nguyên VND, percent đã nhân 100);
+4. **kiểm thử hợp đồng**: chọn các câu train hỏi *đúng* đại lượng đó trong *đúng một* kỳ, tính bằng hàm và so với đáp án;
+5. **số version**: mọi thay đổi định nghĩa phải tăng version, và kết quả chạy ghi lại version đã dùng.
+
+Kết quả kiểm thử hợp đồng hiện tại, chỉ dùng hàm và đáp án train (không có LLM):
+
+| hợp đồng | số câu kiểm được | khớp đáp án |
+|---|---|---|
+| giá trị trung bình một đơn | 167 | 167 |
+| doanh thu | 259 | 259 |
+| số đơn | 136 | 136 |
+| số đơn huỷ | 100 | 100 |
+| tỉ lệ huỷ | 104 | 104 |
+
+Các primitive dự kiến tiếp theo:
+- doanh số theo khách (loại khách lẻ, định danh theo mã, gộp biến thể tên);
+- số lượng bán theo đơn vị gốc;
+- công nợ tại một ngày và phân nhóm tuổi nợ;
+- lợi nhuận gộp (giá vốn ghi trên dòng bán);
+- tồn kho cuối ngày.
+
+### 4.5 Chuẩn hoá câu hỏi
+
+Bước này chạy **quy tắc tất định trước**, theo thứ tự sau:
+1. **Telex dư:** `nhaats` → nhất, `cuwar` → cửa. Một từ chỉ được giải khi kết quả là âm tiết tiếng Việt hợp lệ (âm đầu + vần), nên `check`, `plus` hay tên thương hiệu không bị đổi.
+2. **Tên trong danh mục:** tìm tên sản phẩm, khách, nhân viên hay nhóm hàng của cửa hàng trong câu, có tôn trọng dấu (`tháng` không bị nhận nhầm thành tên `Thắng`). Tên khớp chính xác được thay bằng cách viết trong dữ liệu và được khoá lại để các bước sau không sửa.
+3. **Từ điển** viết tắt, teen-code, phương ngữ và tiếng Anh: `dthu`, `bnhiu`, `z`, `mik`, `mô`, `ni`, `revenue`. Các từ mơ hồ chỉ được đổi theo ngữ cảnh, ví dụ `k` sau một con số là nghìn, còn lại là "không".
+4. **Tiền và ngày:** `3tr7` → 3.700.000 đồng; `th7/26` → tháng 7/2026; `quý 2/25` → quý 2 năm 2025.
+
+Sau đó có **một lần gọi LLM** (greedy, ≤ 400 token) trả về JSON: câu chuẩn hoá, kiểu đáp án dự đoán, k của top-k, các câu hỏi con và các tên nhắc tới. Kết quả bị **loại** (quay về bản đã qua quy tắc) nếu LLM làm đổi một con số, mất một tên chính xác, hoặc bỏ một từ thuộc tên trong danh mục.
+
+LLM sinh mã ở bước sau thấy **cả câu gốc và câu chuẩn hoá**; nếu mâu thuẫn, câu gốc thắng. Kỳ thời gian được giải từ bản đã qua quy tắc thành các lời gọi hàm (D8).
+
+### 4.6 Sinh mã và sandbox
+
+Prompt gồm:
+- rulebook;
+- tài liệu API của semantic layer;
+- README và schema card của cửa hàng;
+- 2–4 ví dụ train gần nhất (không lấy từ cùng cửa hàng);
+- câu hỏi gốc và câu chuẩn hoá, kỳ thời gian và kỳ vọng về đáp án.
+
+LLM (hiện là Qwen3.5-9B, greedy) viết một chương trình ngắn kết thúc bằng một hàm `answer_*()` hoặc `unanswerable()`. Chương trình chạy trong một tiến trình riêng, có sẵn bảng trong bộ nhớ, có timeout và giới hạn RAM. Nếu chương trình lỗi, LLM được sửa **một lần** với traceback.
+
+### 4.7 Kiểm tra kết quả
+
+Hai khái niệm cần phân biệt:
+- **Kiểm tra cứng:** quy tắc đúng gần 100% trên đáp án train. Nếu đáp án vi phạm thì gần như chắc chắn sai. Hệ thống gửi cho LLM chương trình cũ kèm thông báo vi phạm và cho sửa **một vòng**. Nếu vẫn vi phạm thì **abstain**, tức nhận 0 thay vì −1.
+- **Kiểm tra mềm:** chỉ là gợi ý cho LLM, không ép abstain. Ví dụ, kiểu đáp án do LLM ở bước ④ đoán là kiểm tra mềm, vì bản thân nó có thể sai.
+
+Có hai tầng kiểm tra:
+
+**Tầng 1: kiểm tra cấu trúc.** Tầng này xét *hình dạng* của đáp án, không cần tính lại từ dữ liệu.
+
+| kiểm tra | ví dụ vi phạm | cơ sở |
+|---|---|---|
+| Kiểu | câu hỏi "tỉ lệ huỷ bao nhiêu %" nhưng đáp án là number | gợi ý kiểu đúng 100% trên 808 câu (D11) |
+| Tháng hay ngày | "tháng nào" nhưng trả `2025-03-15` | như trên |
+| Kỳ | "ngày nào trong tháng 10" nhưng trả `2025-11-01` | đáp án ngày luôn trong kỳ hỏi (141/141) |
+| k | "top 3" nhưng trả 4 phần tử | 120/120 |
+| Bất biến | tỉ lệ ngoài [0, 100]; số đếm không nguyên; số ngày dài hơn kỳ; số âm khi câu hỏi không về chênh lệch hay lãi lỗ; tiền < 1000 đ (sai đơn vị); khách lẻ trong xếp hạng khách | 0 báo nhầm trên 2930 đáp án train |
+
+**Tầng 2: kiểm tra ngữ nghĩa (tính lại bằng primitive).** Tầng cấu trúc không bắt được lỗi định nghĩa. Ví dụ, tỉ lệ huỷ 44,94% thay vì 3,16% (do map trạng thái sai) vẫn là một phần trăm hợp lệ về hình dạng.
+
+Cách làm như sau. Khi câu hỏi hỏi *đúng một* đại lượng có hợp đồng (doanh thu, trung bình đơn, số đơn, số đơn huỷ, tỉ lệ huỷ) trong *đúng một* kỳ, hệ thống tính lại đại lượng đó bằng primitive. Nếu đáp án của LLM khác, LLM nhận một thông báo dạng "đáp án khác định nghĩa của rulebook; hãy tính lại bằng `avg_order_value(month(2025, 3))`" và được sửa một vòng. Nếu vẫn khác thì abstain.
+
+Vì sao *kiểm tra* bằng primitive mà không *thay* đáp án bằng primitive:
+- Bộ nhận diện "câu này hỏi đúng đại lượng X" có thể sai, ví dụ câu có thêm điều kiện lọc mà bộ nhận diện bỏ sót. Lúc đó chương trình của LLM mới là chương trình đúng.
+- Dùng làm kiểm tra thì hai đường tính độc lập phải **đồng thuận**. Khi đồng thuận, độ tin cậy cao. Khi lệch, LLM có một cơ hội xem lại. Khi vẫn lệch, hệ thống bỏ qua, và cái giá là 0 chứ không phải −1.
+
+### 4.8 Finalize và quyết định trả lời
+
+**Finalize** bảo đảm đúng format:
+- số nguyên khi giá trị nguyên;
+- percent làm tròn 2 chữ số, −0 thành 0;
+- ngày đúng `YYYY-MM-DD` hoặc `YYYY-MM`;
+- bảng lưu theo cột thì chuyển vị;
+- bất cứ thứ gì sai dạng → abstain.
+
+Lỗi format không bao giờ được phép thành −1.
+
+**Quyết định trả lời / bỏ qua:**
+- hiện tại: abstain khi kiểm tra cứng thất bại sau vòng sửa, hoặc khi không chương trình nào chạy ra đáp án;
+- unanswerable chỉ khi có bằng chứng tất định;
+- dự kiến: mô hình P(đúng) và ngưỡng theo nhóm intent (thí nghiệm E4).
 
 ---
 
-## 5. Kế hoạch thí nghiệm
+## 5. Thí nghiệm, theo mức ưu tiên
 
 Nguyên tắc chung:
-- mỗi thí nghiệm **chỉ đổi một yếu tố**; giữ cố định model, rulebook, bộ câu hỏi, cấu hình sinh và môi trường thực thi;
-- so sánh **theo cặp** trên cùng các câu, bằng `datamate compare`, có bootstrap CI 95% cho ΔPA.
+- mỗi thí nghiệm **chỉ đổi một yếu tố**; model, rulebook, bộ câu hỏi, cấu hình sinh và môi trường chạy giữ cố định;
+- so sánh **theo cặp** trên cùng các câu, kèm khoảng tin cậy bootstrap 95% của ΔPA;
+- các lượt chạy toàn bộ train làm trên Kaggle (2× T4).
 
-| # | giả thuyết | nhánh so sánh | giữ cố định | thước đo chính | tiêu chí giữ lại |
-|---|---|---|---|---|---|
-| **E0** | (baseline) đo pipeline hiện tại trên toàn bộ train để phân tích lỗi theo nhóm | commit `33d0413` (pipeline `98d4c7b`), `--normalize llm`, toàn bộ 3000 câu train, Kaggle 2× T4 | n/a | outcomes, PA theo kiểu / cửa hàng / họ / intent | n/a: là mốc cho E1–E4 và dữ liệu để hiệu chỉnh abstention |
-| **E1** | chuẩn hoá câu hỏi giảm lỗi hiểu câu và lỗi kiểu | `--normalize off` vs `llm` | toàn bộ phần còn lại | ΔPA, số sai, chuyển trạng thái đúng↔sai | ΔPA > 0 và số sai không tăng; nếu `llm` không hơn `rules` thì bỏ lần gọi LLM để tiết kiệm thời gian |
-| **E2** | primitive có kiểm thử giảm lỗi logic nghiệp vụ | semantic layer hiện tại vs mở rộng (mục 4.2) | **tắt kiểm tra ngữ nghĩa** để không lẫn với E3 | (1) contract test trên gold, không cần LLM; (2) ΔPA và số sai ở các nhóm intent có primitive mới | contract test đạt 100% trên các câu tính được; ΔPA > 0 ở nhóm liên quan |
-| **E3** | kiểm tra kết quả chuyển câu sai thành abstain mà không mất câu đúng | kiểm tra tắt / chỉ cấu trúc / cấu trúc + ngữ nghĩa | semantic layer cố định | số sai bị bắt (recall), số đúng bị abstain nhầm, ΔPA | báo nhầm ≤ 1% câu đúng; ΔPA > 0 |
-| **E4** (có điều kiện) | sinh SQL (DuckDB) ít lỗi thực thi hơn pandas | pandas vs DuckDB SQL trên **cùng** canonical schema và semantic layer (primitive được expose thành view hoặc macro) | semantic layer, rulebook, câu hỏi, model, môi trường thực thi | tỉ lệ `exec_failure`, ΔPA | chỉ chạy nếu `exec_failure` > khoảng 10% câu sau E2 |
+| ưu tiên | thí nghiệm | câu hỏi cần trả lời | mức cần thiết |
+|---|---|---|---|
+| 1 | **E0: baseline toàn bộ train** | pipeline hiện tại sai ở đâu, theo kiểu đáp án, họ định dạng và intent? | **bắt buộc**: mọi thí nghiệm khác so với nó (đang chạy) |
+| 2 | **E3: kiểm tra kết quả** | kiểm tra cấu trúc và ngữ nghĩa chuyển được bao nhiêu câu sai thành abstain, và làm mất bao nhiêu câu đúng? | **cao**: rẻ, tác động trực tiếp lên precision |
+| 3 | **E2: mở rộng semantic layer** | primitive có kiểm thử giảm lỗi định nghĩa bao nhiêu? | **cao**: nhắm vào nguồn lỗi lớn nhất (D5) |
+| 4 | **E4: mô hình quyết định trả lời / bỏ qua** | ngưỡng abstain học từ dữ liệu cải thiện PA bao nhiêu so với quy tắc cố định? | **cao**: chi phí thấp, dùng lại dữ liệu E0 |
+| 5 | **E1: chuẩn hoá câu hỏi** | chuẩn hoá có giúp không; lần gọi LLM có đáng thời gian so với chỉ dùng quy tắc? | **trung bình**: quyết định giữ hay bỏ 2–3 giây mỗi câu |
+| 6 | **E5: fine-tune bộ sinh mã** | fine-tune có tăng PA trên họ định dạng chưa gặp không? | **khám phá**: tiềm năng cao nhưng tốn kém, làm sau khi semantic layer ổn định |
+| + | **Độ biến thiên** | hai lần chạy cùng cấu hình lệch nhau bao nhiêu? | **bắt buộc**, đi kèm E0: là sàn nhiễu để đọc mọi ΔPA, và liên quan trực tiếp tới quy định \|ΔPA\| ≤ 0,03 |
 
-Thứ tự: E0 → E1 → (E2 ∥ E3, cài song song, đo riêng) → E4 nếu cần → một lượt public trên Kaggle để xác nhận.
+### E0: baseline trên toàn bộ train (đang chạy)
 
-**E0 đang chạy.** Toàn bộ 3000 câu train được chạy trên Kaggle với đúng pipeline hiện tại. Kết quả nằm ở `outputs/kaggle/result_train/out/train/`, gồm `report.json` và `logs/<id>.json`. Dùng nó để:
-1. phân loại lỗi theo ba nhóm ở mục 2.5, theo kiểu đáp án, theo họ định dạng và theo intent;
-2. ước lượng precision theo nhóm, làm cơ sở cho chính sách abstain (Phase 5);
-3. chọn primitive cho E2 theo số câu sai mà mỗi primitive có thể sửa.
+- **Là gì:** chạy pipeline hiện tại (chuẩn hoá đầy đủ, kiểm tra hai tầng, 1 mẫu greedy) trên cả 3000 câu train, rồi so với đáp án.
+- **Vì sao:** tập dev 120 câu có sai số chuẩn của PA khoảng 0,07, quá lớn để so sánh các thay đổi. Toàn bộ train cho sai số khoảng 0,016 và đủ câu cho từng nhóm. E0 cung cấp:
+  1. phân loại lỗi theo nhóm: định nghĩa, sinh mã, hiểu câu, ingestion;
+  2. precision theo kiểu đáp án, họ định dạng và intent;
+  3. dữ liệu huấn luyện cho E4 và dữ liệu khởi đầu cho E5.
+- **Kết quả dùng để:** chọn primitive cho E2 theo số câu sai mà mỗi primitive sửa được; quyết định thứ tự của các thí nghiệm sau.
+- **Đi kèm:** chạy lại đúng cấu hình đó thêm một lần để đo độ biến thiên.
 
-**Việc cần làm thêm cho E2 và E3:** thêm cờ CLI để bật hoặc tắt từng tầng kiểm tra (`--checks off|structural|all`). Hiện cả hai tầng luôn bật.
+### E3: kiểm tra kết quả
+
+- **Là gì:** ba nhánh: (a) tắt kiểm tra, (b) chỉ tầng cấu trúc, (c) cấu trúc + ngữ nghĩa. Semantic layer giữ cố định.
+- **Vì sao:** dưới metric có phạt, chuyển một câu sai thành abstain được +1, ngang với sửa đúng một câu. Các kiểm tra dựa trên quy luật D11 gần như không báo nhầm trên đáp án train, nhưng cần đo **trên đáp án do model sinh ra**, nơi báo nhầm có thể khác.
+- **Đo:** số câu sai bị bắt (recall); số câu đúng bị chuyển nhầm thành abstain; ΔPA; chi phí thời gian của vòng sửa.
+- **Giữ lại nếu:** báo nhầm ≤ 1% số câu đúng và ΔPA > 0.
+- **Cần thêm:** cờ để bật hoặc tắt từng tầng. Hiện cả hai tầng luôn bật.
+
+### E2: mở rộng semantic layer
+
+- **Là gì:** thêm các primitive ở 4.4 (doanh số theo khách, số lượng theo đơn vị gốc, công nợ, lợi nhuận gộp, tồn kho), mỗi primitive có kiểm thử hợp đồng. So sánh semantic layer hiện tại với bản mở rộng, **tắt kiểm tra ngữ nghĩa** để không lẫn với E3.
+- **Vì sao:** lỗi định nghĩa là nguồn lỗi chính dự kiến (D5). Một định nghĩa được cài một lần và kiểm thử sẽ đúng ở mọi câu dùng nó, thay vì phụ thuộc vào việc LLM nhớ đủ khoảng 6 quy tắc mỗi lần.
+- **Đo:** (1) kiểm thử hợp đồng trên đáp án train (không cần LLM, chạy trong vài chục giây); (2) ΔPA và số câu sai ở các nhóm intent có primitive mới.
+- **Giữ lại nếu:** kiểm thử hợp đồng khớp 100% trên các câu tính được, và ΔPA > 0 ở nhóm liên quan.
+- **E2 và E3 cài song song nhưng đo tách riêng:** cả hai đều dùng primitive, và nếu đo chung sẽ không biết lợi ích đến từ việc LLM dùng hàm đúng hay từ việc kiểm tra bắt lỗi.
+
+### E4: mô hình quyết định trả lời / bỏ qua
+
+- **Là gì:** từ kết quả E0, học P(đúng) của mỗi câu bằng một mô hình nhỏ trên các đặc trưng ở 3.2, rồi chọn ngưỡng (có thể theo nhóm intent) để tối đa hoá PA. Đánh giá bằng kiểm định chéo theo cửa hàng hoặc theo họ định dạng.
+- **Vì sao:** PA phụ thuộc trực tiếp vào precision. Một nhóm intent có precision 45% nên bỏ qua toàn bộ; một nhóm 90% nên luôn trả lời. Quy tắc cố định hiện tại không phân biệt được hai trường hợp này.
+- **Đo:** PA, coverage và precision trên phần giữ lại; độ lệch hiệu chỉnh (calibration) khi chuyển sang họ chưa gặp.
+- **Rủi ro:** mô hình học trên train sẽ tự tin quá mức trên ngành mới. Vì vậy dùng đặc trưng "họ đã gặp hay chưa" và đánh giá leave-family-out.
+
+### E1: chuẩn hoá câu hỏi
+
+- **Là gì:** ba nhánh: (a) tắt chuẩn hoá, (b) chỉ quy tắc, (c) quy tắc + 1 lần LLM.
+- **Vì sao:** câu hỏi rất nhiễu (D7, D8), nhưng không rõ nhiễu chiếm bao nhiêu phần lỗi. Lần gọi LLM tốn 2–3 giây mỗi câu, trong khi ngân sách thời gian chặt. Nếu (b) ≈ (c) thì bỏ lần gọi LLM.
+- **Đo:** ΔPA; số câu chuyển giữa sai, đúng và abstain; lỗi sai kiểu và sai kỳ nói riêng; thời gian mỗi câu.
+
+### E5: fine-tune bộ sinh mã
+
+- **Là gì:**
+  1. tạo dữ liệu bằng rejection sampling trên train (3.3);
+  2. fine-tune LoRA trên chính model đang dùng, để tổng tham số không đổi;
+  3. huấn luyện có biến thể rulebook;
+  4. so sánh model đã fine-tune với model prompting trên **họ định dạng bị giữ lại** (leave-family-out).
+- **Vì sao:** đây là hướng duy nhất có thể giảm đồng thời lỗi sinh mã và thời gian mỗi câu. Lợi ích trên ngành mới thì chưa chắc (3.3).
+- **Đo:** PA, tỉ lệ lỗi thực thi và thời gian mỗi câu, tách theo họ đã gặp và họ bị giữ lại; độ nhạy khi rulebook thay đổi (có làm theo quy tắc mới không).
+- **Điều kiện bắt đầu:** E2 đã ổn định API, vì dữ liệu huấn luyện viết bằng API đó. Cần GPU huấn luyện; T4 của Kaggle chỉ đủ cho QLoRA chậm, nên có thể phải thuê GPU.
+- **Mức cần thiết:** khám phá. Chỉ đưa vào bản nộp nếu thắng prompting trên họ bị giữ lại.
+
+**Thứ tự dự kiến:** E0 (+ chạy lặp) → E3 và E2 (cài song song, đo riêng) → E4 → E1 → E5 nếu còn thời gian → một lượt public trên Kaggle để xác nhận trước khi đóng gói Docker.
 
 ---
 
 ## 6. Phương pháp đánh giá
 
 **Phân loại kết quả mỗi câu:**
-- correct, incorrect;
-- abstain chia theo nguyên nhân:
-  - `exec_failure`: không chương trình nào chạy ra đáp án;
-  - `validation`: một kiểm tra đã từ chối đáp án;
-  - `vote`: các mẫu không đồng thuận;
-  - `format`: finalize từ chối.
+- đúng; sai;
+- abstain, chia theo nguyên nhân:
+  - không chương trình nào chạy ra đáp án;
+  - bị kiểm tra từ chối;
+  - các mẫu không đồng thuận;
+  - sai format.
 
-Cách chia này giúp thấy rõ PA tăng vì trả lời đúng hơn hay chỉ vì abstain nhiều hơn.
+Cách chia này cho thấy PA tăng vì trả lời đúng hơn hay chỉ vì bỏ qua nhiều hơn.
 
 **Chỉ số:**
-- PA = (đúng − sai) / N;
+- PA;
 - Coverage = (đúng + sai) / N;
-- Accuracy_answered = đúng / (đúng + sai), tức precision;
-- thời gian mỗi câu.
+- Precision = đúng / (đúng + sai);
+- thời gian mỗi câu, vì ngân sách là 6 giờ.
 
-**Độ tin cậy thống kê:**
-- Độ lệch chuẩn của điểm mỗi câu khoảng 0,8–0,9, nên SE của PA khoảng **0,07 trên dev120**, 0,03 trên 1000 câu và 0,016 trên 3000 câu.
-- Ví dụ: dev120 v2 → v4 cải thiện +0,167 nhưng CI 95% là [−0,008; 0,358], tức **chưa có ý nghĩa thống kê**.
-- Hệ quả: dev120 chỉ dùng để kiểm tra nhanh; quyết định giữ hay bỏ dựa trên toàn bộ train (hoặc một tập ≥ 400 câu phân tầng) chạy trên Kaggle.
-
-**Độ biến thiên và tái lập:** chạy lại **cùng một cấu hình** hai lần (vLLM greedy có thể không tất định khi batch khác nhau) và báo cáo |ΔPA| giữa hai lần. Con số này vừa là sàn nhiễu cho các thí nghiệm, vừa liên quan trực tiếp tới quy định |ΔPA| ≤ 0,03.
+**Thống kê:**
+- Điểm mỗi câu có độ lệch chuẩn khoảng 0,8–0,9, nên sai số chuẩn của PA khoảng 0,07 trên 120 câu, 0,03 trên 1000 câu và 0,016 trên 3000 câu.
+- So sánh theo cặp kèm bootstrap CI 95%.
+- Báo cáo độ biến thiên giữa các lần chạy lặp cùng cấu hình.
 
 **Phân tích theo nhóm:** theo kiểu đáp án, họ định dạng, ngành, intent, và câu một kỳ so với nhiều kỳ.
 
 **Tổng quát hoá:**
-- Train chỉ có các họ đã thấy, nên cần đánh giá leave-family-out: các họ được nhận diện từ cấu trúc bảng, và ví dụ few-shot chỉ lấy từ họ khác.
-- Các cửa hàng public thuộc họ mới (dev_007/008, dev_011–014) không có gold; chỉ dùng tỉ lệ abstain và kiểm tra hợp lý trên chúng làm tín hiệu định tính.
+- Đánh giá leave-family-out trên train: ví dụ few-shot và dữ liệu huấn luyện chỉ lấy từ họ khác.
+- Các cửa hàng public thuộc họ mới không có đáp án; chỉ dùng tỉ lệ abstain và kiểm tra hợp lý trên chúng làm tín hiệu định tính.
 
 **Chống rò rỉ:**
-- ví dụ few-shot loại câu của cùng cửa hàng;
-- không dùng dữ liệu test để huấn luyện hay làm ví dụ;
-- không có logic gắn với ID.
+- ví dụ few-shot không lấy từ cùng cửa hàng;
+- không dùng test để huấn luyện hay làm ví dụ.
 
-Lưu ý: các quy tắc tiền xử lý và kiểm tra được *thiết kế* nhìn vào gold train, nên điểm trên train sẽ lạc quan hơn private.
+Lưu ý: các quy tắc chuẩn hoá và kiểm tra được thiết kế khi nhìn vào đáp án train, nên điểm trên train sẽ lạc quan hơn private.
 
 ---
 
@@ -373,18 +569,35 @@ Lưu ý: các quy tắc tiền xử lý và kiểm tra được *thiết kế* n
 
 | # | rủi ro | giảm thiểu |
 |---|---|---|
-| R1 | **Kiểm tra ngữ nghĩa và rulebook mới.** Nếu private đổi định nghĩa (ví dụ doanh thu), shadow check sẽ ép các đáp án đúng-theo-rulebook-mới vào abstain. Thiệt hại có chặn (0 điểm, không phải −1) nhưng là thật | mỗi hợp đồng gắn với một mệnh đề trong rulebook; tự tắt hợp đồng khi mệnh đề đó không còn trong rulebook của split |
-| R2 | Ngành mới không có cấu trúc đơn + dòng (sửa xe, chỉ có hoá đơn) | primitive phải báo `Unanswerable` hoặc không khả dụng thay vì đoán; LLM dùng bảng thô; precision theo ngành lấy từ E0 |
-| R3 | Train lạc quan so với private (mục 6) | báo cáo theo họ định dạng; tập public họ mới làm tín hiệu định tính |
-| R4 | Thời gian: 6 giờ, N chưa biết; lần gọi viết lại thêm khoảng 15–20% thời gian | đo s/câu ở E0; nếu E1 cho thấy `rules` ≈ `llm` thì bỏ lần gọi LLM; ghi đáp án tăng dần |
-| R5 | Tái lập trên 5090 so với T4 (kernel và dtype khác) | greedy, seed cố định; đo ΔPA giữa các lần chạy lặp; chạy thử khô trên 2× 5090 thuê |
-| R6 | Model 9B áp dụng kém các quy tắc chưa từng thấy | rulebook luôn ở trong prompt; abstain khi kiểm tra thất bại; không mã hoá cứng quy tắc mới |
+| R1 | **Kiểm tra ngữ nghĩa khi rulebook đổi.** Nếu private định nghĩa lại một đại lượng (ví dụ doanh thu), kiểm tra ngữ nghĩa sẽ ép các đáp án đúng theo rulebook mới vào abstain. Thiệt hại có chặn (0, không phải −1) nhưng là thật | mỗi hợp đồng gắn với một mệnh đề rulebook; tự tắt khi mệnh đề đó không còn trong rulebook của bộ dữ liệu |
+| R2 | Ngành mới không có cấu trúc đơn + dòng hàng (sửa xe, chỉ có hoá đơn) | primitive báo "không khả dụng" thay vì đoán; LLM dùng bảng gốc; precision theo ngành từ E0 làm cơ sở cho ngưỡng abstain |
+| R3 | Điểm train lạc quan so với private | đánh giá leave-family-out; báo cáo theo họ định dạng |
+| R4 | Thời gian: 6 giờ cho số câu chưa biết | đo thời gian mỗi câu ở E0; bỏ lần gọi LLM ở chuẩn hoá nếu E1 cho thấy không cần; ghi đáp án tăng dần |
+| R5 | Tái lập khi ban tổ chức chạy lại trên 5090 (kernel và dtype khác với T4) | greedy, seed cố định; đo độ biến thiên; chạy thử trên 2× 5090 thuê |
+| R6 | Fine-tune học thuộc quy tắc train và bỏ qua rulebook mới | biến thể rulebook khi huấn luyện; đánh giá trên họ bị giữ lại; chỉ dùng nếu thắng prompting |
 
 ---
 
 ## 8. Câu hỏi xin ý kiến mentor
 
-1. Câu hỏi nghiên cứu và phạm vi (A + semantic layer; bỏ B và D; C có điều kiện) đã hợp lý chưa?
-2. Có nên đầu tư vào đánh giá **leave-family-out** trên train, hay ưu tiên chạy thêm public để bám sát private hơn?
-3. Ngưỡng chấp nhận báo nhầm cho kiểm tra kết quả (≤ 1% câu đúng) có quá chặt hoặc quá lỏng không, khi xét đến rủi ro R1?
-4. Với ngân sách GPU Kaggle (khoảng 30 giờ/tuần, mỗi lượt toàn bộ train mất khoảng 4–5 giờ), nên dành bao nhiêu lượt cho thí nghiệm và bao nhiêu lượt để đo độ biến thiên?
+1. Cách đặt câu hỏi nghiên cứu (semantic layer + kiểm tra kết quả, fine-tune là hướng mở rộng) đã hợp lý chưa?
+2. **Có nên làm hướng SQL không?** Nhóm đang cân nhắc hai phương án:
+
+   **Phương án 1: không làm SQL.** LLM, có hoặc không fine-tune, chỉ sinh chương trình Python dùng semantic layer.
+
+   | | |
+   |---|---|
+   | Ưu điểm | dùng lại nguyên pipeline, semantic layer và bộ kiểm tra hiện có; các phép nghiệp vụ (quy đổi đơn vị, kỳ âm lịch, làm tròn half-up, tie-break theo mã) đã là hàm Python; ít biến số, nên dễ tách riêng tác động của fine-tune |
+   | Nhược điểm | dữ liệu fine-tune chỉ có thể tự sinh từ 3000 câu train (khoảng 30 cửa hàng, khoảng 9 họ định dạng), nên dễ học thuộc; không tận dụng được các model và corpus Text-to-SQL công khai |
+
+   **Phương án 2: fine-tune theo SQL.** Các bảng canonical được nạp vào một SQL engine nhúng chạy trong tiến trình, ví dụ DuckDB, vốn đọc thẳng DataFrame, chạy offline và không cần server. Các primitive của semantic layer được đưa thành view hoặc macro SQL. Model sinh SQL được fine-tune trên corpus công khai (Spider, BIRD) cộng với dữ liệu tự sinh từ train.
+
+   | | |
+   |---|---|
+   | Ưu điểm | thêm nhiều dữ liệu huấn luyện; có thể khởi đầu từ các model đã fine-tune cho Text-to-SQL; SQL là ngôn ngữ khai báo, nhỏ hơn pandas, nên có thể ít lỗi thực thi hơn |
+   | Nhược điểm | corpus công khai lệch miền xa (tiếng Anh, DB sạch, không có rulebook); phải viết lại tầng thực thi và kiểm tra; một số phép nghiệp vụ viết bằng SQL dài và dễ sai; tổng tham số vẫn phải ≤ 15B nếu cần thêm một model riêng |
+
+   Câu hỏi cụ thể:
+   - Theo kinh nghiệm của anh/chị, lợi ích của corpus Text-to-SQL công khai có còn đáng kể khi miền (câu hỏi tiếng Việt nhiễu, định nghĩa nghiệp vụ trong rulebook) khác xa như vậy không?
+   - Nếu chỉ đủ thời gian cho một hướng fine-tune, nên chọn phương án nào?
+   - Có nên chạy một thí nghiệm nhỏ để quyết định không: cùng model và cùng tập câu thuộc các họ bị giữ lại, so sánh *prompting SQL* với *prompting Python* về tỉ lệ lỗi thực thi và PA, trước khi đầu tư fine-tune?
