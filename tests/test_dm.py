@@ -67,3 +67,14 @@ def test_extract_code_and_vote():
     r = {"type": "number", "answer": 5}
     assert decide([r, r, None])[0] == r
     assert decide([r, {"type": "number", "answer": 6}, None])[0] == {"type": "abstain"}
+
+
+def test_avg_order_value_counts_orders_not_lines():
+    sales = pd.DataFrame({
+        "date": pd.to_datetime(["2025-07-01", "2025-07-01", "2025-07-02", "2025-07-03", "2025-08-01"]),
+        "order_id": ["A", "A", "B", "C", "D"],
+        "counted": [True, True, True, False, True],  # C cancelled, D outside July
+        "amount": [100.0, 50.0, 101.0, 999.0, 7.0],
+    })
+    dm.set_context("2025-08-31", None, sales)
+    assert dm.avg_order_value(dm.month(2025, 7)) == 126  # (150 + 101) / 2 orders = 125.5 -> half-up

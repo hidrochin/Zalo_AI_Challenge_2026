@@ -20,6 +20,11 @@ from datamate.canon import is_walkin as _is_walkin
 from datamate.ingest.parsers import parse_date
 from datamate.text import fold, norm_key
 
+# Version of the business definitions behind the primitives (sales_lines, orders, revenue, avg_order_value, ...).
+# Bump it whenever a definition changes; it is logged with every run. `datamate semantic-check` tests the
+# definitions against train gold answers.
+SEMANTIC_VERSION = "2026-11-03.1"
+
 AS_OF: pd.Timestamp | None = None
 CAL: pd.DataFrame | None = None
 _RESULT: dict | None = None
@@ -331,6 +336,16 @@ def revenue(p: Period, lines: pd.DataFrame | None = None) -> float:
     return float(s.loc[s["counted"] & in_period(s["date"], p).values, "amount"].sum())
 
 
+def avg_order_value(p: Period, lines: pd.DataFrame | None = None) -> float:
+    """'Giá trị trung bình một đơn' in p: revenue(p, lines) / number of counted orders among those lines in p, rounded half-up to đồng (train gold 167/168)."""
+    s = sales_lines() if lines is None else lines
+    rev = revenue(p, s)
+    n = s.loc[s["counted"] & in_period(s["date"], p).values, "order_id"].nunique()
+    if n == 0:
+        raise Unanswerable(f"no counted order in {p}")
+    return round_half_up(rev / n, 0)
+
+
 def is_walkin(names) -> pd.Series:
     """True for walk-in / anonymous customers (Khách lẻ, lẻ, vãng lai, blank); exclude them from customer rankings."""
     return _is_walkin(names)
@@ -432,7 +447,7 @@ __all__ = [
     "this_month", "prev_month_same_days", "last_month", "prev_period", "same_period_last_year", "days_from", "days_before", "week_this",
     "week_prev", "last_n_days", "quarter",
     "quarter_auto", "year", "ytd", "tet", "pre_tet", "in_period", "require", "require_coverage", "shift_of",
-    "count_weekday", "pct_change", "round_half_up", "rank_top", "find", "sales_lines", "orders", "revenue",
+    "count_weekday", "pct_change", "round_half_up", "rank_top", "find", "sales_lines", "orders", "revenue", "avg_order_value",
     "price_on", "is_walkin",
     "same_name", "fold", "norm_key",
     "answer_number", "answer_percent", "answer_string", "answer_date", "answer_month", "answer_bool",
