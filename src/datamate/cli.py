@@ -48,6 +48,8 @@ def _print_score(s: dict) -> None:
     prec = "n/a" if s["precision"] is None else f"{s['precision']:.2%}"
     print(f"\nPA={s['PA']:.4f}  n={s['n']}  correct={s['correct']} wrong={s['wrong']} abstain={s['abstain']}"
           f"  coverage={s['coverage']:.2%}  precision={prec}")
+    if "outcomes" in s:
+        print("outcomes:", ", ".join(f"{k}={v}" for k, v in sorted(s["outcomes"].items())))
     for title in ("by_type", "by_business"):
         if title in s:
             print(f"\n{title}:")
@@ -70,7 +72,7 @@ def cmd_run(a) -> None:
         exec_workers=a.exec_workers, timeout=a.timeout, repair=a.repair, k_examples=a.k_examples,
         examples_path=Path(a.examples) if a.examples else None, min_share=a.min_share, unans_share=a.unans_share,
         seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=ids, resume=not a.no_resume,
-        llm_retries=a.llm_retries,
+        llm_retries=a.llm_retries, normalize=a.normalize,
     )
     try:
         summary = run(cfg)
@@ -85,6 +87,27 @@ def cmd_score(a) -> None:
     from datamate.agent.pipeline import score_run
 
     _print_score(score_run(Path(a.run), Path(a.data_root) / a.split))
+
+
+def cmd_compare(a) -> None:
+    from datamate.eval.compare import compare
+
+    print(json.dumps(compare(Path(a.a), Path(a.b)), ensure_ascii=False, indent=1))
+
+
+def cmd_eval_checks(a) -> None:
+    from datamate.eval.checks import evaluate
+
+    print(json.dumps(evaluate(Path(a.data_root), [Path(r) for r in a.runs]), ensure_ascii=False, indent=1))
+
+
+def cmd_semantic_check(a) -> None:
+    from datamate.eval.semantic import run_checks
+
+    rep = run_checks(Path(a.data_root), Path(a.cache_dir), a.only)
+    print(json.dumps(rep, ensure_ascii=False, indent=1))
+    if a.out:
+        Path(a.out).write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def cmd_make_dev(a) -> None:
@@ -108,6 +131,60 @@ def cmd_export(a) -> None:
 
     n = export_examples([Path(r) for r in a.runs], Path(a.data_root) / "train", Path(a.out))
     print(f"added {n} verified programs to {a.out}")
+
+
+def cmd_build_lexicon(a) -> None:
+    from datamate.eval.scorer import read_jsonl
+    from datamate.preprocess.telex import RHYMES_PATH, build_rhymes
+
+    train = Path(a.data_root) / "train"  # train text only (rule 5)
+    texts = [q["question"] for q in read_jsonl(train / "questions.jsonl")] + [(train / "rulebook.md").read_text(encoding="utf-8")]
+    texts += [p.read_text(encoding="utf-8") for p in sorted((train / "data").glob("*/README.md"))]
+    rhymes = build_rhymes(texts)
+    RHYMES_PATH.write_text("\n".join(rhymes) + "\n", encoding="utf-8")
+    print(f"{len(rhymes)} rhymes -> {RHYMES_PATH}")
+
+
+def cmd_normalize(a) -> None:
+    """Rule-based preprocessing of every question of a split (with each shop's names), for review."""
+    import json
+
+    from datamate.canon import build_sales
+    from datamate.eval.scorer import read_jsonl
+    from datamate.ingest import load_business
+    from datamate.preprocess import EntityIndex, rules_normalize
+
+    split_dir = Path(a.data_root) / a.split
+    qs = [q for q in read_jsonl(split_dir / "questions.jsonl") if not a.biz or q["business_id"] in a.biz]
+    out = Path(a.out or f"outputs/normalize/{a.split}.jsonl")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    index, cur, changed = None, None, 0
+    with out.open("w", encoding="utf-8") as f:
+        for q in sorted(qs, key=lambda q: q["business_id"]):
+            if q["business_id"] != cur:
+                cur = q["business_id"]
+                biz = load_business(split_dir, cur, Path(a.cache_dir))
+                roles = {n: ti.roles for n, ti in biz.info.items()}
+                index = EntityIndex.from_tables(biz.tables, roles, build_sales(biz.tables, roles)[0])
+            r = rules_normalize(q["question"], index)
+            changed += r.text != q["question"]
+            f.write(json.dumps({"id": q["id"], "business_id": cur, "question": q["question"], "rules": r.text,
+                                "changes": r.changes, "amounts": r.amounts,
+                                "mentions": [[m.kind, m.name, m.full] for m in r.mentions]}, ensure_ascii=False) + "\n")
+    print(f"{len(qs)} questions, {changed} changed -> {out}")
+
+
+def cmd_validate(a) -> None:
+    import json
+
+    from datamate.eval.scorer import read_jsonl
+    from datamate.postprocess import validate_submission
+
+    ids = [q["id"] for q in read_jsonl(Path(a.data_root) / a.split / "questions.jsonl")]
+    rep = validate_submission(read_jsonl(Path(a.submission)), ids)
+    print(json.dumps(rep, ensure_ascii=False, indent=1))
+    if rep["duplicates"] or rep["unknown_ids"] or rep["malformed"]:
+        raise SystemExit(1)
 
 
 def main(argv=None) -> None:
@@ -150,12 +227,28 @@ def main(argv=None) -> None:
     s.add_argument("--ids-file", help="file with one question id per line (e.g. assets/dev120.txt)")
     s.add_argument("--out")
     s.add_argument("--no-resume", action="store_true")
+    s.add_argument("--normalize", choices=["off", "rules", "llm"], default="llm",
+                   help="question preprocessing: rules only, or rules + one LLM rewrite")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("score", help="score a run directory against train answers")
     s.add_argument("run")
     s.add_argument("--split", default="train")
     s.set_defaults(func=cmd_score)
+
+    s = sub.add_parser("compare", help="paired comparison of two scored runs (transitions, bootstrap CI of ΔPA)")
+    s.add_argument("a")
+    s.add_argument("b")
+    s.set_defaults(func=cmd_compare)
+
+    s = sub.add_parser("eval-checks", help="answer checks: false alarms on train gold, recall on wrong answers of runs")
+    s.add_argument("runs", nargs="*")
+    s.set_defaults(func=cmd_eval_checks)
+
+    s = sub.add_parser("semantic-check", help="contract tests of the semantic primitives against train gold")
+    s.add_argument("--only", nargs="*")
+    s.add_argument("--out")
+    s.set_defaults(func=cmd_semantic_check)
 
     s = sub.add_parser("make-dev", help="write a stratified train subset (all types, all businesses)")
     s.add_argument("--n", type=int, default=120)
@@ -167,6 +260,20 @@ def main(argv=None) -> None:
     s.add_argument("runs", nargs="+")
     s.add_argument("--out", default="assets/examples.jsonl")
     s.set_defaults(func=cmd_export)
+
+    s = sub.add_parser("build-lexicon", help="rebuild assets/vi_rhymes.txt (Telex decoder) from train text")
+    s.set_defaults(func=cmd_build_lexicon)
+
+    s = sub.add_parser("normalize", help="rule-based question preprocessing of a split, for review")
+    s.add_argument("--split", default="train")
+    s.add_argument("--biz", nargs="*")
+    s.add_argument("--out")
+    s.set_defaults(func=cmd_normalize)
+
+    s = sub.add_parser("validate", help="check a submission file's format and ids")
+    s.add_argument("submission")
+    s.add_argument("--split", default="public_test")
+    s.set_defaults(func=cmd_validate)
 
     a = p.parse_args(argv)
     a.func(a)

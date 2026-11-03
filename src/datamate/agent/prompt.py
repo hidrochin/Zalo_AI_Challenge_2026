@@ -49,6 +49,10 @@ g = s[ok].groupby(['customer', 'customer_name'], as_index=False)['amount'].sum()
 answer_list(rank_top(g, by='amount', k=3, code='customer')['customer_name'].tolist())
 ```
 ```python
+# giá trị trung bình một đơn (AOV) tháng 2/2025: never divide by line rows
+answer_number(avg_order_value(month(2025, 2)), kind='money')
+```
+```python
 # tỉ lệ huỷ đơn / số đơn / đơn có tiền hàng từ X trở lên: use orders() (one row per order), never line rows
 o = orders()
 o = o[in_period(o['date'], month(2025, 7))]
@@ -79,6 +83,7 @@ answer_number(price_on('dầu gió xanh con ó 12ml', '2026-01-16'), kind='money
 s = sales_lines(); chieu = s[shift_of(s['order_ts']).values == 'chiều']
 ```
 - If a "Time expressions, already resolved" block follows the question, use exactly those period calls.
+- "normalized" is the question cleaned up (abbreviations, typos, diacritics, dialect). Use it to understand the question; if it conflicts with the original question, the original wins. Names listed under "names in this shop's data" are exact spellings for find().
 - Counting orders or "khách mua N đơn" = number of distinct order_id, not number of rows (most tables have one row per line item). `is_goods` is a True/False flag, never a product name.
 - Revenue = sum of line amounts, never order-total columns (those include order discount/shipping). Do not filter status == 'hoàn thành' only: use `counted`.
 - If the data cannot answer, call unanswerable(reason) - never answer_string with an explanation.
@@ -112,7 +117,9 @@ def _fmt_answer(ex: dict) -> str:
     return json.dumps({"type": ex["type"], "answer": ex["answer"]}, ensure_ascii=False)
 
 
-def question_part(question: str, as_of: str, examples: list[dict], hints: list[str] | None = None) -> str:
+def question_part(question: str, as_of: str, examples: list[dict], hints: list[str] | None = None,
+                  norm: dict | None = None) -> str:
+    """norm (from preprocessing): normalized, sub_questions, expect, names, amounts."""
     out = []
     if examples:
         out.append("# Solved examples from OTHER shops (their tables differ; use them for interpretation and answer format)")
@@ -123,6 +130,17 @@ def question_part(question: str, as_of: str, examples: list[dict], hints: list[s
             out.append(f"A: {_fmt_answer(ex)}\n")
     wd = WEEKDAYS[pd.Timestamp(as_of).weekday()]
     out.append(f"# Question\nas_of_date (hôm nay): {as_of}, {wd}\nquestion: {question}")
+    norm = norm or {}
+    if norm.get("normalized") and norm["normalized"].strip() != question.strip():
+        out.append(f"normalized: {norm['normalized']}")
+    if norm.get("sub_questions"):
+        out.append("asks, in this order: " + " | ".join(f"({i}) {q}" for i, q in enumerate(norm["sub_questions"], 1)))
+    if norm.get("expect"):
+        out.append(f"expected answer: {norm['expect']}")
+    if norm.get("names"):
+        out.append("names in this shop's data that the question mentions:\n" + "\n".join(norm["names"]))
+    if norm.get("amounts"):
+        out.append("amounts: " + "; ".join(norm["amounts"]))
     if hints:
         out.append("\nTime expressions, already resolved by the rulebook (use exactly these period calls):\n" + "\n".join(hints))
     return "\n".join(out)

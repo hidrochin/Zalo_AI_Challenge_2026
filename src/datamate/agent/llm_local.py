@@ -14,7 +14,8 @@ class LocalLLM:
         self.max_tokens = max_tokens
         self.enable_thinking = enable_thinking
 
-    def generate(self, system: str, user_parts: list[str], history: list[dict], temperature: float, seed: int) -> str:
+    def generate(self, system: str, user_parts: list[str], history: list[dict], temperature: float, seed: int,
+                 max_tokens: int | None = None) -> str:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": "\n\n".join(user_parts)}]
         messages += history
         extra = {}
@@ -24,6 +25,6 @@ class LocalLLM:
                 extra["reasoning_effort"] = "none"
         r = self.client.chat.completions.create(
             model=self.model, messages=messages, temperature=temperature, seed=seed,
-            max_tokens=self.max_tokens, extra_body=extra or None,
+            max_tokens=max_tokens or self.max_tokens, extra_body=extra or None,
         )
         return r.choices[0].message.content or ""

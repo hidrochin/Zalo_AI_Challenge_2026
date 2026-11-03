@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -15,15 +16,19 @@ def _key(q: str) -> str:
 
 
 class ExampleBank:
-    def __init__(self, items: list[dict]):
+    def __init__(self, items: list[dict], normalize: Callable[[str], str] | None = None):
+        """normalize: applied to bank and query questions alike (e.g. the rule-based question cleaner)."""
         self.items = items
+        self.normalize = normalize or (lambda s: s)
         self.vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), sublinear_tf=True)
-        self.mat = self.vec.fit_transform([_key(it["question"]) for it in items]) if items else None
+        self.keys = [_key(self.normalize(it["question"])) for it in items]
+        self.mat = self.vec.fit_transform(self.keys) if items else None
         self.biz = np.array([it["business_id"] for it in items])
         self.has_code = np.array([bool(it.get("code")) for it in items])
 
     @classmethod
-    def from_train(cls, train_dir: Path, examples_path: Path | None = None) -> "ExampleBank":
+    def from_train(cls, train_dir: Path, examples_path: Path | None = None,
+                   normalize: Callable[[str], str] | None = None) -> "ExampleBank":
         """Train questions + gold answers; verified programs from `examples_path` (jsonl) are attached when present."""
         train_dir = Path(train_dir)
         qs = {}
@@ -46,12 +51,12 @@ class ExampleBank:
             for it in items:
                 if it["id"] in code:
                     it["code"] = code[it["id"]]
-        return cls(items)
+        return cls(items, normalize)
 
     def query(self, question: str, exclude_business: str | None, k: int = 4) -> list[dict]:
         if not self.items or k <= 0:
             return []
-        sims = (self.mat @ self.vec.transform([_key(question)]).T).toarray().ravel()
+        sims = (self.mat @ self.vec.transform([_key(self.normalize(question))]).T).toarray().ravel()
         sims = sims + 0.05 * self.has_code
         if exclude_business is not None:
             sims[self.biz == exclude_business] = -1
@@ -59,7 +64,7 @@ class ExampleBank:
         for i in np.argsort(-sims):
             if sims[i] < 0 or len(out) >= k:
                 break
-            key = _key(self.items[i]["question"])
+            key = self.keys[i]
             if key in seen:
                 continue
             seen.add(key)

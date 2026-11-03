@@ -105,7 +105,30 @@ def check_result(result: dict, names: set[str] | None) -> tuple[str | None, str 
     return None, None
 
 
-def _execute(code: str, as_of: str, tables, cal, timeout: int, sales=None, names=None) -> dict:
+def shadow_check(result: dict, shadow: tuple[str, str] | None) -> str | None:
+    """Semantic validation: when the question is one of the semantic-layer contracts (eval/semantic.py, exact on
+    train gold), recompute it with the primitive and flag a disagreeing answer. dm context must be set."""
+    if not shadow or result.get("type") not in ("number", "percent"):
+        return None
+    from datamate.eval.semantic import find_check, shadow_value
+
+    text, period_call = shadow
+    check = find_check(text, result["type"])
+    if check is None:
+        return None
+    try:
+        value = shadow_value(check, period_call)
+    except Exception:  # the primitive cannot compute it here: no opinion
+        return None
+    if abs(float(value) - float(result.get("answer", 0))) <= 1e-6:
+        return None
+    call = {"avg_order_value": f"avg_order_value({period_call})", "revenue": f"revenue({period_call})"}.get(
+        check.name, f"orders() filtered with in_period(o['date'], {period_call})")
+    return (f"Your answer disagrees with the rulebook definition of '{check.name}' for {period_call}. "
+            f"Recompute it with {call} (it applies the default counting rules) unless the question asks for something else.")
+
+
+def _execute(code: str, as_of: str, tables, cal, timeout: int, sales=None, names=None, shadow=None) -> dict:
     import numpy as np
     import pandas as pd
 
@@ -140,6 +163,9 @@ def _execute(code: str, as_of: str, tables, cal, timeout: int, sales=None, names
             result, error = None, f"answer is not JSON-serializable: {e}"
     if result is not None and error is None:
         error, warning = check_result(result, names)
+    if result is not None and error is None and warning is None:
+        dm.set_context(as_of, cal, sales)  # the program may have changed module state
+        warning = shadow_check(result, shadow)
     return {"result": result if error is None else None, "error": error, "warning": warning, "stdout": buf.getvalue()[-3000:]}
 
 
@@ -177,8 +203,8 @@ def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: i
         msg = conn.recv()
         if msg is None:
             break
-        code, as_of = msg
-        conn.send(_execute(code, as_of, biz.tables, cal, timeout, sales, names))
+        code, as_of, shadow = msg
+        conn.send(_execute(code, as_of, biz.tables, cal, timeout, sales, names, shadow))
 
 
 class ExecPool:
@@ -202,10 +228,11 @@ class ExecPool:
         self._all.append(p)
         return p, parent
 
-    def run(self, code: str, as_of: str) -> dict:
+    def run(self, code: str, as_of: str, shadow: tuple[str, str] | None = None) -> dict:
+        """shadow: (rule-normalized question, period call) for the semantic-layer cross-check."""
         p, conn = self._free.get()
         try:
-            conn.send((code, str(as_of)))
+            conn.send((code, str(as_of), shadow))
             if conn.poll(self.timeout + 30):
                 return conn.recv()
             p.kill()

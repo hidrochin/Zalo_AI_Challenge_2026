@@ -14,14 +14,15 @@ class ClaudeLLM:
         self.effort = effort
         self.max_tokens = max_tokens
 
-    def generate(self, system: str, user_parts: list[str], history: list[dict], temperature: float, seed: int) -> str:
+    def generate(self, system: str, user_parts: list[str], history: list[dict], temperature: float, seed: int,
+                 max_tokens: int | None = None) -> str:
         # temperature/seed are not accepted by current Claude models; sampling is the model's own.
         content = [{"type": "text", "text": p} for p in user_parts]
         content[0]["cache_control"] = {"type": "ephemeral"}  # README + schema card, shared per business
         messages = [{"role": "user", "content": content}] + history
         r = self.client.beta.messages.create(
             model=self.model,
-            max_tokens=self.max_tokens,
+            max_tokens=max(max_tokens or self.max_tokens, 2048),
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=messages,
             output_config={"effort": self.effort},

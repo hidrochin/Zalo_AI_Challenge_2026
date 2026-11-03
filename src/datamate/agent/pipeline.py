@@ -1,4 +1,5 @@
-"""End-to-end run: questions -> prompt -> LLM samples -> sandbox -> vote -> submission + logs (+ score)."""
+"""End-to-end run: questions -> preprocess -> prompt -> LLM samples -> sandbox (+ answer checks) -> vote
+-> postprocess -> submission + logs (+ score)."""
 
 import json
 import random
@@ -19,6 +20,9 @@ from datamate.canon import build_sales
 from datamate.eval.scorer import read_jsonl, score
 from datamate.ingest import load_business, load_calendar
 from datamate.ingest.schema_card import schema_card
+from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, invariants
+from datamate.preprocess import EntityIndex, rules_normalize
+from datamate.preprocess.rewrite import names_block, rewrite
 
 
 @dataclass
@@ -44,6 +48,8 @@ class RunConfig:
     min_share: float = 0.5
     unans_share: float = 0.6
     llm_retries: int = 6  # server errors: back off 5..120 s, then stop the run (a resumed run retries)
+    normalize: str = "llm"  # off | rules | llm: question preprocessing (rules, then one LLM rewrite)
+    rewrite_max_tokens: int = 400
     seed: int = 0
     limit: int | None = None
     businesses: list[str] = field(default_factory=list)
@@ -82,7 +88,7 @@ def _generate(llm, cfg: "RunConfig", *args, **kw) -> str:
 class DummyLLM:
     """Plumbing test without a model: answers the row count of the first table."""
 
-    def generate(self, system, user_parts, history, temperature, seed) -> str:
+    def generate(self, system, user_parts, history, temperature, seed, max_tokens=None) -> str:
         return "```python\nanswer_number(len(next(iter(T.values()))), kind='count')\n```"
 
 
@@ -113,12 +119,53 @@ def _select(questions: list[dict], cfg: RunConfig) -> list[dict]:
     return qs
 
 
+def preprocess(q: dict, llm, cfg: RunConfig, index: EntityIndex | None) -> tuple[str, dict | None, dict]:
+    """(rule-cleaned text, validated LLM rewrite or None, log record) for one question."""
+    if cfg.normalize == "off":
+        return q["question"], None, {}
+    rules = rules_normalize(q["question"], index)
+    rec = {"rules": rules.text, "changes": rules.changes, "amounts": rules.amounts,
+           "mentions": [{"kind": m.kind, "name": m.name, "full": m.full} for m in rules.mentions]}
+    rw = None
+    if cfg.normalize == "llm":
+        def gen(system, parts):
+            return _generate(llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
+
+        try:
+            rw, reply = rewrite(gen, q["question"], rules, index.vocab if index is not None else frozenset())
+        except LLMUnavailable:
+            raise
+        except Exception as e:  # a rejected request only loses the rewrite
+            reply = f"LLM error: {e!r}"
+        rec.update(rewrite=rw, rewrite_reply=reply)
+    rec["norm"] = {
+        "normalized": (rw or {}).get("normalized") or rules.text,
+        "sub_questions": (rw or {}).get("sub_questions") or [],
+        "names": names_block(rules).splitlines()[1:],
+        "amounts": rules.amounts,
+    }
+    return rules.text, rw, rec
+
+
+def _expect_text(e: Expect) -> str | None:
+    if e.type is None:
+        return None
+    t = {"date": "date 'YYYY-MM' (a month)" if e.month else "date 'YYYY-MM-DD' (a day)" if e.month is False else "date"}.get(e.type, e.type)
+    return t + (f", at most {e.k} items" if e.k else "")
+
+
 def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
-                   cal=None) -> dict:
+                   cal=None, index: EntityIndex | None = None) -> dict:
     t0 = time.time()
+    text, rw, pre = preprocess(q, llm, cfg, index)
+    expect = expect_answer(text, rw)
+    norm = {**pre.get("norm", {}), "expect": _expect_text(expect) if expect.hard else None}
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
-    hints = time_hints(q["question"], q["as_of_date"], cal)
-    user_parts = [biz_part, question_part(q["question"], q["as_of_date"], examples, hints)]
+    hints = time_hints(text, q["as_of_date"], cal)
+    expect.window = date_window(text, hints)
+    calls = [h.split(" -> ")[1].split(" = ")[0].split("  #")[0] for h in hints]
+    shadow = (text, calls[0]) if len(calls) == 1 else None  # semantic cross-check needs exactly one period
+    user_parts = [biz_part, question_part(q["question"], q["as_of_date"], examples, hints, norm)]
     samples = []
     for s in range(cfg.samples):
         temperature = 0.0 if s == 0 else cfg.temperature
@@ -127,32 +174,40 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
         out = {"result": None, "error": "not run", "stdout": ""}
         for attempt in range(1 + cfg.repair):
             try:
-                text = _generate(llm, cfg, system, user_parts, history, temperature=temperature, seed=cfg.seed + s)
+                text_reply = _generate(llm, cfg, system, user_parts, history, temperature=temperature, seed=cfg.seed + s)
             except LLMUnavailable:
                 raise
             except Exception as e:  # request rejected by the model server: record and stop this sample
                 out = {"result": None, "error": f"LLM error: {e!r}", "stdout": ""}
                 sample["attempts"].append({"llm_error": repr(e)})
                 break
-            code = extract_code(text)
+            code = extract_code(text_reply)
             if code is None:
                 out = {"result": None, "error": "No ```python code block found in the reply.", "stdout": ""}
             else:
-                out = pool.run(code, q["as_of_date"])
-            sample["attempts"].append({"reply": text, "code": code, **out})
+                out = pool.run(code, q["as_of_date"], shadow)
+            if out["error"] is None and out["result"] is not None:
+                why, hard = check_answer(out["result"], expect)
+                broken = invariants(out["result"], text, expect.window)  # never fire on train gold: hard
+                if broken:
+                    why, hard = "\n".join([why or ""] + [m for _, m in broken]).strip(), True
+                if why:  # a hard contradiction abstains if the re-check keeps it; a soft one only asks again
+                    out = {**out, "warning": "\n".join(w for w in (out.get("warning"), why) if w),
+                           "sticky": bool(out.get("warning")) or hard}
+            sample["attempts"].append({"reply": text_reply, "code": code, **out})
             if out["error"] is None and not (out.get("warning") and attempt < cfg.repair):
                 break
             msg = repair_message(out) if out["error"] else check_message(out["warning"])
-            history += [{"role": "assistant", "content": text}, {"role": "user", "content": msg}]
-        if out["result"] is not None and out.get("warning"):  # still suspicious after the re-check (0 is rarely right): abstain
-            out = {**out, "result": None, "error": f"unconfirmed: {out['warning']}"}
+            history += [{"role": "assistant", "content": text_reply}, {"role": "user", "content": msg}]
+        if out["result"] is not None and out.get("warning") and out.get("sticky", True):
+            out = {**out, "result": None, "error": f"unconfirmed: {out['warning']}"}  # 0 is rarely right; wrong shape is wrong
         sample["result"], sample["error"] = out["result"], out["error"]
         samples.append(sample)
     final, vote = decide([s["result"] for s in samples], cfg.min_share, cfg.unans_share)
     return {
         "id": q["id"], "business_id": q["business_id"], "question": q["question"], "as_of_date": q["as_of_date"],
-        "final": final, "vote": vote, "examples": [e["id"] for e in examples], "hints": hints, "samples": samples,
-        "elapsed": round(time.time() - t0, 2),
+        "final": finalize(final), "vote": vote, "pre": pre, "expect": vars(expect), "examples": [e["id"] for e in examples],
+        "hints": hints, "samples": samples, "elapsed": round(time.time() - t0, 2),
     }
 
 
@@ -160,7 +215,11 @@ def run(cfg: RunConfig) -> dict:
     split_dir = Path(cfg.data_root) / cfg.split
     out_dir = Path(cfg.out_dir)
     (out_dir / "logs").mkdir(parents=True, exist_ok=True)
-    (out_dir / "config.json").write_text(json.dumps(asdict(cfg), default=str, indent=2), encoding="utf-8")
+    from datamate import dm
+    from datamate.ingest.business import INGEST_VERSION
+
+    meta = {**asdict(cfg), "semantic_version": dm.SEMANTIC_VERSION, "ingest_version": INGEST_VERSION}
+    (out_dir / "config.json").write_text(json.dumps(meta, default=str, indent=2), encoding="utf-8")
 
     questions = _select(read_jsonl(split_dir / "questions.jsonl"), cfg)
     sub_path = out_dir / "submission.jsonl"
@@ -171,7 +230,8 @@ def run(cfg: RunConfig) -> dict:
 
     llm = make_llm(cfg)
     system = build_system((split_dir / "rulebook.md").read_text(encoding="utf-8"))
-    bank = ExampleBank.from_train(Path(cfg.data_root) / "train", cfg.examples_path)
+    bank = ExampleBank.from_train(Path(cfg.data_root) / "train", cfg.examples_path,
+                                  normalize=None if cfg.normalize == "off" else (lambda t: rules_normalize(t).text))
     cal = load_calendar(split_dir)
     lock = threading.Lock()
     t_start = time.time()
@@ -184,12 +244,15 @@ def run(cfg: RunConfig) -> dict:
     with sub_path.open("a", encoding="utf-8") as sub, tqdm(total=len(todo), desc="questions") as bar:
         for biz_id in sorted(by_biz):
             biz = load_business(split_dir, biz_id, cfg.cache_dir)
-            _, sales_desc = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
+            roles = {n: ti.roles for n, ti in biz.info.items()}
+            sales, sales_desc = build_sales(biz.tables, roles)
             biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
+            index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
             pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal) for q in by_biz[biz_id]]
+                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index)
+                            for q in by_biz[biz_id]]
                     for f in as_completed(futs):
                         try:
                             rec = f.result()
@@ -221,6 +284,9 @@ def score_run(out_dir: Path, split_dir: Path, ids: list[str] | None = None) -> d
     meta = {q["id"]: q for q in read_jsonl(Path(split_dir) / "questions.jsonl")}
     ids = [i for i in (ids or list(preds)) if i in refs]
     rep = score(preds, refs, meta, ids)
+    from datamate.eval.compare import outcomes
+
+    rep["outcomes"] = outcomes(Path(out_dir), rep["per_question"])
     (Path(out_dir) / "report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=2), encoding="utf-8")
     return {k: v for k, v in rep.items() if k != "per_question"}
 
