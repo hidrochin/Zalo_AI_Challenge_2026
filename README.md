@@ -6,6 +6,38 @@ SQLite files.
 - Rules and data analysis: [CLAUDE.md](CLAUDE.md)
 - Plan of record: [docs/PROPOSAL.md](docs/PROPOSAL.md)
 
+## Architecture
+
+```
+  data/<biz>/  CSV · XLSX · SQLite · README.md
+        │
+        ▼
+ ┌─────────────┐   once per business, cached in cache/ingest/
+ │ 1. Ingest   │──► cleaned tables + schema card
+ └─────────────┘                    │
+                                    ▼
+ question + as_of ──────────► ┌─────────────┐ ◄── rulebook.md, business README,
+   (time hints resolved       │ 2. Prompt   │     schema card, retrieved train
+    deterministically)        └──────┬──────┘     examples
+                                     ▼
+                              ┌─────────────┐
+                              │ 3. LLM      │  Qwen3.5-9B (vLLM on Kaggle, Ollama on Mac)
+                              │ writes a    │  writes a short pandas program using
+                              │ program     │  dm.py / canon.py helpers
+                              └──────┬──────┘
+                                     ▼                 error or failed check
+                              ┌─────────────┐ ───────────────────────────┐
+                              │ 4. Sandbox  │                            │
+                              │ run + check │ ◄── one repair round ──────┘
+                              └──────┬──────┘
+                                     ▼
+                              ┌─────────────┐
+                              │ 5. Vote     │──► answer │ unanswerable │ abstain
+                              └──────┬──────┘
+                                     ▼
+                     submission.jsonl  +  logs/<id>.json
+```
+
 ## How it works (current MVP)
 
 1. **Ingest** ([src/datamate/ingest/](src/datamate/ingest/)). Each business is turned into cleaned
@@ -23,7 +55,9 @@ SQLite files.
 2. **Prompt** ([src/datamate/agent/prompt.py](src/datamate/agent/prompt.py)). Built in this order:
    - system: contract, helper API and the split's `rulebook.md`
    - per business: README and schema card
-   - per question: retrieved train examples and the question
+   - per question: retrieved train examples, the question, and the time hints from
+     [src/datamate/agent/hints.py](src/datamate/agent/hints.py) (`th7/26`, `tuần rồi`, Tết, … resolved to
+     exact periods)
 3. **LLM** writes a short pandas program that ends with an `answer_*()` / `unanswerable()` call.
    It can use the helpers in [src/datamate/dm.py](src/datamate/dm.py): periods (`week_prev`,
    `this_month`, `tet`, …), `rank_top`, `find`, and answer formatting with rounding.
@@ -98,6 +132,52 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 - `/data` is read-only; caches and outputs live in `cache/` and `outputs/`.
 
 ---
+
+## Status (2026-11-03)
+
+**Leaderboard**
+
+| submission | file | code | PA |
+|---|---|---|---|
+| 1st (2026-11-02) | `outputs/submission.jsonl` | Kaggle kernel v5 | −0.110 |
+| 2nd (2026-11-03) | `outputs/submission_v2.jsonl` | Kaggle kernel v6, commit `17129c4`, `INGEST_VERSION` 11 | **0.040** |
+
+**Second public submission: PA 0.040**
+- The code includes every 2026-11-03 fix listed below: server-error retry and stop, vLLM restart and
+  resume, worker memory cap, repair for "helper unavailable" refusals, and the preprocessing fixes. The
+  bundle's `INGEST_VERSION` matches local (11).
+- The vLLM-on-T4 path now finishes end to end. All 14 businesses were attempted; in the first run, 340
+  questions were lost after the server stopped.
+- The 1000 lines are 778 typed answers, 12 unanswerable and 210 abstain. That implies about **415 correct and
+  375 wrong out of 790 attempted, so precision is about 52.5%**, barely above break-even. dev120_v4 had 73%.
+  The gap between train dev and public precision is now the main problem ([DATA.md](DATA.md) §4.1 point 6, §7.2).
+- Compared with the first submission:
+  - zero answers: 29 → 0
+  - "sales_lines() not available" refusals: 43 → 0
+  - unanswerable answers: 49 → 12
+- Abstain share by business:
+  - highest: dev_006 41/111, dev_014 26/63, dev_011 13/40, dev_003 26/129
+  - lowest: dev_007 3/60, dev_002 3/41
+- Only the submission file was saved, not the per-question logs, so precision by business and by type is
+  unknown.
+- **Unanswerables that look wrong** (spot check of the 12; each one is −1 if gold is a value):
+  - `quy 2/2025`: the time hint returns `month(2025, 2)` instead of quarter 2, because the month pattern wins
+    over `_QUARTER` in `hints.py`. The model then declared it out of range.
+  - "Từ th 1/25 tới th 3/25, dthu tháng sau đều cao hơn tháng trước": the hint adds
+    `prev_period(month(2025, 1))` = Dec 2024, which is out of range. The question only needs Jan–Mar.
+  - "Đầu năm tới chừ" (dialect, "chừ" = now): no hint is produced, and the model used 2027.
+  - dev_012 "Doanh thu tháng 4/2026 … %": the model said a repair shop records no revenue, but repair tickets
+    carry money.
+
+**Next steps (handoff)**
+1. Save the v6 kernel output with its per-question logs (`uvx --with six kaggle kernels output
+   hydrochii/datamate-public-run -p outputs/kaggle/result_v6`). They give precision per business and type,
+   plus timing on 2× T4.
+2. Fix the time hints above: quarter with `/year`, no `prev_period` for an explicit "từ … tới …" range, and
+   dialect "tới chừ" / "đến giờ" = up to as-of.
+3. Raise precision before coverage. At ~52% precision, abstention is the biggest lever (Phase 5).
+4. Still open from 2026-11-01: phone-shop abbreviations, repair-shop normalization, order-only shops, debt
+   helper.
 
 ## Status (2026-11-01)
 
@@ -257,7 +337,7 @@ Status: ✅ done · 🟡 partial · ⬜ todo. Day numbers follow [docs/PROPOSAL.
 - 🟡 Model: Qwen3.5-9B (older Qwen3 / Qwen2.5 options dropped); thinking on/off and quantization still to compare
 - ✅ Stratified dev subset `assets/dev120.txt` (`datamate make-dev`: all answer types, all 30 businesses)
 - ⬜ Adaptive sampling (stop early when the first samples agree)
-- ⬜ First public-test submission (baseline)
+- ✅ First public-test submissions: PA −0.110 (v5), then 0.040 (v6)
 
 ### Phase 5: abstention and calibration (D8)
 - ⬜ Confidence features (vote share, errors, type-hint match, sanity checks, intent-family precision)
