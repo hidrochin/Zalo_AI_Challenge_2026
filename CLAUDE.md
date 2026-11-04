@@ -219,13 +219,15 @@ profit uses the **cost recorded on the sale line**.
 
 - **Tasks and run commands:** [README.md](README.md). Its "Status" section is the handoff point
   between sessions; read it first.
-- **Research plan (2026-11-03):** [docs/PROPOSAL_V3.md](docs/PROPOSAL_V3.md) (Vietnamese): pandas code
-  generation + a tested semantic layer + result validation; experiments E0–E4.
-- **Status (2026-11-03):** see the README "Status (2026-11-03, evening)" section first.
+- **Research plan (2026-11-04):** [docs/PROPOSAL_V3.md](docs/PROPOSAL_V3.md) (Vietnamese, for the mentor):
+  pandas code generation + a tested semantic layer + result validation; experiments E0–E5. Fine-tuning is now
+  an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
+- **Status (2026-11-05):** see the README "Status (2026-11-05)" section first.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
-  - Public leaderboard: PA −0.110 (kernel v5) → **0.040** (kernel v6, precision ≈ 52%). dev120_v4: PA 0.375.
-  - E0 in flight: all 3000 train questions on Kaggle (kernel v8, `DM_STAGES=train`, commit `33d0413`).
-  - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train kaggle/push.sh update`.
+  - Public leaderboard: PA −0.110 → 0.040 → **0.288** (pipeline `98d4c7b`, precision ≈ 68%).
+  - E0, all 3000 train questions on Kaggle: **PA 0.473** (precision 77.7%), logs in
+    `outputs/kaggle/result_train/out/train`.
+  - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train DM_KERNEL=<name> kaggle/push.sh update`.
   - The prompt is about 13–16k tokens, so a local server needs ≥ 24k context (set `num_ctx` through
     a Modelfile).
 - **Layout:**

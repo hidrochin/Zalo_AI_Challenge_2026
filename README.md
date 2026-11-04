@@ -177,22 +177,51 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
+## Status (2026-11-05)
+
+Same pipeline for both runs (commit `98d4c7b`, `SEMANTIC_VERSION` 2026-11-03.1, `INGEST_VERSION` 11),
+Qwen3.5-9B fp16 on Kaggle 2× T4, `--normalize llm`, 1 greedy sample, concurrency 16.
+
+| run | kernel | output | PA | correct / wrong / abstain | precision | time |
+|---|---|---|---|---|---|---|
+| E0: all train | `datamate-public-run` v8 | `outputs/kaggle/result_train/out/train` | **0.473** | 1991 / 572 / 437 | 77.7% | 2 h 46, 3.3 s/question |
+| 3rd public | `datamate-public-run2` v1 | `outputs/kaggle/result_public_v7` | **0.288** | about 550 / 262 / 188 (implied by PA) | about 67.7% | 1 h 17, 4.6 s/question |
+
+**E0 by type (PA):** boolean +0.783, percent +0.756, date +0.531, number +0.445, unanswerable +0.357,
+list +0.150, string +0.045, table −0.526 (0 correct of 19). `number` holds 400 of the 572 wrong answers.
+
+**Abstain causes:** E0: 335 execution failures, 102 validation. Public: 123 execution failures, 62 validation,
+3 format. In E0 the execution failures are mostly `KeyError` 186, `TypeError` 70, `ValueError` 29,
+`IndexError` 17, which points at column names and types.
+
+**Weakest train shops:** biz_109 +0.127, biz_124 +0.246, biz_123 +0.280, biz_106 +0.286.
+
+**Not yet known:** how much each module added. Public rose 0.040 → 0.288 with preprocessing, checks and the
+new primitive all added at once, so E1–E3 still have to separate them.
+
+**Next steps (handoff)**
+1. Analyse E0 from `outputs/kaggle/result_train/out/train` (`logs/<id>.json`, `report.json`). No per-group
+   analysis is done yet: wrong answers by intent, family and error kind are still open.
+2. Compare the 102 validation abstains with gold, to count the correct answers the checks rejected.
+3. Look into the execution failures (`KeyError` first): 11.2% of train, 12.3% of public.
+4. Add `--checks off|structural|all`, then run the experiments in priority order (PROPOSAL_V3 §5): E3, E2, E4,
+   E1, E5. Run each at full-train size on Kaggle. The repeat run for run-to-run variability isn't done yet.
+5. Decide with the mentor whether to fine-tune, and on Python or SQL (PROPOSAL_V3 §8). The proposal still says
+   E0 is running.
+6. `kaggle/push.sh` has the `DM_KERNEL` change uncommitted.
+
+**Kaggle notes**
+- Fetch: `uvx --with six kaggle kernels output hydrochii/<kernel> -p <dir>`. It fetches one file at a time and
+  can hang without an error (a socket in `CLOSE_WAIT`). If the file count stops growing, stop it and run several
+  downloads in parallel with `--file-pattern 'logs/q_[0-3]'` etc. and `--page-size 200`.
+- `DM_KERNEL=<name> kaggle/push.sh update` pushes to another kernel, so a running one isn't replaced.
+- `DM_STAGES=public|dev120|train` picks the stages; the default is `public`.
+
 ## Status (2026-11-03, evening)
 
 **Committed** (`bc808d8` … `33d0413`): hints fixes, preprocess, postprocess, `avg_order_value` +
 `SEMANTIC_VERSION`, eval tools (compare / eval-checks / semantic-check), pipeline wiring, Kaggle train stage.
 157 tests pass.
-
-**E0 in flight: full train (3000 questions) on Kaggle.** Kernel `hydrochii/datamate-public-run` version 8,
-`DM_STAGES=train`, commit `33d0413` (pipeline `98d4c7b`), Qwen3.5-9B fp16 on 2× T4, `--normalize llm`,
-1 greedy sample, concurrency 16. Expected about 4–5 h. Fetch and score:
-```bash
-uvx --with six kaggle kernels status hydrochii/datamate-public-run
-uvx --with six kaggle kernels output hydrochii/datamate-public-run -p outputs/kaggle/result_train
-uv run datamate score outputs/kaggle/result_train/out/train   # report.json is also written by the run
-```
-This run is the baseline for error analysis by type / business / family / intent (PROPOSAL_V3 §5). The next
-public run needs `DM_STAGES=public kaggle/push.sh update` (the default).
 
 **E1 (normalize off vs llm on dev120) paused:** stopped at 75/120 of the `off` arm (`outputs/e1_off`,
 snapshot before the E2/E3 changes) to free the Mac. It is superseded by running E1 on Kaggle at full-train size.
@@ -214,7 +243,8 @@ snapshot before the E2/E3 changes) to free the Mac. It is superseded by running 
 | submission | file | code | PA |
 |---|---|---|---|
 | 1st (2026-11-02) | `outputs/submission.jsonl` | Kaggle kernel v5 | −0.110 |
-| 2nd (2026-11-03) | `outputs/submission_v2.jsonl` | Kaggle kernel v6, commit `17129c4`, `INGEST_VERSION` 11 | **0.040** |
+| 2nd (2026-11-03) | `outputs/submission_v2.jsonl` | Kaggle kernel v6, commit `17129c4`, `INGEST_VERSION` 11 | 0.040 |
+| 3rd (2026-11-05) | `outputs/kaggle/result_public_v7/submission.jsonl` | kernel `datamate-public-run2` v1, pipeline `98d4c7b` | **0.288** |
 
 **Second public submission: PA 0.040**
 - The code includes every 2026-11-03 fix listed below: server-error retry and stop, vLLM restart and
