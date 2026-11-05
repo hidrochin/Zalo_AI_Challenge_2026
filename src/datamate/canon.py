@@ -12,7 +12,6 @@ import re
 import pandas as pd
 
 from datamate.ingest.roles import header_key, normalize_status
-from datamate.sql.dims import with_entity_keys
 from datamate.text import fold
 
 CANON_ROLES = ("order_id", "order_date", "order_ts", "status", "line_amount", "qty", "qty_base", "unit",
@@ -35,23 +34,6 @@ def is_walkin(names) -> pd.Series:
     """True for walk-in / anonymous customers (Khách lẻ, lẻ, kl, vãng lai, blank)."""
     s = pd.Series(names)
     return s.isna() | s.astype(str).map(lambda v: bool(_WALKIN.match(fold(v).strip(" .")))) | (s.astype(str).str.strip() == "")
-
-
-# Train + public: the busiest real customer holds at most 0.64% of orders and 3× the median; a walk-in label holds ~10%.
-_BUSY_SHARE, _BUSY_VS_MEDIAN = 0.05, 20
-_WALKIN_WORD = re.compile(r"\b(khach|kh|le|vang lai|quay)\b")
-
-
-def busy_customers(names: pd.Series, walkin: pd.Series, orders: pd.Series | None) -> tuple[set[str], list[str]]:
-    """Folded names with far too many orders for one customer: (walk-in labels unknown to _WALKIN, names to flag).
-
-    A name counts as a label only with a walk-in word, because a real contractor can also dominate a small shop."""
-    ids = orders if orders is not None else pd.Series(range(len(names)), index=names.index)
-    known = pd.DataFrame({"name": names.map(fold, na_action="ignore"), "order": ids})[~walkin].dropna()
-    counts = known.groupby("name")["order"].nunique()
-    busy = counts[(counts >= _BUSY_SHARE * ids.nunique()) & (counts >= _BUSY_VS_MEDIAN * counts.median())]
-    labels = {n for n in busy.index if _WALKIN_WORD.search(n)}
-    return labels, sorted(set(busy.index) - labels)
 
 
 def _role_cols(roles: dict[str, str]) -> dict[str, str]:
@@ -258,24 +240,17 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         out["order_ok"] = ~(bad | neg)
     out["counted"] = out["order_ok"] & ~neg & out["is_goods"]
     out = out.rename(columns={"line_amount": "amount"})
-    flagged: list[str] = []
     if "customer_id" in out.columns or "customer_name" in out.columns:
         name = out.get("customer_name", out.get("customer_id"))
         out["walkin"] = is_walkin(name) & (out["customer_id"].isna() | is_walkin(out["customer_id"]) if "customer_id" in out.columns else True)
-        labels, flagged = busy_customers(name, out["walkin"], out.get("order_id"))
-        out["walkin"] |= name.map(fold, na_action="ignore").isin(labels)
         if "customer_name" not in out.columns:
             out["customer_name"] = out["customer_id"]
         out["customer_name"] = out["customer_name"].map(strip_phone)
         cust = out["customer_id"].fillna(out["customer_name"]) if "customer_id" in out.columns else out["customer_name"]
         out["customer"] = cust.where(~out["walkin"])  # walk-ins have no customer key, so groupby drops them
-    out = with_entity_keys(out)
-    if "customer_key" in out.columns:
-        out["customer"] = out["customer_key"]
 
     order = ["order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base",
-             "unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key", "customer_id",
-             "customer_name", "walkin"]
+             "unit", "unit_price", "product_id", "product_name", "customer", "customer_id", "customer_name", "walkin"]
     canon = [c for c in order if c in out.columns]
     extra = [c for c in out.columns if c not in canon and c != "order_date"]
     out = out[canon + extra].reset_index(drop=True)
@@ -285,12 +260,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             "`counted` = goods line of an order that is not cancelled/returned and has no returned line (default revenue rule; 'đang giao' counts). "
             "`order_ok` = the line's order is not cancelled/returned. `is_goods` = False for voucher/points/shipping lines. "
             "`customer` = customer key (code if the shop has codes, else name), empty for walk-in customers (Khách lẻ, kl, ...). "
-            "`product_name` and `customer_name` hold ONE spelling per product or customer, so filtering or grouping on them "
-            "covers every spelling in the files (`*_name_raw` keeps the spelling of each row). "
             "`amount` = line amount after line discount. `order_ts` = order timestamp (use it for shifts). "
             "orders() rolls these lines up to one row per order.")
-    if flagged:
-        desc += f"\nCheck before ranking customers: {', '.join(flagged)} hold(s) over 5% of orders, unusual for one customer."
     return out, desc
 
 
@@ -302,8 +273,7 @@ def build_orders(sales: pd.DataFrame) -> pd.DataFrame:
     g = sales.groupby("order_id", sort=False, dropna=True)
     goods = sales[sales["is_goods"]]
     gg = goods.groupby("order_id", sort=False)
-    line_level = {"amount", "qty", "qty_base", "unit", "unit_price", "product_id", "product_key", "product_name",
-                  "product_name_raw", "is_goods", "counted"}
+    line_level = {"amount", "qty", "qty_base", "unit", "unit_price", "product_id", "product_name", "is_goods", "counted"}
     first = g[[c for c in sales.columns if c not in line_level and c != "order_id"]].first()
     first["counted"] = first["order_ok"]
     first["goods_amount"] = gg["amount"].sum().reindex(first.index).fillna(0)

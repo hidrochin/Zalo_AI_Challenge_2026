@@ -48,8 +48,7 @@ def _same(q_low: str, q_fold: str, n_low: str, n_fold: str) -> bool:
 
 
 class EntityIndex:
-    def __init__(self, names: dict[str, set[str]], display: dict[str, str] | None = None):
-        self.display = display or {}  # file spelling -> the one spelling sales_lines() uses
+    def __init__(self, names: dict[str, set[str]]):
         self.entries: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []  # kind, name, folded, lowercase tokens
         seen = set()
         for kind, vals in names.items():
@@ -93,13 +92,7 @@ class EntityIndex:
                 u = df[col].dropna().astype(str).unique()
                 if len(u) <= max_unique:
                     names[kind].update(x for x in u if 1 < len(x) <= 120)
-        display = {}
-        if sales is not None:
-            for col in ("product_name", "customer_name"):
-                if f"{col}_raw" in sales.columns:
-                    pairs = sales[[f"{col}_raw", col]].dropna().drop_duplicates()
-                    display.update(zip(pairs[f"{col}_raw"].astype(str).str.strip(), pairs[col].astype(str)))
-        return cls(names, display)
+        return cls(names)
 
     def find(self, question: str, max_per_span: int = 3) -> list[Mention]:
         words = list(_TOKEN.finditer(question))
@@ -136,7 +129,6 @@ class EntityIndex:
             per_span[(a, b)] += 1
             taken.append((a, b))
             kind, name, _, _ = self.entries[i]
-            name = self.display.get(name, name)
             start, end = words[a].start(), words[b - 1].end()
             tail = re.search(r"[^\w\s]+$", name)  # 'Bạc xỉu (M)': take the ')' along
             if full and tail and question[end:end + len(tail.group(0))] == tail.group(0):
