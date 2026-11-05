@@ -33,12 +33,18 @@ def parse_labels(reply: str, values: list[str]) -> dict[str, str | None]:
     return {fold(v): got[fold(v)] if got.get(fold(v)) in STATUS_LABELS else None for v in values}
 
 
+def ask_labels(biz: Business, generate: Callable[[str, list[str]], str]) -> dict[str, str | None]:
+    values = sorted({v for ti in biz.info.values() for v in ti.odd_status})
+    if not values:
+        return {}
+    parts = [f"Shop README:\n{biz.readme.text.strip()}", "Status values:\n" + "\n".join(f"- {v}" for v in values)]
+    return parse_labels(generate(SYSTEM, parts), values)
+
+
 def resolve_statuses(biz: Business, cache_dir: Path, generate: Callable[[str, list[str]], str]) -> bool:
     """Ask once about this shop's unknown statuses. True when new labels were saved; load the shop again to get them."""
-    values = sorted({v for ti in biz.info.values() for v in ti.odd_status})
     path = status_path(cache_dir, biz.split, biz.id)
-    if not values or path.exists():
+    if path.exists() or not any(ti.odd_status for ti in biz.info.values()):
         return False
-    parts = [f"Shop README:\n{biz.readme.text.strip()}", "Status values:\n" + "\n".join(f"- {v}" for v in values)]
-    path.write_text(json.dumps(parse_labels(generate(SYSTEM, parts), values), ensure_ascii=False, indent=1), encoding="utf-8")
+    path.write_text(json.dumps(ask_labels(biz, generate), ensure_ascii=False, indent=1), encoding="utf-8")
     return True
