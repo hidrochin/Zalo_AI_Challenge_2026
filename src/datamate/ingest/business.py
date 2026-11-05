@@ -15,7 +15,7 @@ from datamate.ingest.roles import assign_roles, normalize_status
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 11
+INGEST_VERSION = 12
 META_COLS = ("_file", "_sheet")
 
 _DATE_NAME = re.compile(r"\b(ngay|date|thoi gian|time|thoi diem|hsd|han su dung|han dung|han tra|han thanh toan|gio|sinh nhat|ngay sinh)\b")
@@ -120,6 +120,7 @@ def build_business(split_dir: Path, biz_id: str) -> Business:
         ti = TableInfo(name=name, sources=sources, descs=descs, roles=assign_roles(cols, descs, readme.order_keys))
         df = _clean(df, ti)
         tables[name] = df
+        warn.extend(_unplaced_rows(df, ti))
         info[name] = ti
 
     return Business(biz_id, Path(split_dir).name, readme, tables, info, warn, time.time() - t0)
@@ -154,6 +155,13 @@ def _unique(name: str, existing) -> str:
     while out in existing:
         out, i = f"{name}#{i}", i + 1
     return out
+
+
+def _unplaced_rows(df: pd.DataFrame, ti: TableInfo) -> list[str]:
+    """Rows left without an order id after forward-fill belong to no order, so their cells would read as missing data."""
+    id_col = next((c for c, r in ti.roles.items() if r == "order_id"), None)
+    n = int(df[id_col].isna().sum()) if id_col else 0
+    return [f"{ti.name}: {n} of {len(df)} rows have no `{id_col}` after forward-fill"] if n else []
 
 
 def _clean(df: pd.DataFrame, ti: TableInfo) -> pd.DataFrame:
