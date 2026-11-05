@@ -15,6 +15,7 @@ from datamate.agent.hints import time_hints
 from datamate.agent.prompt import build_system, business_part, check_message, extract_code, question_part, repair_message
 from datamate.agent.retrieve import ExampleBank
 from datamate.agent.sandbox import ExecPool
+from datamate.agent.statuses import resolve_statuses
 from datamate.agent.vote import decide
 from datamate.canon import build_sales
 from datamate.eval.scorer import read_jsonl, score
@@ -250,6 +251,9 @@ def run(cfg: RunConfig) -> dict:
     with sub_path.open("a", encoding="utf-8") as sub, tqdm(total=len(todo), desc="questions") as bar:
         for biz_id in sorted(by_biz):
             biz = load_business(split_dir, biz_id, cfg.cache_dir)
+            if resolve_statuses(biz, cfg.cache_dir, lambda system, parts: _generate(
+                    llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)):
+                biz = load_business(split_dir, biz_id, cfg.cache_dir)
             roles = {n: ti.roles for n, ti in biz.info.items()}
             sales, sales_desc = build_sales(biz.tables, roles)
             biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)

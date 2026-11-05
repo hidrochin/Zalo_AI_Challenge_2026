@@ -1,5 +1,6 @@
 """Load one business folder into cleaned, typed pandas tables (cached as pickle)."""
 
+import json
 import pickle
 import re
 import time
@@ -11,11 +12,11 @@ import pandas as pd
 
 from datamate.ingest.parsers import _is_null, is_explicit_date, parse_date, parse_number, parse_unit, year_month_hint
 from datamate.ingest.readme import Readme, parse_readme
-from datamate.ingest.roles import assign_roles, normalize_status
+from datamate.ingest.roles import assign_roles, is_known_status, normalize_status
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 12
+INGEST_VERSION = 13
 META_COLS = ("_file", "_sheet")
 
 _DATE_NAME = re.compile(r"\b(ngay|date|thoi gian|time|thoi diem|hsd|han su dung|han dung|han tra|han thanh toan|gio|sinh nhat|ngay sinh)\b")
@@ -32,6 +33,7 @@ class TableInfo:
     descs: dict[str, str]
     roles: dict[str, str]
     notes: list[str] = field(default_factory=list)
+    odd_status: list[str] = field(default_factory=list)  # order status values normalize_status only guesses at
 
 
 @dataclass
@@ -55,17 +57,39 @@ def load_calendar(split_dir: Path) -> pd.DataFrame:
 def load_business(split_dir: Path, biz_id: str, cache_dir: Path | None = None, rebuild: bool = False) -> Business:
     split_dir = Path(split_dir)
     cache = Path(cache_dir) / split_dir.name / f"{biz_id}.pkl" if cache_dir else None
+    biz = None
     if cache and cache.exists() and not rebuild:
         with cache.open("rb") as f:
             biz = pickle.load(f)
-        if getattr(biz, "version", None) == INGEST_VERSION:
-            return biz
-    biz = build_business(split_dir, biz_id)
-    if cache:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        with cache.open("wb") as f:
-            pickle.dump(biz, f, protocol=pickle.HIGHEST_PROTOCOL)
+        if getattr(biz, "version", None) != INGEST_VERSION:
+            biz = None
+    if biz is None:
+        biz = build_business(split_dir, biz_id)
+        if cache:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            with cache.open("wb") as f:
+                pickle.dump(biz, f, protocol=pickle.HIGHEST_PROTOCOL)
+    labels = status_path(cache_dir, split_dir.name, biz_id) if cache_dir else None
+    if labels and labels.exists():
+        apply_status(biz, json.loads(labels.read_text(encoding="utf-8")))
     return biz
+
+
+def status_path(cache_dir: Path, split: str, biz_id: str) -> Path:
+    return Path(cache_dir) / split / f"{biz_id}.status.json"
+
+
+def apply_status(biz: Business, labels: dict[str, str | None]) -> None:
+    """Relabel unknown order statuses with the model's answers (folded value -> label, None when it was not sure)."""
+    for name, ti in biz.info.items():
+        for c, role in ti.roles.items():
+            if role == "status" and ti.odd_status:
+                df = biz.tables[name]
+                new = df[c].map(lambda v: labels.get(fold(v)) if isinstance(v, str) else None)
+                df[f"{c}__norm"] = new.where(new.notna(), df[f"{c}__norm"])
+    unsure = sorted({v for ti in biz.info.values() for v in ti.odd_status if labels.get(fold(v)) is None})
+    if unsure:
+        biz.warnings.append(f"order status values not understood, counted as hoàn thành: {', '.join(unsure)}")
 
 
 def build_business(split_dir: Path, biz_id: str) -> Business:
@@ -183,6 +207,8 @@ def _clean(df: pd.DataFrame, ti: TableInfo) -> pd.DataFrame:
         if r == "status" and c in df.columns:
             df[f"{c}__norm"] = df[c].map(lambda v: None if _is_null(v) else normalize_status(v))
             ti.notes.append(f"`{c}__norm` = `{c}` mapped to hoàn thành/huỷ/trả hàng/đang giao")
+            if id_col:  # other tables use the role for customer or device states, which no order rule reads
+                ti.odd_status += sorted({str(v) for v in df[c].dropna().unique() if not is_known_status(v)})
     return df
 
 
