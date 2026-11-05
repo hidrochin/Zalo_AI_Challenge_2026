@@ -36,6 +36,23 @@ def is_walkin(names) -> pd.Series:
     return s.isna() | s.astype(str).map(lambda v: bool(_WALKIN.match(fold(v).strip(" .")))) | (s.astype(str).str.strip() == "")
 
 
+# Train + public: the busiest real customer holds at most 0.64% of orders and 3× the median; a walk-in label holds ~10%.
+_BUSY_SHARE, _BUSY_VS_MEDIAN = 0.05, 20
+_WALKIN_WORD = re.compile(r"\b(khach|kh|le|vang lai|quay)\b")
+
+
+def busy_customers(names: pd.Series, walkin: pd.Series, orders: pd.Series | None) -> tuple[set[str], list[str]]:
+    """Folded names with far too many orders for one customer: (walk-in labels unknown to _WALKIN, names to flag).
+
+    A name counts as a label only with a walk-in word, because a real contractor can also dominate a small shop."""
+    ids = orders if orders is not None else pd.Series(range(len(names)), index=names.index)
+    known = pd.DataFrame({"name": names.map(fold, na_action="ignore"), "order": ids})[~walkin].dropna()
+    counts = known.groupby("name")["order"].nunique()
+    busy = counts[(counts >= _BUSY_SHARE * ids.nunique()) & (counts >= _BUSY_VS_MEDIAN * counts.median())]
+    labels = {n for n in busy.index if _WALKIN_WORD.search(n)}
+    return labels, sorted(set(busy.index) - labels)
+
+
 def _role_cols(roles: dict[str, str]) -> dict[str, str]:
     return {r: c for c, r in roles.items()}
 
@@ -240,9 +257,12 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         out["order_ok"] = ~(bad | neg)
     out["counted"] = out["order_ok"] & ~neg & out["is_goods"]
     out = out.rename(columns={"line_amount": "amount"})
+    flagged: list[str] = []
     if "customer_id" in out.columns or "customer_name" in out.columns:
         name = out.get("customer_name", out.get("customer_id"))
         out["walkin"] = is_walkin(name) & (out["customer_id"].isna() | is_walkin(out["customer_id"]) if "customer_id" in out.columns else True)
+        labels, flagged = busy_customers(name, out["walkin"], out.get("order_id"))
+        out["walkin"] |= name.map(fold, na_action="ignore").isin(labels)
         if "customer_name" not in out.columns:
             out["customer_name"] = out["customer_id"]
         out["customer_name"] = out["customer_name"].map(strip_phone)
@@ -262,6 +282,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             "`customer` = customer key (code if the shop has codes, else name), empty for walk-in customers (Khách lẻ, kl, ...). "
             "`amount` = line amount after line discount. `order_ts` = order timestamp (use it for shifts). "
             "orders() rolls these lines up to one row per order.")
+    if flagged:
+        desc += f"\nCheck before ranking customers: {', '.join(flagged)} hold(s) over 5% of orders, unusual for one customer."
     return out, desc
 
 
