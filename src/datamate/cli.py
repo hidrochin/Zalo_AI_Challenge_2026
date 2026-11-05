@@ -67,7 +67,7 @@ def cmd_run(a) -> None:
         ids += [ln.strip() for ln in Path(a.ids_file).read_text(encoding="utf-8").splitlines() if ln.strip()]
     cfg = RunConfig(
         split=a.split, data_root=Path(a.data_root), out_dir=Path(out), cache_dir=Path(a.cache_dir),
-        backend=a.backend, model=a.model, base_url=a.base_url, samples=a.samples, temperature=a.temperature,
+        backend=a.backend, engine=a.engine, model=a.model, base_url=a.base_url, samples=a.samples, temperature=a.temperature,
         max_tokens=a.max_tokens, enable_thinking=think, effort=a.effort, concurrency=a.concurrency,
         exec_workers=a.exec_workers, timeout=a.timeout, repair=a.repair, k_examples=a.k_examples,
         examples_path=Path(a.examples) if a.examples else None, min_share=a.min_share, unans_share=a.unans_share,
@@ -221,6 +221,7 @@ def main(argv=None) -> None:
     s = sub.add_parser("run", help="answer questions and (on train) score them")
     s.add_argument("--split", default="train")
     s.add_argument("--backend", choices=["local", "claude", "gemini", "dummy"], default="local")
+    s.add_argument("--engine", choices=["pandas", "sql"], default="pandas", help="what the model writes")
     s.add_argument("--model", default="qwen3.5:9b")
     s.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible server (Ollama, vLLM, ...)")
     s.add_argument("--samples", type=int, default=1, help="1 greedy + (samples-1) seeded samples, then vote")

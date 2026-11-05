@@ -6,15 +6,17 @@ import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from tqdm import tqdm
 
 from datamate.agent.hints import time_hints
 from datamate.agent.prompt import build_system, business_part, check_message, extract_code, question_part, repair_message
 from datamate.agent.retrieve import ExampleBank
-from datamate.agent.sandbox import ExecPool
+from datamate.agent.sandbox import ExecPool, name_index
 from datamate.agent.vote import decide
 from datamate.canon import build_sales
 from datamate.eval.scorer import read_jsonl, score
@@ -23,6 +25,9 @@ from datamate.ingest.schema_card import schema_card
 from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, invariants
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
+from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, sql_card, sql_check_message, sql_question_part,
+                                sql_repair_message, sql_shadow)
+from datamate.sql.store import STORE_VERSION, ensure_store
 
 
 @dataclass
@@ -32,6 +37,7 @@ class RunConfig:
     out_dir: Path = Path("outputs/run")
     cache_dir: Path = Path("cache/ingest")
     backend: str = "local"  # local | claude | gemini | dummy
+    engine: str = "pandas"  # pandas | sql: what the model writes
     model: str = "qwen3.5:9b"
     base_url: str = "http://localhost:11434/v1"
     samples: int = 1
@@ -55,6 +61,30 @@ class RunConfig:
     businesses: list[str] = field(default_factory=list)
     ids: list[str] = field(default_factory=list)
     resume: bool = True
+
+
+def _pandas_shadow(text: str, hints: list[str]) -> tuple[str, str] | None:
+    calls = [h.split(" -> ")[1].split(" = ")[0].split("  #")[0] for h in hints]
+    return (text, calls[0]) if len(calls) == 1 else None  # semantic cross-check needs exactly one period
+
+
+class Engine(NamedTuple):
+    """What differs between answering with a pandas program and with a SQL query."""
+    build_system: Callable
+    extract: Callable
+    question_part: Callable
+    shadow: Callable
+    repair_message: Callable
+    check_message: Callable
+    no_code: str
+
+
+ENGINES = {
+    "pandas": Engine(build_system, extract_code, question_part, _pandas_shadow, repair_message, check_message,
+                     "No ```python code block found in the reply."),
+    "sql": Engine(build_sql_system, extract_sql, sql_question_part, sql_shadow, sql_repair_message, sql_check_message,
+                  "No ```sql block or UNANSWERABLE line found in the reply."),
+}
 
 
 class LLMUnavailable(RuntimeError):
@@ -89,6 +119,8 @@ class DummyLLM:
     """Plumbing test without a model: answers the row count of the first table."""
 
     def generate(self, system, user_parts, history, temperature, seed, max_tokens=None) -> str:
+        if "DuckDB" in system:
+            return "```sql\n-- type: count\nselect count(*) from calendar\n```"
         return "```python\nanswer_number(len(next(iter(T.values()))), kind='count')\n```"
 
 
@@ -160,18 +192,18 @@ def _expect_text(e: Expect) -> str | None:
     return t + (f", at most {e.k} items" if e.k else "")
 
 
-def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
+def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
                    cal=None, index: EntityIndex | None = None) -> dict:
     t0 = time.time()
+    engine = ENGINES[cfg.engine]
     text, rw, pre = preprocess(q, llm, cfg, index)
     expect = expect_answer(text, rw)
     norm = {**pre.get("norm", {}), "expect": _expect_text(expect) if expect.hard else None}
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
     hints = time_hints(text, q["as_of_date"], cal)
     expect.window = date_window(text, hints)
-    calls = [h.split(" -> ")[1].split(" = ")[0].split("  #")[0] for h in hints]
-    shadow = (text, calls[0]) if len(calls) == 1 else None  # semantic cross-check needs exactly one period
-    user_parts = [biz_part, question_part(q["question"], q["as_of_date"], examples, hints, norm)]
+    shadow = engine.shadow(text, hints)
+    user_parts = [biz_part, engine.question_part(q["question"], q["as_of_date"], examples, hints, norm)]
     samples = []
     for s in range(cfg.samples):
         temperature = 0.0 if s == 0 else cfg.temperature
@@ -187,9 +219,9 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
                 out = {"result": None, "error": f"LLM error: {e!r}", "stdout": ""}
                 sample["attempts"].append({"llm_error": repr(e)})
                 break
-            code = extract_code(text_reply)
+            code = engine.extract(text_reply)
             if code is None:
-                out = {"result": None, "error": "No ```python code block found in the reply.", "stdout": ""}
+                out = {"result": None, "error": engine.no_code, "stdout": ""}
             else:
                 out = pool.run(code, q["as_of_date"], shadow)
             if out["error"] is None and out["result"] is not None:
@@ -203,7 +235,7 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
             sample["attempts"].append({"reply": text_reply, "code": code, **out})
             if out["error"] is None and not (out.get("warning") and attempt < cfg.repair):
                 break
-            msg = repair_message(out) if out["error"] else check_message(out["warning"])
+            msg = engine.repair_message(out) if out["error"] else engine.check_message(out["warning"])
             history += [{"role": "assistant", "content": text_reply}, {"role": "user", "content": msg}]
         if out["result"] is not None and out.get("warning") and out.get("sticky", True):
             out = {**out, "result": None, "error": f"unconfirmed: {out['warning']}"}  # 0 is rarely right; wrong shape is wrong
@@ -224,7 +256,8 @@ def run(cfg: RunConfig) -> dict:
     from datamate import dm
     from datamate.ingest.business import INGEST_VERSION
 
-    meta = {**asdict(cfg), "semantic_version": dm.SEMANTIC_VERSION, "ingest_version": INGEST_VERSION}
+    meta = {**asdict(cfg), "semantic_version": dm.SEMANTIC_VERSION, "ingest_version": INGEST_VERSION,
+            "store_version": STORE_VERSION}
     (out_dir / "config.json").write_text(json.dumps(meta, default=str, indent=2), encoding="utf-8")
 
     questions = _select(read_jsonl(split_dir / "questions.jsonl"), cfg)
@@ -235,7 +268,7 @@ def run(cfg: RunConfig) -> dict:
     todo = [q for q in questions if q["id"] not in done]
 
     llm = make_llm(cfg)
-    system = build_system((split_dir / "rulebook.md").read_text(encoding="utf-8"))
+    system = ENGINES[cfg.engine].build_system((split_dir / "rulebook.md").read_text(encoding="utf-8"))
     bank = ExampleBank.from_train(Path(cfg.data_root) / "train", cfg.examples_path,
                                   normalize=None if cfg.normalize == "off" else (lambda t: rules_normalize(t).text))
     cal = load_calendar(split_dir)
@@ -252,9 +285,14 @@ def run(cfg: RunConfig) -> dict:
             biz = load_business(split_dir, biz_id, cfg.cache_dir)
             roles = {n: ti.roles for n, ti in biz.info.items()}
             sales, sales_desc = build_sales(biz.tables, roles)
-            biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
-            pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
+            if cfg.engine == "sql":
+                store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
+                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout)
+                biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, pool.macros()))
+            else:
+                biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
+                pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
                     futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index)
