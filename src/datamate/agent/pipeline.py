@@ -31,7 +31,7 @@ class RunConfig:
     data_root: Path = Path("data")
     out_dir: Path = Path("outputs/run")
     cache_dir: Path = Path("cache/ingest")
-    backend: str = "local"  # local | claude | dummy
+    backend: str = "local"  # local | claude | gemini | dummy
     model: str = "qwen3.5:9b"
     base_url: str = "http://localhost:11434/v1"
     samples: int = 1
@@ -101,6 +101,12 @@ def make_llm(cfg: RunConfig):
         from datamate.agent.llm_claude import ClaudeLLM
 
         return ClaudeLLM(model=cfg.model, effort=cfg.effort, max_tokens=max(cfg.max_tokens, 16000))
+    if cfg.backend == "gemini":
+        if cfg.split != "train":
+            raise SystemExit("The Gemini backend runs on the train split only; public test labels are on hold.")
+        from datamate.agent.llm_gemini import GeminiLLM
+
+        return GeminiLLM(cfg.model)
     from datamate.agent.llm_local import LocalLLM
 
     return LocalLLM(cfg.base_url, cfg.model, max_tokens=cfg.max_tokens, enable_thinking=cfg.enable_thinking)
