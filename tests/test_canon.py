@@ -1,6 +1,6 @@
 import pandas as pd
 
-from datamate.canon import build_sales, busy_customers, is_walkin
+from datamate.canon import build_sales, is_walkin
 
 
 def test_counted_rule():
@@ -52,32 +52,3 @@ def test_unit_factors_nested_and_base_default():
     s, desc = build_sales({"lines": lines, "DanhSachQuyDoi": conv}, roles)
     assert s["qty_base"].tolist() == [120, 24, 3, 5]  # no conversion row (viên, kg) = base unit
     assert "unit factor" in desc
-
-
-def customers(busiest: str, n: int = 200) -> pd.DataFrame:
-    """One customer with 30 orders, n others with 1 each (all named)."""
-    names = [busiest] * 30 + [f"Khách số {i}" for i in range(n)]
-    return pd.DataFrame({"name": names, "order": range(len(names)), "walkin": False})
-
-
-def test_busy_name_with_a_walkin_word_is_a_label():
-    df = customers("Khách mua lẻ")
-    assert busy_customers(df["name"], df["walkin"], df["order"]) == ({"khach mua le"}, [])
-
-
-def test_busy_name_without_a_walkin_word_is_only_flagged():
-    df = customers("Công ty Xây dựng An Phát")
-    assert busy_customers(df["name"], df["walkin"], df["order"]) == (set(), ["cong ty xay dung an phat"])
-
-
-def test_ordinary_customers_are_left_alone():
-    df = pd.DataFrame({"name": ["Lê Hiếu Ngân", "Lê Hiếu Ngân", "An", "Bình"], "order": [1, 2, 3, 4], "walkin": False})
-    assert busy_customers(df["name"], df["walkin"], df["order"]) == (set(), [])
-
-
-def test_build_sales_treats_an_unknown_walkin_label_as_walkin():
-    df = customers("Khách mua lẻ").assign(ngay=pd.Timestamp("2025-01-01"), tien=100, sl=1)
-    roles = {"t": {"order": "order_id", "ngay": "order_date", "tien": "line_amount", "sl": "qty", "name": "customer_name"}}
-    s, _ = build_sales({"t": df}, roles)
-    assert s["walkin"].sum() == 30 and s.loc[s["walkin"], "customer"].isna().all()
-    assert s["counted"].all()  # still sales

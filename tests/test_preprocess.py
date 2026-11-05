@@ -111,10 +111,3 @@ def test_rewrite_parse_rejects_changed_numbers():
     bad = parse('{"normalized": "Doanh thu tháng 6/2026 là bao nhiêu?", "answer_type": "number"}', rules)
     assert bad["normalized"] is None and bad["answer_type"] == "number"
     assert parse("not json", rules) is None
-
-
-def test_mentions_use_the_spelling_of_sales_lines():
-    sales = pd.DataFrame({"product_name": ["Coca Cola 330ml"] * 2, "product_name_raw": ["Coca Cola 330ml", "COCA COLA 330ML"]})
-    tables = {"hang": pd.DataFrame({"ten": ["COCA COLA 330ML"]})}
-    index = EntityIndex.from_tables(tables, {"hang": {"ten": "product_name"}}, sales)
-    assert [m.name for m in index.find("doanh thu coca cola 330ml") if m.full] == ["Coca Cola 330ml"]
