@@ -16,7 +16,7 @@ from datamate.ingest.roles import assign_roles, is_known_status, normalize_statu
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 15
+INGEST_VERSION = 16
 META_COLS = ("_file", "_sheet")
 
 _DATE_NAME = re.compile(r"\b(ngay|date|thoi gian|time|thoi diem|hsd|han su dung|han dung|han tra|han thanh toan|gio|sinh nhat|ngay sinh)\b")
@@ -208,14 +208,16 @@ def _unplaced_rows(df: pd.DataFrame, ti: TableInfo) -> list[str]:
 
 
 def _block_totals(df: pd.DataFrame, ti: TableInfo, min_rows: int = 3) -> pd.Series:
-    """Rows that add up the lines right above them, whatever their label says: no order id, no quantity, and an amount
-    equal to the sum of at least min_rows lines. Forward-fill would otherwise turn them into lines of the previous order."""
+    """Rows that add up the lines right above them, whatever their label says: no quantity, no order id or no date (the
+    label can sit in the id column), and an amount equal to the sum of at least min_rows lines. Forward-fill would
+    otherwise turn them into lines of an order."""
     by_role = {r: c for c, r in ti.roles.items()}
     out = pd.Series(False, index=df.index)
     if not {"order_id", "qty", "line_amount"} <= set(by_role):
         return out
     amount = pd.Series([parse_number(v) for v in df[by_role["line_amount"]]], index=df.index, dtype=float).fillna(0.0)
-    stray = df[by_role["order_id"]].isna() & df[by_role["qty"]].isna() & (amount != 0)
+    undated = df[by_role["order_date"]].isna() if "order_date" in by_role else False
+    stray = (df[by_role["order_id"]].isna() | undated) & df[by_role["qty"]].isna() & (amount != 0)
     sums = [0.0]  # running sum after each kept line
     for i, (v, s) in enumerate(zip(amount, stray)):
         if s and any(abs(sums[-1] - v - p) <= 1 for p in sums[:-min_rows + 1]):
