@@ -149,6 +149,7 @@ uv run datamate semantic-check                       # contract tests of dm prim
 
 uv run datamate sql-build --split train              # one DuckDB database per business -> cache/duckdb/ (also public_test)
 uv run datamate sql-check                            # contract tests of the SQL macros against train gold (no LLM)
+uv run datamate run --engine sql ...                 # the model writes one DuckDB SELECT instead of a pandas program
 ```
 
 **Run directory contents:** `submission.jsonl`, `logs/<id>.json` (prompt examples, every
@@ -193,7 +194,7 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 - Try text-to-SQL on DuckDB, plus a no-LLM fast branch, per-business rules, entity variants and more primitives.
   Plan: [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md). Started: [src/datamate/sql/](src/datamate/sql/) has entity
   dimensions and one DuckDB database per business, not yet wired into the pipeline. All 44 databases build, and the
-  macros match train gold on 766/766 computed contract questions. 182 tests pass.
+  macros match train gold on 766/766 computed contract questions. 212 tests pass.
 - 2026-11-06 (`INGEST_VERSION` 12, `SEMANTIC_VERSION` 2026-11-06.1): subtotal rows with a blank date cell are dropped (589
   rows: dev_008, biz_105); ingest warns about rows left without an order id; unknown walk-in labels are found by order
   share (`busy_customers`).
@@ -265,13 +266,14 @@ new primitive all added at once, so E1–E3 still have to separate them.
    E1, E5. Run each at full-train size on Kaggle. The repeat run for run-to-run variability isn't done yet.
 5. Decide with the mentor whether to fine-tune, and on Python or SQL (PROPOSAL_V3 §8). The proposal still says
    E0 is running.
-6. `kaggle/push.sh` has the `DM_KERNEL` change uncommitted.
 
 **Kaggle notes**
 - Fetch: `uvx --with six kaggle kernels output hydrochii/<kernel> -p <dir>`. It fetches one file at a time and
   can hang without an error (a socket in `CLOSE_WAIT`). If the file count stops growing, stop it and run several
   downloads in parallel with `--file-pattern 'logs/q_[0-3]'` etc. and `--page-size 200`.
 - `DM_KERNEL=<name> kaggle/push.sh update` pushes to another kernel, so a running one isn't replaced.
+- `DM_ENGINE=sql` runs the text-to-SQL engine. `DM_DATASET=<name>` gives a branch its own bundle (omit `update` the first
+  time, to create it). `BUILD.txt` in the outputs records the branch, commit and source hash of the run.
 - `DM_STAGES=public|dev120|train` picks the stages; the default is `public`.
 
 ## Status (2026-11-03, evening)

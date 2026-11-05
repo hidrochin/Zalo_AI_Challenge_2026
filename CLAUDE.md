@@ -230,7 +230,7 @@ profit uses the **cost recorded on the sale line**.
   - Public leaderboard: PA −0.110 → 0.040 → **0.288** (pipeline `98d4c7b`, precision ≈ 68%).
   - E0, all 3000 train questions on Kaggle: **PA 0.473** (precision 77.7%), logs in
     `outputs/kaggle/result_train/out/train`.
-  - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train DM_KERNEL=<name> kaggle/push.sh update`.
+  - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train DM_KERNEL=<name> DM_ENGINE=pandas|sql DM_DATASET=<bundle> kaggle/push.sh update`.
   - The prompt is about 13–16k tokens, so a local server needs ≥ 24k context (set `num_ctx` through
     a Modelfile).
 - **Layout:**
@@ -243,7 +243,7 @@ profit uses the **cost recorded on the sale line**.
   - `src/datamate/eval/`: exact PA scorer (`scorer.py`), paired run comparison (`compare.py`), offline
     answer-check eval (`checks.py`), semantic contract tests of `dm` primitives (`semantic.py`)
   - `src/datamate/sql/`: entity dimensions (`dims.py`), per-business DuckDB views and macros (`store.py`), contract
-    replay (`check.py`); not wired into the pipeline yet
+    replay (`check.py`), the text-to-SQL engine (`agent.py`, `datamate run --engine sql`)
   - `src/datamate/cli.py`: `datamate ingest | run | score | compare | eval-checks | semantic-check | sql-build |
     sql-check | normalize | validate | export-examples`
 - Bump `dm.SEMANTIC_VERSION` whenever a primitive's definition changes, and re-run `datamate semantic-check`.
