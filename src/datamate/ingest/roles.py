@@ -111,6 +111,11 @@ def assign_roles(columns: list[str], descs: dict[str, str], order_keys: set[str]
 
 
 STATUS_LABELS = ("hoàn thành", "huỷ", "trả hàng", "đang giao")
+# Folded values of a finished order. normalize_status also lands on 'hoàn thành' for anything it cannot place,
+# so a value outside this list is unknown, not finished: agent/statuses.py asks the model about it.
+_DONE = frozenset({"hoan thanh", "da hoan thanh", "hoan tat", "da hoan tat", "xong", "da xong", "completed", "done", "ok",
+                   "thanh cong", "success", "da lay", "da giao", "da giao hang", "delivered", "da nhan", "da nhan hang",
+                   "received", "dang xu ly"})
 
 
 def normalize_status(value) -> str | None:
@@ -128,3 +133,7 @@ def normalize_status(value) -> str | None:
     if re.search(r"dang (giao|van chuyen|ship|gui)|chua giao|cho giao|shipping|delivering", s):
         return "đang giao"
     return "hoàn thành"
+
+
+def is_known_status(value) -> bool:
+    return fold(value) in _DONE or normalize_status(value) != "hoàn thành"
