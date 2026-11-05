@@ -12,6 +12,7 @@ import re
 import pandas as pd
 
 from datamate.ingest.roles import header_key, normalize_status
+from datamate.sql.dims import with_entity_keys
 from datamate.text import fold
 
 CANON_ROLES = ("order_id", "order_date", "order_ts", "status", "line_amount", "qty", "qty_base", "unit",
@@ -268,9 +269,13 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         out["customer_name"] = out["customer_name"].map(strip_phone)
         cust = out["customer_id"].fillna(out["customer_name"]) if "customer_id" in out.columns else out["customer_name"]
         out["customer"] = cust.where(~out["walkin"])  # walk-ins have no customer key, so groupby drops them
+    out = with_entity_keys(out)
+    if "customer_key" in out.columns:
+        out["customer"] = out["customer_key"]
 
     order = ["order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base",
-             "unit", "unit_price", "product_id", "product_name", "customer", "customer_id", "customer_name", "walkin"]
+             "unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key", "customer_id",
+             "customer_name", "walkin"]
     canon = [c for c in order if c in out.columns]
     extra = [c for c in out.columns if c not in canon and c != "order_date"]
     out = out[canon + extra].reset_index(drop=True)
@@ -280,6 +285,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             "`counted` = goods line of an order that is not cancelled/returned and has no returned line (default revenue rule; 'đang giao' counts). "
             "`order_ok` = the line's order is not cancelled/returned. `is_goods` = False for voucher/points/shipping lines. "
             "`customer` = customer key (code if the shop has codes, else name), empty for walk-in customers (Khách lẻ, kl, ...). "
+            "`product_name` and `customer_name` hold ONE spelling per product or customer, so filtering or grouping on them "
+            "covers every spelling in the files (`*_name_raw` keeps the spelling of each row). "
             "`amount` = line amount after line discount. `order_ts` = order timestamp (use it for shifts). "
             "orders() rolls these lines up to one row per order.")
     if flagged:
@@ -295,7 +302,8 @@ def build_orders(sales: pd.DataFrame) -> pd.DataFrame:
     g = sales.groupby("order_id", sort=False, dropna=True)
     goods = sales[sales["is_goods"]]
     gg = goods.groupby("order_id", sort=False)
-    line_level = {"amount", "qty", "qty_base", "unit", "unit_price", "product_id", "product_name", "is_goods", "counted"}
+    line_level = {"amount", "qty", "qty_base", "unit", "unit_price", "product_id", "product_key", "product_name",
+                  "product_name_raw", "is_goods", "counted"}
     first = g[[c for c in sales.columns if c not in line_level and c != "order_id"]].first()
     first["counted"] = first["order_ok"]
     first["goods_amount"] = gg["amount"].sum().reindex(first.index).fillna(0)
