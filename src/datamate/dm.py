@@ -23,7 +23,7 @@ from datamate.text import fold, norm_key
 # Version of the business definitions behind the primitives (sales_lines, orders, revenue, avg_order_value, ...).
 # Bump it whenever a definition changes; it is logged with every run. `datamate semantic-check` tests the
 # definitions against train gold answers.
-SEMANTIC_VERSION = "2026-11-03.1"
+SEMANTIC_VERSION = "2026-11-06.1"
 
 AS_OF: pd.Timestamp | None = None
 CAL: pd.DataFrame | None = None

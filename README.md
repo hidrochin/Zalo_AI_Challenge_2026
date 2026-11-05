@@ -4,8 +4,9 @@ An offline agent that answers everyday Vietnamese questions over a small busines
 SQLite files.
 
 - Rules and data analysis: [CLAUDE.md](CLAUDE.md)
-- Plan of record: [docs/PROPOSAL.md](docs/PROPOSAL.md); current research plan (Vietnamese, for the mentor):
+- Plan of record: [docs/PROPOSAL.md](docs/PROPOSAL.md); research plan (Vietnamese, for the mentor):
   [docs/PROPOSAL_V3.md](docs/PROPOSAL_V3.md), semantic-aware code generation and experiments E0–E4
+- Current plan (Vietnamese): [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md), fast branch and text-to-SQL on DuckDB
 
 ## Architecture
 
@@ -128,6 +129,10 @@ nice -n 10 uv run datamate run --model qwen3.5-9b-24k --thinking off --ids-file 
 uv run datamate run --model qwen3.5-9b-24k --thinking off --biz biz_103 --limit 10
 uv run datamate run --model qwen3.5-9b-24k --thinking off --ids q_001883280e83 q_00195e1e4049
 
+# Gemini on train (needs GEMINI_API_TOKEN in .env)
+uv run datamate run --backend gemini --model gemini-3-flash-preview --ids-file assets/dev60.txt --normalize rules \
+    --concurrency 2 --out outputs/gemini_60
+
 # Claude upper bound / example-bank builder (train only, needs ANTHROPIC_API_KEY, costs money)
 uv run datamate run --backend claude --model claude-opus-5-5 --limit 50 --out outputs/claude_50
 uv run datamate export-examples outputs/claude_50    # verified programs -> assets/examples.jsonl
@@ -141,6 +146,9 @@ uv run datamate build-lexicon                        # rebuild assets/vi_rhymes.
 uv run datamate compare outputs/<run_a> outputs/<run_b>   # paired ΔPA, bootstrap CI, transitions, outcomes
 uv run datamate eval-checks outputs/<run> ...        # offline: answer checks on gold (false alarms) and on logged runs
 uv run datamate semantic-check                       # contract tests of dm primitives against train gold (~18 s, no LLM)
+
+uv run datamate sql-build --split train              # one DuckDB database per business -> cache/duckdb/ (also public_test)
+uv run datamate sql-check                            # contract tests of the SQL macros against train gold (no LLM)
 ```
 
 **Run directory contents:** `submission.jsonl`, `logs/<id>.json` (prompt examples, every
@@ -169,18 +177,67 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ## Compliance guardrails (built in)
 
-- The `claude` backend refuses to run on any split except `train`. Test data never goes to an
-  external API.
+- The `claude` and `gemini` backends refuse to run on any split except `train`.
+- Private test data never goes to an external API. Public test data may go to Gemini only to build evaluation
+  labels (the team confirmed this with the organizers on 2026-11-05); those labels never feed training, few-shot
+  examples or rule vocabularies.
 - Examples are retrieved only from train, and questions from the same business are excluded.
 - There is no logic keyed on business or question IDs.
 - `/data` is read-only; caches and outputs live in `cache/` and `outputs/`.
 
 ---
 
+## Status (2026-11-05, evening): direction change
+
+**Decisions after the mentor review**
+- Try text-to-SQL on DuckDB, plus a no-LLM fast branch, per-business rules, entity variants and more primitives.
+  Plan: [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md). Started: [src/datamate/sql/](src/datamate/sql/) has entity
+  dimensions and one DuckDB database per business, not yet wired into the pipeline. All 44 databases build, and the
+  macros match train gold on 766/766 computed contract questions. 182 tests pass.
+- 2026-11-06 (`INGEST_VERSION` 12, `SEMANTIC_VERSION` 2026-11-06.1): subtotal rows with a blank date cell are dropped (589
+  rows: dev_008, biz_105); ingest warns about rows left without an order id; unknown walk-in labels are found by order
+  share (`busy_customers`).
+- Entity keys are in `build_sales` (since `SEMANTIC_VERSION` 2026-11-05.1): `product_name` and `customer_name` now hold one
+  spelling per entity, with the source spelling in `*_name_raw`. On 60 train questions with `gemini-3-flash-preview`,
+  PA rose 0.82 → 0.95 (54 / 5 / 1 → 58 / 1 / 1, ΔPA 95% CI [0.02, 0.28]). The gain may be optimistic, because these 60
+  questions exposed the bug, and it is not measured on Qwen3.5-9B.
+- Public labels are **on hold**: the team does not need public results yet, and self-hosting on Vast AI may be cheaper.
+  Nothing from public test has been sent. The `gemini` backend refuses any split but train. If it reopens, the pick is
+  `gemini-3-flash-preview` (plan §6, `outputs/gemini_pilot/`).
+- Deadline: **2026-11-15**. The plan has a day-by-day schedule, and 13–15/11 stay reserved for Docker.
+- pandas code generation is **paused**, not removed. The team decides later, using gate G1 in the plan.
+- Docker, vLLM and Blackwell work is deferred.
+- Time budget: private size is unknown. Assume 500 questions (43 s each), and design for 1000 (21.6 s each).
+
+**Code generation: state when paused**
+
+| item | state |
+|---|---|
+| Code | commit `fad0f45`, `SEMANTIC_VERSION` 2026-11-03.1, `INGEST_VERSION` 11, 157 tests pass |
+| Flow | preprocess → prompt → one program → sandbox → checks → one repair round → finalize; runs end to end on Kaggle 2× T4 |
+| Best public score | PA **0.288**, about 550 / 262 / 188, 4.6 s/question, on `98d4c7b` |
+| Train score | PA 0.473 from E0, on code **older** than `98d4c7b` (see the correction below) |
+| Current code on train | **not measured** |
+| Module contribution (E1–E3) | not measured; `--checks off|structural|all` not added |
+| Run-to-run variability | not measured |
+| Few-shot examples | no code: `assets/examples.jsonl` does not exist, so examples carry only question and answer |
+| Semantic layer | `revenue`, `avg_order_value`, `price_on`, `sales_lines`, `orders`, periods, rank and answer helpers; no debt, stock or profit primitive |
+| Known defects | contracts are not gated on rulebook clauses |
+| Largest failure group | E0: `KeyError` 186, `TypeError` 70, validation abstains 102 |
+| Paused experiments | E1–E5 in [docs/PROPOSAL_V3.md](docs/PROPOSAL_V3.md) |
+
+To resume: rerun train on the current code with `DM_KERNEL=<name> DM_STAGES=train kaggle/push.sh update` (about 3 h),
+then continue from "Next steps" below. That rerun is also the baseline for gate G1.
+
+**Correction to the section below.** E0 did not run `98d4c7b`. Its `config.json` has no `normalize`,
+`semantic_version` or `ingest_version`, and its 3000 logs have no `pre` or `expect`, so it ran earlier code without
+preprocessing, the new checks or the shadow check. Only the public run used `98d4c7b`. The two scores are not
+comparable.
+
 ## Status (2026-11-05)
 
-Same pipeline for both runs (commit `98d4c7b`, `SEMANTIC_VERSION` 2026-11-03.1, `INGEST_VERSION` 11),
-Qwen3.5-9B fp16 on Kaggle 2× T4, `--normalize llm`, 1 greedy sample, concurrency 16.
+Public run: commit `98d4c7b`, `SEMANTIC_VERSION` 2026-11-03.1, `INGEST_VERSION` 11, Qwen3.5-9B fp16 on Kaggle 2× T4,
+`--normalize llm`, 1 greedy sample, concurrency 16. E0 used older code; see the correction above.
 
 | run | kernel | output | PA | correct / wrong / abstain | precision | time |
 |---|---|---|---|---|---|---|
