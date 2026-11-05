@@ -16,15 +16,21 @@ from tqdm import tqdm
 from datamate.agent.hints import time_hints
 from datamate.agent.prompt import build_system, business_part, check_message, extract_code, question_part, repair_message
 from datamate.agent.retrieve import ExampleBank
+from datamate.agent.columns import resolve_columns
 from datamate.agent.sandbox import ExecPool, name_index
+from datamate.agent.statuses import resolve_statuses
 from datamate.agent.vote import decide
 from datamate.canon import build_sales
 from datamate.eval.scorer import read_jsonl, score
+from datamate.eval.semantic import CHECKS, is_gated
+from datamate.fast import fast_answer
 from datamate.ingest import load_business, load_calendar
+from datamate.ingest.trust import assess
 from datamate.ingest.schema_card import schema_card
 from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, invariants
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
+from datamate.rules import rule_gate, rule_note
 from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, sql_card, sql_check_message, sql_question_part,
                                 sql_repair_message, sql_shadow)
 from datamate.sql.store import STORE_VERSION, ensure_store
@@ -61,6 +67,7 @@ class RunConfig:
     businesses: list[str] = field(default_factory=list)
     ids: list[str] = field(default_factory=list)
     resume: bool = True
+    fast: bool = False  # answer questions a closed frame explains in full without the model
 
 
 def _pandas_shadow(text: str, hints: list[str]) -> tuple[str, str] | None:
@@ -192,8 +199,23 @@ def _expect_text(e: Expect) -> str | None:
     return t + (f", at most {e.k} items" if e.k else "")
 
 
+def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], index: EntityIndex | None, save) -> list[dict]:
+    """Answer what the fast branch can and return the questions left for the model."""
+    left = []
+    for q in questions:
+        t0 = time.time()
+        got = fast_answer(rules_normalize(q["question"], index).text, q["as_of_date"], cal, sales, trust, off)
+        if got is None:
+            left.append(q)
+            continue
+        answer, frame = got
+        save({"id": q["id"], "business_id": q["business_id"], "question": q["question"], "as_of_date": q["as_of_date"], "final": finalize(answer),
+              "fast": {"check": frame.check.name, "period": frame.call}, "samples": [], "elapsed": round(time.time() - t0, 2)})
+    return left
+
+
 def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
-                   cal=None, index: EntityIndex | None = None) -> dict:
+                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset()) -> dict:
     t0 = time.time()
     engine = ENGINES[cfg.engine]
     text, rw, pre = preprocess(q, llm, cfg, index)
@@ -202,7 +224,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
     hints = time_hints(text, q["as_of_date"], cal)
     expect.window = date_window(text, hints)
-    shadow = engine.shadow(text, hints)
+    shadow = None if is_gated(text, off) else engine.shadow(text, hints)
     user_parts = [biz_part, engine.question_part(q["question"], q["as_of_date"], examples, hints, norm)]
     samples = []
     for s in range(cfg.samples):
@@ -268,8 +290,15 @@ def run(cfg: RunConfig) -> dict:
     todo = [q for q in questions if q["id"] not in done]
 
     llm = make_llm(cfg)
-    system = ENGINES[cfg.engine].build_system((split_dir / "rulebook.md").read_text(encoding="utf-8"))
-    bank = ExampleBank.from_train(Path(cfg.data_root) / "train", cfg.examples_path,
+    rulebook = (split_dir / "rulebook.md").read_text(encoding="utf-8")
+
+    def ask(system, parts):
+        return _generate(llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
+
+    off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask)
+    system = ENGINES[cfg.engine].build_system(rulebook) + rule_note(off)
+    examples_path = cfg.examples_path.with_name("examples_sql.jsonl") if cfg.engine == "sql" and cfg.examples_path else cfg.examples_path
+    bank = ExampleBank.from_train(Path(cfg.data_root) / "train", examples_path,
                                   normalize=None if cfg.normalize == "off" else (lambda t: rules_normalize(t).text))
     cal = load_calendar(split_dir)
     lock = threading.Lock()
@@ -281,22 +310,39 @@ def run(cfg: RunConfig) -> dict:
         by_biz.setdefault(q["business_id"], []).append(q)
 
     with sub_path.open("a", encoding="utf-8") as sub, tqdm(total=len(todo), desc="questions") as bar:
+        def save(rec: dict) -> None:
+            with lock:
+                final = {k: v for k, v in rec["final"].items() if not k.startswith("_")}
+                sub.write(json.dumps({"id": rec["id"], **final}, ensure_ascii=False) + "\n")
+                sub.flush()
+                (out_dir / "logs" / f"{rec['id']}.json").write_text(
+                    json.dumps(rec, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+            bar.update(1)
+
         for biz_id in sorted(by_biz):
             biz = load_business(split_dir, biz_id, cfg.cache_dir)
+            if resolve_columns(biz, cfg.cache_dir, ask):
+                biz = load_business(split_dir, biz_id, cfg.cache_dir)
+            if resolve_statuses(biz, cfg.cache_dir, ask):
+                biz = load_business(split_dir, biz_id, cfg.cache_dir)
             roles = {n: ti.roles for n, ti in biz.info.items()}
             sales, sales_desc = build_sales(biz.tables, roles)
+            trust = assess(biz, sales)
+            sales_desc += f"\n{trust.note()}" if trust.problems else ""
+            shop_off = frozenset(c.name for c in CHECKS) if trust.states["revenue"] == "suspect" else off
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
+            left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
             if cfg.engine == "sql":
                 store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
                 pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout)
-                biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, pool.macros()))
+                biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, [m for m in pool.macros() if m not in shop_off]))
             else:
                 biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
                 pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index)
-                            for q in by_biz[biz_id]]
+                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index, shop_off)
+                            for q in left]
                     for f in as_completed(futs):
                         try:
                             rec = f.result()
@@ -304,13 +350,7 @@ def run(cfg: RunConfig) -> dict:
                             _LLM_DOWN.set()
                             ex.shutdown(wait=True, cancel_futures=True)
                             raise
-                        with lock:
-                            final = {k: v for k, v in rec["final"].items() if not k.startswith("_")}
-                            sub.write(json.dumps({"id": rec["id"], **final}, ensure_ascii=False) + "\n")
-                            sub.flush()
-                            (out_dir / "logs" / f"{rec['id']}.json").write_text(
-                                json.dumps(rec, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-                        bar.update(1)
+                        save(rec)
             finally:
                 pool.close()
 

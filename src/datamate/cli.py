@@ -72,7 +72,7 @@ def cmd_run(a) -> None:
         exec_workers=a.exec_workers, timeout=a.timeout, repair=a.repair, k_examples=a.k_examples,
         examples_path=Path(a.examples) if a.examples else None, min_share=a.min_share, unans_share=a.unans_share,
         seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=ids, resume=not a.no_resume,
-        llm_retries=a.llm_retries, normalize=a.normalize,
+        llm_retries=a.llm_retries, normalize=a.normalize, fast=a.fast,
     )
     try:
         summary = run(cfg)
@@ -247,6 +247,7 @@ def main(argv=None) -> None:
     s.add_argument("--no-resume", action="store_true")
     s.add_argument("--normalize", choices=["off", "rules", "llm"], default="llm",
                    help="question preprocessing: rules only, or rules + one LLM rewrite")
+    s.add_argument("--fast", action="store_true", help="answer questions a closed frame explains in full without the model")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("score", help="score a run directory against train answers")
