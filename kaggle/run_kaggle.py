@@ -24,6 +24,7 @@ MODELS = [  # first one that starts and answers sanely is used
     ("Qwen/Qwen3-14B-AWQ", ["--dtype", "half", "--quantization", "awq"]),
 ]
 STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | train (all 3000, scored); push.sh sets it
+ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql; push.sh sets it
 
 
 def sh(cmd, **kw):
@@ -46,6 +47,7 @@ def setup():
     else:  # Kaggle unpacks archives in datasets
         root = os.path.dirname(min(glob.glob("/kaggle/input/**/pyproject.toml", recursive=True), key=len))
         sh(f"cp -r {root} {PROJ} && find {PROJ} -name '._*' -delete")
+    sh(f"cp {PROJ}/BUILD.txt {OUT}/ && cat {OUT}/BUILD.txt")
     sh("pip install -q uv")
     sh(f"cd {PROJ} && uv sync --frozen --no-dev -q")
     sh(f"uv venv -q --python 3.12 {ENV} && uv pip install -q --python {ENV}/bin/python vllm")
@@ -121,7 +123,7 @@ def run_stage(name, args, n_expected, model, proc, max_restarts=3):
         log(f"stage {name}: start (attempt {attempt + 1})")
         t0 = time.time()
         p = subprocess.run(f"cd {PROJ} && uv run --no-sync datamate run --base-url http://localhost:{PORT}/v1 --model qwen "
-                           f"--thinking off --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} 2>&1 "
+                           f"--engine {ENGINE} --thinking off --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} 2>&1 "
                            f"| grep -v -e sitecustomize -e \"No module named 'wrapt'\" | tail -60",
                            shell=True, capture_output=True, text=True)
         print(p.stdout, flush=True)
