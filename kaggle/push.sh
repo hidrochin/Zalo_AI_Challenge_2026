@@ -17,9 +17,8 @@ rm -rf "$STAGE" "$KERNEL" && mkdir -p "$STAGE" "$KERNEL"
 
 # which code a result came from: the run's outputs keep this file
 { git rev-parse --abbrev-ref HEAD; git rev-parse HEAD
-  find src -name '*.py' | LC_ALL=C sort | xargs shasum | shasum; git status --short; } > outputs/kaggle/BUILD.txt
-COPYFILE_DISABLE=1 tar -czf "$STAGE/bundle.tar.gz" --exclude '__pycache__' pyproject.toml uv.lock src assets data/train data/public_test \
-  -C outputs/kaggle BUILD.txt
+  find src -name '*.py' | LC_ALL=C sort | xargs shasum | shasum; git status --short; } > assets/BUILD.txt
+COPYFILE_DISABLE=1 tar -czf "$STAGE/bundle.tar.gz" --exclude '__pycache__' pyproject.toml uv.lock src assets data/train data/public_test
 cat > "$STAGE/dataset-metadata.json" <<EOF
 {"title": "$DATASET", "id": "$USER/$DATASET", "licenses": [{"name": "other"}]}
 EOF

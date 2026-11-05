@@ -47,7 +47,7 @@ def setup():
     else:  # Kaggle unpacks archives in datasets
         root = os.path.dirname(min(glob.glob("/kaggle/input/**/pyproject.toml", recursive=True), key=len))
         sh(f"cp -r {root} {PROJ} && find {PROJ} -name '._*' -delete")
-    sh(f"cp {PROJ}/BUILD.txt {OUT}/ && cat {OUT}/BUILD.txt")
+    sh(f"cp {PROJ}/assets/BUILD.txt {OUT}/ || true")  # a record only: never stop a run for it
     sh("pip install -q uv")
     sh(f"cd {PROJ} && uv sync --frozen --no-dev -q")
     sh(f"uv venv -q --python 3.12 {ENV} && uv pip install -q --python {ENV}/bin/python vllm")
