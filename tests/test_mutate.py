@@ -91,6 +91,13 @@ def test_a_fee_equal_to_the_line_above_is_not_a_total():
     assert len(next(iter(biz.tables.values()))) == 2
 
 
+def test_a_total_labelled_in_the_id_column_is_still_a_total():
+    rows = [[f"D{i}", "01/03/2025", "Bia", 1, 1000, "Xong"] for i in range(3)] + [["Cộng lũy kế", None, None, None, 3000, None]]
+    sh = RawSheet("a.csv", None, pd.DataFrame([COLS, *rows]), False)
+    biz = assemble("x", "train", readme(), extract_pieces([sh], {"ma don"}, []), [])
+    assert next(iter(biz.tables.values()))["Thành tiền"].sum() == 3000
+
+
 def test_voucher_lines_are_not_block_totals():
     rows = [["D1", "01/03/2025", "Bia", 1, 1000, "Xong"], [None, None, "Voucher", None, -100, None]]
     sh = RawSheet("a.csv", None, pd.DataFrame([COLS, *rows]), False)
