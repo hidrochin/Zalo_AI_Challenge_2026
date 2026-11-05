@@ -187,6 +187,63 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
+## Status (2026-11-06, night): start here
+
+**Branches.** Shared code (ingest, eval, rules, fast branch) is the same on both. Nothing here is pushed to GitHub.
+
+| branch | folder | head | holds |
+|---|---|---|---|
+| `codegen` | `zalo_ai/` | `6514434` | pandas arm and shared work |
+| `text2sql` | `../zalo_ai_text2sql/` (worktree) | `1d23b0f` | SQL arm, shared work, SQL extras |
+
+Everything is committed, at `INGEST_VERSION` 16 (`semantic-check` 766/824, 0 misses). The worktree has no `data/`; link it and
+run with `PYTHONPATH=src`. Do not commit `assets/BUILD.txt` on `codegen`. `pipeline.py` and `cli.py` differ between branches.
+
+**Kaggle runs.** All three use code `4abdef9` (hash `f0d7688`, ingest 12), older than the work below.
+
+| kernel | run | use |
+|---|---|---|
+| `datamate-sql-run` v2 | 3000 train, SQL | G1 |
+| `datamate-codegen-run` v2 | 3000 train, pandas | G1 |
+| `datamate-public-sql` v1 (second Kaggle account) | 1000 public, SQL | test submission, sent by hand |
+
+G1: download both train runs, then `datamate compare <pandas run> <sql run>`. Logs hold no token counts, so `compare` reports seconds and model calls.
+
+**SQL on dev120, Qwen3.5-9B:** PA **0.650** (95 / 17 / 8). No missing-fence errors; misses are meaning errors (×100 on `cancel_rate`,
+stock, debt). Logs: `outputs/kaggle/result_sql_dev120`.
+
+**Built today.** None of it has run end to end on questions with Qwen yet.
+
+| item | where | measured |
+|---|---|---|
+| Mutation set | `datamate mutate-check`, `eval/mutate.py` | table below |
+| Role checks by value | `ingest/trust.py` | 44 shops: 0 false `suspect` |
+| Column mapping by the model | `agent/columns.py`, saved as `<biz>.roles.json`; asked only when a needed role or the status is missing | 30 train shops, no mutation: 766/824, 551/551 roles |
+| Totals found by value | `_block_totals` in `ingest/business.py` | table below |
+| Rule gate | `rules.py` | Qwen: 8/8 changes caught, 2/2 rewordings kept (10 variants); train and public rulebooks need no model call |
+| Fast branch | `fast.py`, `--fast` (off by default), `datamate fast-check` | train 703/703 at 23.4% coverage; public coverage **7.0%**, target 30% not met; added clauses 7030/7030 sent to the model; gates 703/703 |
+| SQL extras (`text2sql` only) | `examples_sql.jsonl` read when present, LIMIT needs ORDER BY, store named by saved labels | `sql-check` 766/824, 0 misses (ingest 15; not rerun on 16) |
+
+Contracts kept (no mutation: 766/824 on 30 shops, 192/200 on 8 family shops):
+
+| mutation | rules, 30 shops | rules, 8 shops | Qwen, 8 shops | roles, Qwen |
+|---|---|---|---|---|
+| shuffle, formats, name spellings | 766 | | | |
+| no README | 565 | 148 | **192** | 152/163 |
+| new headers, README kept | 719 | 157 | **185** | 116/163 |
+| new headers, no README | 0 | 0 | **185** | 100/163 |
+| unknown status words | 44 | 6 | **192** | 163/163 |
+| subtotal rows, unknown label | **766** (526 before the fix) | | | |
+
+Contracts cover five simple metrics, so 100/163 roles matters more than 185/200 for product and unit questions. The rules and the fast-branch
+words were written on these shops, so these numbers can be optimistic.
+
+**Left out on purpose:** industry detection (READMEs rarely name the industry), deterministic unanswerable for `absent`, a generic transaction
+table, leave-family-out for the fast branch, W4 (needs the G1 winner).
+
+**Next:** G1 when both train runs finish; validate and submit the public file; rerun `sql-check` on ingest 16; run the new code on dev120 with Qwen;
+open the PRs; W4 on the winner.
+
 ## Status (2026-11-05, evening): direction change
 
 **Decisions after the mentor review**
