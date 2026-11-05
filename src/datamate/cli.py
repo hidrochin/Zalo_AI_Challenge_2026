@@ -220,7 +220,7 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("run", help="answer questions and (on train) score them")
     s.add_argument("--split", default="train")
-    s.add_argument("--backend", choices=["local", "claude", "dummy"], default="local")
+    s.add_argument("--backend", choices=["local", "claude", "gemini", "dummy"], default="local")
     s.add_argument("--model", default="qwen3.5:9b")
     s.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible server (Ollama, vLLM, ...)")
     s.add_argument("--samples", type=int, default=1, help="1 greedy + (samples-1) seeded samples, then vote")
