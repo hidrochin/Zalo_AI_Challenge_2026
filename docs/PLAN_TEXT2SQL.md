@@ -288,6 +288,8 @@ Cách này xử lý đúng cảnh báo của mentor về hai câu gần nghĩa n
 
 ## 5. Thứ tự và cổng quyết định
 
+**Cập nhật 2026-11-06:** đã làm sớm so với bảng dưới: trạng thái lạ, bộ đột biến, W2 (kiểm định bằng giá trị, map cột bằng LLM), W3 gate, W5 frame parser. Số đo ở README "Status (2026-11-06, night)". Còn lại: G1, phân tích lỗi baseline, ví dụ SQL, W4 trên nhánh thắng.
+
 **Hạn nộp: 2026-11-15**, còn 10 ngày tính từ 2026-11-05. Toàn bộ kế hoạch cần khoảng 13–14 ngày cho một người, nên phải cắt. Docker đang hoãn nhưng vẫn là điều kiện để nộp, nên giữ 3 ngày cuối cho phần này.
 
 | ngày | nội dung | phụ thuộc |

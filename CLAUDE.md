@@ -224,7 +224,8 @@ profit uses the **cost recorded on the sale line**.
   an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
 - **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
   pandas code generation is paused; Docker and vLLM work is deferred.
-- **Status (2026-11-05):** see the README "Status (2026-11-05, evening)" section first. E0 ran code older than
+- **Status (2026-11-06):** see the README "Status (2026-11-06, night)" section first.
+- **Earlier status (2026-11-05):** README "Status (2026-11-05, evening)". E0 ran code older than
   `98d4c7b`, so its 0.473 is not comparable with the public 0.288.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
   - Public leaderboard: PA −0.110 → 0.040 → **0.288** (pipeline `98d4c7b`, precision ≈ 68%).
@@ -252,6 +253,7 @@ profit uses the **cost recorded on the sale line**.
   - `uv run pytest -q`: unit tests
   - `uv run datamate ingest --split train`: writes `outputs/ingest/<split>/<biz>.md` cards
   - `uv run datamate run --backend local --model <ollama/vLLM model> --limit N`: scores on train
+- `src/datamate/rules.py` gates fixed definitions on rulebook clauses; `src/datamate/fast.py` is the fast branch; `ingest/trust.py` checks roles by value.
 - Bump `INGEST_VERSION` in `ingest/business.py` whenever ingestion output changes, so the caches
   rebuild.
 - Python ≥ 3.11 managed with **uv** (`uv sync`, `uv run ...`, `uv add <pkg>`).
