@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from datamate.ingest.parsers import parse_date, parse_number, parse_unit, year_month_hint
+from datamate.ingest.tables import _subtotal_rows
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -83,3 +84,8 @@ def test_subtotal_and_note_rows_dropped():
     ])
     df = extract_table(RawSheet("f.xlsx", "T3-2025", raw, False), set())
     assert df["Khách"].tolist() == ["Tống Thắng", "Tống Thắng Thu"]
+
+
+def test_subtotal_rows_with_a_blank_date_cell_are_dropped():
+    df = pd.DataFrame({"khach": ["An", "Tổng ngày 01/01", "Tống Thắng"], "ngay": pd.to_datetime(["2025-01-01", None, "2025-01-02"])})
+    assert _subtotal_rows(df).tolist() == [False, True, False]

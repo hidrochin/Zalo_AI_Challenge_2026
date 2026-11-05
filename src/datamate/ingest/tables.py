@@ -102,8 +102,9 @@ def _subtotal_rows(df: pd.DataFrame) -> pd.Series:
             cand |= df[c].isin(hits)
     if not cand.any():
         return cand
-    dated = df[cand].apply(lambda r: any(isinstance(v, (dt.date, dt.datetime)) or (isinstance(v, str) and is_explicit_date(v))
-                                         for v in r), axis=1)
+    # pd.NaT is a datetime subclass: a blank date cell must not count as a date
+    dated = df[cand].apply(lambda r: any(pd.notna(v) and (isinstance(v, (dt.date, dt.datetime))
+                                                          or (isinstance(v, str) and is_explicit_date(v))) for v in r), axis=1)
     cand[cand] = ~dated
     return cand
 

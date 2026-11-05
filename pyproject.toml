@@ -5,6 +5,7 @@ description = "Zalo AI Challenge 2026 — DataMate: Vietnamese NL question answe
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.70",
+    "duckdb>=2.0.0",
     "numpy>=2.4.6",
     "openai>=1.50",
     "openpyxl>=3.1.5",

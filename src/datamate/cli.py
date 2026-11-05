@@ -101,6 +101,23 @@ def cmd_eval_checks(a) -> None:
     print(json.dumps(evaluate(Path(a.data_root), [Path(r) for r in a.runs]), ensure_ascii=False, indent=1))
 
 
+def cmd_sql_build(a) -> None:
+    from datamate.eval.scorer import read_jsonl
+    from datamate.sql.store import ensure_store
+
+    split_dir = Path(a.data_root) / a.split
+    base = Path(a.cache_dir).parent
+    for biz in sorted({q["business_id"] for q in read_jsonl(split_dir / "questions.jsonl")}):
+        path = ensure_store(split_dir, biz, base, rebuild=a.rebuild)
+        print(f"{biz}: {path} ({path.stat().st_size / 1e6:.1f} MB)")
+
+
+def cmd_sql_check(a) -> None:
+    from datamate.sql.check import run_sql_checks
+
+    print(json.dumps(run_sql_checks(Path(a.data_root), Path(a.cache_dir).parent), ensure_ascii=False, indent=1))
+
+
 def cmd_semantic_check(a) -> None:
     from datamate.eval.semantic import run_checks
 
@@ -203,7 +220,7 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("run", help="answer questions and (on train) score them")
     s.add_argument("--split", default="train")
-    s.add_argument("--backend", choices=["local", "claude", "dummy"], default="local")
+    s.add_argument("--backend", choices=["local", "claude", "gemini", "dummy"], default="local")
     s.add_argument("--model", default="qwen3.5:9b")
     s.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible server (Ollama, vLLM, ...)")
     s.add_argument("--samples", type=int, default=1, help="1 greedy + (samples-1) seeded samples, then vote")
@@ -249,6 +266,14 @@ def main(argv=None) -> None:
     s.add_argument("--only", nargs="*")
     s.add_argument("--out")
     s.set_defaults(func=cmd_semantic_check)
+
+    s = sub.add_parser("sql-build", help="build the per-business DuckDB databases of a split")
+    s.add_argument("--split", default="train")
+    s.add_argument("--rebuild", action="store_true")
+    s.set_defaults(func=cmd_sql_build)
+
+    s = sub.add_parser("sql-check", help="contract tests of the SQL macros against train gold")
+    s.set_defaults(func=cmd_sql_check)
 
     s = sub.add_parser("make-dev", help="write a stratified train subset (all types, all businesses)")
     s.add_argument("--n", type=int, default=120)
