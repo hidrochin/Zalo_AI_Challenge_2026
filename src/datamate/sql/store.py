@@ -7,6 +7,7 @@ happened yet; `counted` and `status` are computed on the full data first, becaus
 holds even when it is dated after as-of. Macros are the semantic layer, and exist only where the shop has the data.
 """
 
+import hashlib
 import re
 import threading
 from pathlib import Path
@@ -16,7 +17,7 @@ import pandas as pd
 
 from datamate.canon import build_orders, build_sales
 from datamate.ingest import load_business, load_calendar
-from datamate.ingest.business import INGEST_VERSION
+from datamate.ingest.business import INGEST_VERSION, roles_path, status_path
 from datamate.sql.dims import entity_dims
 from datamate.text import fold
 
@@ -111,8 +112,16 @@ def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, di
     tmp.replace(path)
 
 
+def _labels_tag(cache_dir: Path, split: str, biz_id: str) -> str:
+    """Saved model answers change the tables, so they name the store too."""
+    ingest = Path(cache_dir) / "ingest"
+    saved = [p.read_bytes() for p in (status_path(ingest, split, biz_id), roles_path(ingest, split, biz_id)) if p.exists()]
+    return f"_{hashlib.sha1(b''.join(saved)).hexdigest()[:8]}" if saved else ""
+
+
 def store_path(cache_dir: Path, split: str, biz_id: str) -> Path:
-    return Path(cache_dir) / "duckdb" / split / f"{biz_id}_i{INGEST_VERSION}_s{STORE_VERSION}.duckdb"
+    tag = _labels_tag(cache_dir, split, biz_id)
+    return Path(cache_dir) / "duckdb" / split / f"{biz_id}_i{INGEST_VERSION}_s{STORE_VERSION}{tag}.duckdb"
 
 
 def ensure_store(split_dir: Path, biz_id: str, cache_dir: Path, rebuild: bool = False) -> Path:

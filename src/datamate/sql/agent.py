@@ -109,7 +109,7 @@ MACROS = {
     "revenue": "revenue(a, b): default-rule revenue from a to b; NULL when the period lies outside the data",
     "order_count": "order_count(a, b): orders that are not cancelled or returned",
     "cancel_count": "cancel_count(a, b): cancelled orders",
-    "cancel_rate": "cancel_rate(a, b): percent of cancelled orders among all orders of the period, 2 decimals",
+    "cancel_rate": "cancel_rate(a, b): percent of cancelled orders among all orders of the period, 2 decimals (12.5 means 12.5%: do not multiply by 100)",
     "avg_order_value": "avg_order_value(a, b): revenue / counted orders, rounded to đồng",
     "price_on": "price_on(product_name, d): 'giá bán X ngày D', price per base unit before line discount",
     "round_half_up": "round_half_up(x, n): rounds half away from zero",
@@ -183,7 +183,7 @@ def sql_hints(hints: list[str]) -> list[str]:
 
 def sql_question_part(question: str, as_of: str, examples: list[dict], hints: list[str] | None = None,
                       norm: dict | None = None) -> str:
-    out = question_part(question, as_of, examples, None, norm)
+    out = question_part(question, as_of, examples, None, norm, fence="sql")
     lines = sql_hints(hints or [])
     if lines:
         out += "\n\nTime expressions, already resolved by the rulebook (use exactly these dates):\n" + "\n".join(lines)
@@ -273,6 +273,10 @@ def _shadow_warning(con, result: dict, shadow: tuple[str, str, str] | None, time
             f"Use {call} (it applies the default counting rules) unless the question asks for something else.")
 
 
+_LIMIT = re.compile(r"\blimit\b", re.I)
+_ORDER_BY = re.compile(r"\border\s+by\b", re.I)
+
+
 def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, timeout: float = 30.0) -> dict:
     """Same record as sandbox._execute, for a reply taken by extract_sql."""
     m = _UNANSWERABLE.match(code)
@@ -284,6 +288,8 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         if declared is None:
             return {"result": None, "error": "The first line of the query must be `-- type: <t>`.", "stdout": ""}
         try:
+            if _LIMIT.search(code) and not _ORDER_BY.search(code):
+                raise AnswerShape("LIMIT without ORDER BY picks rows at random: order by the criterion, then by code.")
             set_as_of(con, as_of)
             columns, rows = run_select(con, code, timeout)
             preview = repr(rows[:5])

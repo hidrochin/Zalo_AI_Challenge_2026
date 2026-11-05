@@ -1,16 +1,17 @@
 import datetime as dt
 from decimal import Decimal
 
+import duckdb
 import pandas as pd
 import pytest
 
 from datamate import dm
 from datamate.agent.sandbox import name_index
 from datamate.canon import build_sales
-from datamate.ingest.business import Business, TableInfo
+from datamate.ingest.business import Business, TableInfo, status_path
 from datamate.ingest.readme import Readme
 from datamate.sql.agent import AnswerShape, MACROS, SqlPool, execute, extract_sql, sql_card, sql_hints, sql_shadow, to_answer
-from datamate.sql.store import build_store, connect, run_select, SqlRejected
+from datamate.sql.store import build_store, connect, run_select, SqlRejected, store_path
 
 
 def shop():
@@ -181,7 +182,7 @@ def test_execute_applies_the_shared_answer_checks(con):
     tables, roles = shop()
     sales, _ = build_sales(tables, roles)
     names = name_index(tables, sales)
-    assert execute(con, "-- type: string\nselect product_name from sales_lines limit 1", "2025-01-31", names)["error"] is None
+    assert execute(con, "-- type: string\nselect product_name from sales_lines order by 1 limit 1", "2025-01-31", names)["error"] is None
     assert "does not appear" in execute(con, "-- type: string\nselect 'Gạo tám'", "2025-01-31", names)["error"]
     assert "0" in execute(con, "-- type: count\nselect 0", "2025-01-31", names)["warning"]
 
@@ -223,3 +224,18 @@ def test_card_without_a_sales_view_says_so():
     biz = Business("x", "train", Readme("", None), tables, {"t": TableInfo(name="t", sources=[("f", "s")], descs={}, roles={})}, [], 0.0)
     card = sql_card(biz, None, "", ["revenue", "as_of"])
     assert "no `sales_lines`" in card and "## View" not in card
+
+
+def test_limit_needs_order_by(tmp_path):
+    con = duckdb.connect()
+    con.execute("set variable as_of = date '2025-01-01'")
+    out = execute(con, "-- type: string\nselect 'a' limit 1", "2025-01-01", None)
+    assert "ORDER BY" in out["error"]
+    assert execute(con, "-- type: string\nselect 'a' as x order by x limit 1", "2025-01-01", None)["result"]["answer"] == "a"
+
+
+def test_saved_labels_name_the_store(tmp_path):
+    before = store_path(tmp_path, "train", "s")
+    status_path(tmp_path / "ingest", "train", "s").parent.mkdir(parents=True)
+    status_path(tmp_path / "ingest", "train", "s").write_text("{}", encoding="utf-8")
+    assert store_path(tmp_path, "train", "s") != before

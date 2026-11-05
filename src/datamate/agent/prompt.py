@@ -118,7 +118,7 @@ def _fmt_answer(ex: dict) -> str:
 
 
 def question_part(question: str, as_of: str, examples: list[dict], hints: list[str] | None = None,
-                  norm: dict | None = None) -> str:
+                  norm: dict | None = None, fence: str = "python") -> str:
     """norm (from preprocessing): normalized, sub_questions, expect, names, amounts."""
     out = []
     if examples:
@@ -126,7 +126,7 @@ def question_part(question: str, as_of: str, examples: list[dict], hints: list[s
         for ex in examples:
             out.append(f"Q: {ex['question']}  (as_of {ex['as_of_date']})")
             if ex.get("code"):
-                out.append(f"```python\n{ex['code'].strip()}\n```")
+                out.append(f"```{fence}\n{ex['code'].strip()}\n```")
             out.append(f"A: {_fmt_answer(ex)}\n")
     wd = WEEKDAYS[pd.Timestamp(as_of).weekday()]
     out.append(f"# Question\nas_of_date (hôm nay): {as_of}, {wd}\nquestion: {question}")
