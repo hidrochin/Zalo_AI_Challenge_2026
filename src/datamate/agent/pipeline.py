@@ -15,15 +15,20 @@ from datamate.agent.hints import time_hints
 from datamate.agent.prompt import build_system, business_part, check_message, extract_code, question_part, repair_message
 from datamate.agent.retrieve import ExampleBank
 from datamate.agent.sandbox import ExecPool
+from datamate.agent.columns import resolve_columns
 from datamate.agent.statuses import resolve_statuses
 from datamate.agent.vote import decide
 from datamate.canon import build_sales
 from datamate.eval.scorer import read_jsonl, score
+from datamate.eval.semantic import CHECKS, is_gated
+from datamate.fast import fast_answer
+from datamate.ingest.trust import assess
 from datamate.ingest import load_business, load_calendar
 from datamate.ingest.schema_card import schema_card
 from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, invariants
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
+from datamate.rules import rule_gate, rule_note
 
 
 @dataclass
@@ -56,6 +61,7 @@ class RunConfig:
     businesses: list[str] = field(default_factory=list)
     ids: list[str] = field(default_factory=list)
     resume: bool = True
+    fast: bool = False  # answer questions a closed frame explains in full without the model
 
 
 class LLMUnavailable(RuntimeError):
@@ -161,8 +167,23 @@ def _expect_text(e: Expect) -> str | None:
     return t + (f", at most {e.k} items" if e.k else "")
 
 
+def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], index: EntityIndex | None, save) -> list[dict]:
+    """Answer what the fast branch can and return the questions left for the model."""
+    left = []
+    for q in questions:
+        t0 = time.time()
+        got = fast_answer(rules_normalize(q["question"], index).text, q["as_of_date"], cal, sales, trust, off)
+        if got is None:
+            left.append(q)
+            continue
+        answer, frame = got
+        save({"id": q["id"], "business_id": q["business_id"], "question": q["question"], "as_of_date": q["as_of_date"], "final": finalize(answer),
+              "fast": {"check": frame.check.name, "period": frame.call}, "samples": [], "elapsed": round(time.time() - t0, 2)})
+    return left
+
+
 def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
-                   cal=None, index: EntityIndex | None = None) -> dict:
+                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset()) -> dict:
     t0 = time.time()
     text, rw, pre = preprocess(q, llm, cfg, index)
     expect = expect_answer(text, rw)
@@ -172,6 +193,8 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
     expect.window = date_window(text, hints)
     calls = [h.split(" -> ")[1].split(" = ")[0].split("  #")[0] for h in hints]
     shadow = (text, calls[0]) if len(calls) == 1 else None  # semantic cross-check needs exactly one period
+    if shadow and is_gated(text, off):
+        shadow = None
     user_parts = [biz_part, question_part(q["question"], q["as_of_date"], examples, hints, norm)]
     samples = []
     for s in range(cfg.samples):
@@ -236,7 +259,13 @@ def run(cfg: RunConfig) -> dict:
     todo = [q for q in questions if q["id"] not in done]
 
     llm = make_llm(cfg)
-    system = build_system((split_dir / "rulebook.md").read_text(encoding="utf-8"))
+    rulebook = (split_dir / "rulebook.md").read_text(encoding="utf-8")
+
+    def ask(system, parts):
+        return _generate(llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
+
+    off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask)
+    system = build_system(rulebook) + rule_note(off)
     bank = ExampleBank.from_train(Path(cfg.data_root) / "train", cfg.examples_path,
                                   normalize=None if cfg.normalize == "off" else (lambda t: rules_normalize(t).text))
     cal = load_calendar(split_dir)
@@ -249,20 +278,34 @@ def run(cfg: RunConfig) -> dict:
         by_biz.setdefault(q["business_id"], []).append(q)
 
     with sub_path.open("a", encoding="utf-8") as sub, tqdm(total=len(todo), desc="questions") as bar:
+        def save(rec: dict) -> None:
+            with lock:
+                final = {k: v for k, v in rec["final"].items() if not k.startswith("_")}
+                sub.write(json.dumps({"id": rec["id"], **final}, ensure_ascii=False) + "\n")
+                sub.flush()
+                (out_dir / "logs" / f"{rec['id']}.json").write_text(
+                    json.dumps(rec, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+            bar.update(1)
+
         for biz_id in sorted(by_biz):
             biz = load_business(split_dir, biz_id, cfg.cache_dir)
-            if resolve_statuses(biz, cfg.cache_dir, lambda system, parts: _generate(
-                    llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)):
+            if resolve_columns(biz, cfg.cache_dir, ask):
+                biz = load_business(split_dir, biz_id, cfg.cache_dir)
+            if resolve_statuses(biz, cfg.cache_dir, ask):
                 biz = load_business(split_dir, biz_id, cfg.cache_dir)
             roles = {n: ti.roles for n, ti in biz.info.items()}
             sales, sales_desc = build_sales(biz.tables, roles)
+            trust = assess(biz, sales)
+            sales_desc += f"\n{trust.note()}" if trust.problems else ""
+            shop_off = frozenset(c.name for c in CHECKS) if trust.states["revenue"] == "suspect" else off
             biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
+            left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
             pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index)
-                            for q in by_biz[biz_id]]
+                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index, shop_off)
+                            for q in left]
                     for f in as_completed(futs):
                         try:
                             rec = f.result()
@@ -270,13 +313,7 @@ def run(cfg: RunConfig) -> dict:
                             _LLM_DOWN.set()
                             ex.shutdown(wait=True, cancel_futures=True)
                             raise
-                        with lock:
-                            final = {k: v for k, v in rec["final"].items() if not k.startswith("_")}
-                            sub.write(json.dumps({"id": rec["id"], **final}, ensure_ascii=False) + "\n")
-                            sub.flush()
-                            (out_dir / "logs" / f"{rec['id']}.json").write_text(
-                                json.dumps(rec, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-                        bar.update(1)
+                        save(rec)
             finally:
                 pool.close()
 

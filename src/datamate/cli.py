@@ -72,7 +72,7 @@ def cmd_run(a) -> None:
         exec_workers=a.exec_workers, timeout=a.timeout, repair=a.repair, k_examples=a.k_examples,
         examples_path=Path(a.examples) if a.examples else None, min_share=a.min_share, unans_share=a.unans_share,
         seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=ids, resume=not a.no_resume,
-        llm_retries=a.llm_retries, normalize=a.normalize,
+        llm_retries=a.llm_retries, normalize=a.normalize, fast=a.fast,
     )
     try:
         summary = run(cfg)
@@ -125,6 +125,34 @@ def cmd_semantic_check(a) -> None:
     print(json.dumps(rep, ensure_ascii=False, indent=1))
     if a.out:
         Path(a.out).write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def cmd_mutate_check(a) -> None:
+    from datamate.eval.mutate import model_steps, run_mutations, run_rule_variants
+
+    generate = after = None
+    if a.model:
+        from datamate.agent.llm_local import LocalLLM
+
+        llm = LocalLLM(a.base_url, a.model, enable_thinking=False)
+
+        def generate(system, parts):
+            return llm.generate(system, parts, [], 0.0, 0, 1024)
+        after = model_steps(generate)
+    if a.rules:
+        rulebook = (Path(a.data_root) / "train" / "rulebook.md").read_text(encoding="utf-8")
+        rep = run_rule_variants(rulebook, Path(a.cache_dir) / "rule_variants", generate)
+    else:
+        rep = run_mutations(Path(a.data_root), a.only, a.shops, a.seed, after)
+    print(json.dumps(rep, ensure_ascii=False, indent=1))
+    if a.out:
+        Path(a.out).write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def cmd_fast_check(a) -> None:
+    from datamate.eval.fastcheck import run_fast_checks
+
+    print(json.dumps(run_fast_checks(Path(a.data_root), Path(a.cache_dir)), ensure_ascii=False, indent=1))
 
 
 def cmd_make_dev(a) -> None:
@@ -246,6 +274,7 @@ def main(argv=None) -> None:
     s.add_argument("--no-resume", action="store_true")
     s.add_argument("--normalize", choices=["off", "rules", "llm"], default="llm",
                    help="question preprocessing: rules only, or rules + one LLM rewrite")
+    s.add_argument("--fast", action="store_true", help="answer questions a closed frame explains in full without the model")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("score", help="score a run directory against train answers")
@@ -274,6 +303,23 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("sql-check", help="contract tests of the SQL macros against train gold")
     s.set_defaults(func=cmd_sql_check)
+
+    s = sub.add_parser("mutate-check", help="stress test: mutate train shops, measure roles and contracts kept (no LLM)")
+    s.add_argument("--data-root", default="data")
+    s.add_argument("--only", nargs="*", help="mutation modes (default: all)")
+    s.add_argument("--shops", nargs="*", help="business ids (default: shops with contract questions)")
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--model", help="local model for the steps that call one (default: rules only)")
+    s.add_argument("--base-url", default="http://localhost:11434/v1")
+    s.add_argument("--rules", action="store_true", help="rulebook variants instead of shop mutations (needs --model)")
+    s.add_argument("--cache-dir", default="cache/ingest")
+    s.add_argument("--out", help="also write the report to this file")
+    s.set_defaults(func=cmd_mutate_check)
+
+    s = sub.add_parser("fast-check", help="fast branch experiments F1-F4: precision, coverage, gates (no LLM)")
+    s.add_argument("--data-root", default="data")
+    s.add_argument("--cache-dir", default="cache/ingest")
+    s.set_defaults(func=cmd_fast_check)
 
     s = sub.add_parser("make-dev", help="write a stratified train subset (all types, all businesses)")
     s.add_argument("--n", type=int, default=120)
