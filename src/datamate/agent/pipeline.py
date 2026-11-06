@@ -16,9 +16,11 @@ from datamate.agent.prompt import build_system, business_part, check_message, ex
 from datamate.agent.retrieve import ExampleBank
 from datamate.agent.sandbox import ExecPool
 from datamate.agent.columns import resolve_columns
+from datamate.agent.lint import grain_advice, ready_terms, term_advice
 from datamate.agent.statuses import resolve_statuses
 from datamate.agent.vote import decide
 from datamate.canon import build_sales
+from datamate.facts import build_facts
 from datamate.eval.scorer import read_jsonl, score
 from datamate.eval.semantic import CHECKS, is_gated
 from datamate.fast import fast_answer
@@ -183,7 +185,7 @@ def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], ind
 
 
 def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
-                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset()) -> dict:
+                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset()) -> dict:
     t0 = time.time()
     text, rw, pre = preprocess(q, llm, cfg, index)
     expect = expect_answer(text, rw)
@@ -202,6 +204,7 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
         history: list[dict] = []
         sample = {"seed": cfg.seed + s, "temperature": temperature, "attempts": []}
         out = {"result": None, "error": "not run", "stdout": ""}
+        contract = None  # the primitive's answer, when a check found the program disagrees with it
         for attempt in range(1 + cfg.repair):
             try:
                 text_reply = _generate(llm, cfg, system, user_parts, history, temperature=temperature, seed=cfg.seed + s)
@@ -212,8 +215,11 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
                 sample["attempts"].append({"llm_error": repr(e)})
                 break
             code = extract_code(text_reply)
+            advice = (term_advice(text, code, terms, "pandas") or grain_advice(text, code)) if code and attempt == 0 and cfg.repair else None
             if code is None:
                 out = {"result": None, "error": "No ```python code block found in the reply.", "stdout": ""}
+            elif advice:  # one rewrite, never a block: the second attempt runs as written
+                out = {"result": None, "error": advice, "stdout": ""}
             else:
                 out = pool.run(code, q["as_of_date"], shadow)
             if out["error"] is None and out["result"] is not None:
@@ -225,12 +231,15 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
                     out = {**out, "warning": "\n".join(w for w in (out.get("warning"), why) if w),
                            "sticky": bool(out.get("warning")) or hard}
             sample["attempts"].append({"reply": text_reply, "code": code, **out})
+            contract = out.get("contract") or contract
             if out["error"] is None and not (out.get("warning") and attempt < cfg.repair):
                 break
             msg = repair_message(out) if out["error"] else check_message(out["warning"])
             history += [{"role": "assistant", "content": text_reply}, {"role": "user", "content": msg}]
         if out["result"] is not None and out.get("warning") and out.get("sticky", True):
             out = {**out, "result": None, "error": f"unconfirmed: {out['warning']}"}  # 0 is rarely right; wrong shape is wrong
+        if contract and out["result"] is None:  # the repair still disagrees: the definition tested on train gold answers
+            out = {**out, "result": contract, "error": None, "warning": None}
         sample["result"], sample["error"] = out["result"], out["error"]
         samples.append(sample)
     final, vote = decide([s["result"] for s in samples], cfg.min_share, cfg.unans_share)
@@ -298,13 +307,14 @@ def run(cfg: RunConfig) -> dict:
             trust = assess(biz, sales)
             sales_desc += f"\n{trust.note()}" if trust.problems else ""
             shop_off = frozenset(c.name for c in CHECKS) if trust.states["revenue"] == "suspect" else off
+            terms = ready_terms(build_facts(biz, sales))
             biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
             left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
             pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index, shop_off)
+                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index, shop_off, terms)
                             for q in left]
                     for f in as_completed(futs):
                         try:
