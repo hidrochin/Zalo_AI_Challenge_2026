@@ -188,7 +188,56 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
-## Status (2026-11-06, night): start here
+## Status (2026-11-07): start here
+
+**Results of the 2026-11-06 runs (code `4abdef9`, ingest 12).** Public SQL **0.356**. Train SQL 0.687 (2385 / 323 / 292), train pandas 0.669 (2299 / 291 / 410),
+ΔPA +0.018, CI [−0.006, 0.044], so G1 has no clear winner: the arms fail in different places. Team decision: keep both arms for now.
+Per-question train errors: `outputs/train_errors_sql_pandas.csv`.
+
+**Decisions.** Only train feeds the solution. Public structure read from READMEs and rulebooks may guide generic code, tested on train; public labels are for
+analysis and never enter the code or the image. The goal is generalization to private. Directions 2 (answer on agreement) and 10 (fine-tune) are pending.
+
+**Built on 2026-11-07.** Committed on both branches, shared code identical, `INGEST_VERSION` 18, `SEMANTIC_VERSION` 2026-11-07.2, `STORE_VERSION` 7.
+
+| item | where |
+|---|---|
+| Fact tables and helpers: debt, payments, trips, imports, profit, slow products, price effect, stock, lots | `facts.py`, `dm.py`, macros in `sql/store.py` |
+| Replay of the helpers on train gold | `datamate facts-check`, `eval/factcheck.py` |
+| Unit conversions written in README prose | `ingest/readme.py`, table `README.QuyDoi` |
+| Lookup sheets for abbreviated names, staff nicknames, customer group on the lines | `canon.py` |
+| Shops without line items: one row per order or ticket | `canon._order_level` |
+| Query lint: ×100 on rates, `count(*)` on lines, walk-ins in customer groups, `avg()` of prices | `sql/agent.lint` (`text2sql`) |
+| Pandas lint: a program that skips a helper or works at the wrong grain gets one rewrite, never a block | `agent/lint.py` (both branches) |
+| Model places fact columns of a shop the rules cannot read; the table's shape must fit the fact | `agent/columns.py` |
+| Table selection experiment: stage `dev120_oracle`, `--keep-tables assets/oracle_tables.json` | `text2sql` |
+| Contract answer used when the repair still disagrees; "% đơn bị huỷ" now matches the contract | `pipeline.py`, `eval/semantic.py` |
+
+**Measured.**
+
+| check | result |
+|---|---|
+| `facts-check` on train | 398 exact, 20 unanswerable right, 0 wrong, 26 not parsed, of 444 |
+| Macros vs helpers, 30 shops | no difference |
+| `semantic-check`, `sql-check` | 0 misses; `cancel_rate` 139/139 |
+| `fast-check` | 759/759, coverage 25.3% (public 7.4%) |
+| `eval-checks` | 0 false alarms on 2930 gold answers |
+| Tests | 279 on `codegen`, 312 on `text2sql` |
+| Local model, 32 train questions wrong before, SQL arm | before 0 / 23 / 9, after 19 / 8 / 5 |
+| Same 32 questions, pandas arm | before 7 / 12 / 13, after 22 / 4 / 6 |
+| Fact columns, 6 shops with no README and headers `Cột N`, 30 facts | rules alone 0, model 5 (1 of them with a wrong total) |
+| Same model call on 5 ordinary shops | 0 roles added |
+
+**Known gaps.** With all headers renamed most facts stay off even with `agent/columns.py`, so those questions fall back to the model. A question with no date ("từ hồi X lên giá") needs the price table. Debt in shops with only a `Còn nợ` snapshot has no helper. The
+full pipeline has not been run on all of train or on public yet.
+
+**Table selection.** JEV is TypeSafe AI's hosted decision model, not JEPA; no open weights, so it cannot go in the offline image. Rule set by the team: if `dev120_oracle` beats
+`dev120` by under 0.01 PA, drop table selection; if by much more, a small embedder of about 0.6B is enough.
+
+**Kaggle.** Two accounts, work split evenly: SQL arm on `hydrochii` (`KAGGLE_API_TOKEN`), pandas arm on `hydrochiii` (`KAGGLE_API_TOKEN_2`, dataset `datamate-bundle-pandas`).
+
+**Next:** read the two Kaggle runs, compare with the 2026-11-06 runs, apply the table selection rule, then decide directions 2 and 10.
+
+## Status (2026-11-06, night)
 
 **Branches.** Shared code (ingest, eval, rules, fast branch) is the same on both. Nothing here is pushed to GitHub.
 
