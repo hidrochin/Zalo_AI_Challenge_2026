@@ -26,24 +26,31 @@ def _text_share(s: pd.Series) -> float:
     return s.map(lambda v: isinstance(v, str)).mean()
 
 
+DATE_ROLES = ("order_date", "order_ts", "pay_date", "delivery_date", "import_date", "expense_date", "stock_time", "lot_expiry")
+MONEY_ROLES = ("line_amount", "unit_price", "order_total", "pay_amount", "import_price", "line_cost", "expense_amount")
+COUNT_ROLES = ("qty", "qty_base", "import_qty", "stock_balance", "lot_qty", "lot_sold", "lot_returned", "trip")
+
+
 def role_problem(df: pd.DataFrame, col: str, role: str) -> str | None:
     """Why the column's values do not fit the role, or None."""
     s = df[col].dropna()
     if s.empty:
         return "column is empty"
     dated = pd.api.types.is_datetime64_any_dtype(s)
-    if role in ("order_date", "order_ts"):  # text dates are typed once the column has the role
+    if role in DATE_ROLES:  # text dates are typed once the column has the role
         return None if dated or s.map(lambda v: parse_date(v, 2000, True) is not None).mean() >= MIN_SHARE else "values are not dates"
     if dated:
         return "values are dates"
-    if role in ("line_amount", "unit_price", "qty", "qty_base"):
+    if role in MONEY_ROLES + COUNT_ROLES:
         if _number_share(s) < MIN_SHARE:
             return "values are not numbers"
         if (pd.to_numeric(s, errors="coerce") >= 0).mean() < 0.5:  # vouchers and returns are negative, but never the bulk
             return "most values are negative"
     if role == "order_id" and len(s) < 0.5 * len(df):
         return "most rows have no value"
-    if role in ("status", "unit") and (s.nunique() > 30 or _text_share(s) < MIN_SHARE):
+    if role == "trip" and s.nunique() > 20:
+        return "too many different values for a trip number"
+    if role in ("status", "unit", "pay_method", "channel", "import_unit") and (s.nunique() > 30 or _text_share(s) < MIN_SHARE):
         return "too many different values for a label"
     if role in ("product_name", "customer_name") and _text_share(s) < 0.8:
         return "values are not names"

@@ -24,6 +24,8 @@ DESC_RULES: list[tuple[str, str]] = [
     ("line_amount", r"^thanh tien"),
     ("customer_name", r"^ten khach"),
     ("customer_id", r"^ma khach"),
+    ("order_goods", r"^(tong )?tien hang cua (ca )?don"),
+    ("ticket_amount", r"^tong tien (cua )?ca phieu"),
 ]
 
 HEADER_RULES: list[tuple[str, str]] = [

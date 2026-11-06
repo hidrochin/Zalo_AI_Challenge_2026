@@ -81,3 +81,39 @@ def test_build_sales_treats_an_unknown_walkin_label_as_walkin():
     s, _ = build_sales({"t": df}, roles)
     assert s["walkin"].sum() == 30 and s.loc[s["walkin"], "customer"].isna().all()
     assert s["counted"].all()  # still sales
+
+
+def test_lookup_sheet_spells_out_abbreviated_names():
+    lines = pd.DataFrame({"Mã": ["1", "2", "3", "4"], "Ngày": pd.to_datetime(["2025-01-01"] * 4), "Hàng": ["IP16", "ip16 ", "Cáp  C", "Cáp Type-C 1m"],
+                          "Tiền": [10, 20, 30, 40], "SL": [1, 1, 1, 1]})
+    sheet = pd.DataFrame({"Ghi tắt": ["IP16", "Cáp C", "Ốp", "Sạc"], "Tên hàng": ["iPhone 16", "Cáp Type-C 1m", "Ốp lưng", "Củ sạc"],
+                          "Loại": ["máy mới", "phụ kiện", "phụ kiện", "phụ kiện"]})
+    roles = {"lines": {"Mã": "order_id", "Ngày": "order_date", "Hàng": "product_name", "Tiền": "line_amount", "SL": "qty"},
+             "Ghi tắt": {"Tên hàng": "product_name"}}
+    s, _ = build_sales({"lines": lines, "Ghi tắt": sheet}, roles)
+    assert s["product_name"].tolist() == ["iPhone 16", "iPhone 16", "Cáp Type-C 1m", "Cáp Type-C 1m"]
+    assert s["Loại"].tolist() == ["máy mới", "máy mới", "phụ kiện", "phụ kiện"]
+
+
+def test_description_column_is_not_a_lookup_sheet():
+    lines = pd.DataFrame({"Mã": ["1", "2", "3"], "Ngày": pd.to_datetime(["2025-01-01"] * 3), "Hàng": ["Trà", "Cà phê", "Sữa"], "Tiền": [1, 2, 3], "SL": [1, 1, 1]})
+    master = pd.DataFrame({"Hàng": ["Trà", "Cà phê", "Sữa"], "Mô tả": ["trà ngon", "cà phê đậm", "sữa tươi"]})
+    roles = {"lines": {"Mã": "order_id", "Ngày": "order_date", "Hàng": "product_name", "Tiền": "line_amount", "SL": "qty"}, "m": {"Hàng": "product_name"}}
+    s, _ = build_sales({"lines": lines, "m": master}, roles)
+    assert s["product_name"].tolist() == ["Trà", "Cà phê", "Sữa"]
+
+
+def test_staff_nicknames_get_full_names_only_when_unique():
+    tickets = pd.DataFrame({"Ngày": pd.to_datetime(["2025-01-01"] * 4), "Thợ": ["A.Đức", "a Đạt", "Đức", "Đạt"], "Tiền": [1, 2, 3, 4]})
+    staff = pd.DataFrame({"Họ tên": ["Lê Văn Đức", "Hà Loan Đạt"]})
+    roles = {"t": {"Ngày": "order_date", "Tiền": "ticket_amount"}, "s": {}}
+    s, _ = build_sales({"t": tickets, "s": staff}, roles)
+    assert s["Thợ"].tolist() == ["Lê Văn Đức", "Hà Loan Đạt", "Lê Văn Đức", "Hà Loan Đạt"]
+    assert s["order_id"].nunique() == 4
+
+
+def test_order_only_shop_reads_each_order_as_one_line():
+    orders = pd.DataFrame({"Mã": ["A", "B"], "Ngày": pd.to_datetime(["2025-01-01", "2025-01-02"]), "Giá trị hàng": [100, 200],
+                           "TT": ["xong", "huỷ"], "TT__norm": ["hoàn thành", "huỷ"]})
+    s, _ = build_sales({"o": orders}, {"o": {"Mã": "order_id", "Ngày": "order_date", "TT": "status"}})
+    assert s.loc[s["counted"], "amount"].sum() == 100

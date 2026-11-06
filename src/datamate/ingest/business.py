@@ -11,13 +11,14 @@ import numpy as np
 import pandas as pd
 
 from datamate.ingest.parsers import _is_null, is_explicit_date, parse_date, parse_number, parse_unit, year_month_hint
-from datamate.ingest.readme import Readme, parse_readme
+from datamate.ingest.readme import Readme, parse_readme, unit_rules
 from datamate.ingest.roles import assign_roles, is_known_status, normalize_status
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 16
+INGEST_VERSION = 18
 META_COLS = ("_file", "_sheet")
+README_UNITS = "README.QuyDoi"
 
 _DATE_NAME = re.compile(r"\b(ngay|date|thoi gian|time|thoi diem|hsd|han su dung|han dung|han tra|han thanh toan|gio|sinh nhat|ngay sinh)\b")
 _CODE_NAME = re.compile(
@@ -155,6 +156,12 @@ def assemble(biz_id: str, split: str, readme: Readme, pieces: list[tuple[RawShee
         tables[name] = df
         warn.extend(_unplaced_rows(df, ti))
         info[name] = ti
+
+    rules = unit_rules(readme.text)
+    if rules:  # conversions written in the README's prose read like any conversion table
+        cols = ["Tên hàng", "Đơn vị quy đổi", "Hệ số", "Đơn vị cơ bản"]
+        tables[README_UNITS] = pd.DataFrame(rules, columns=cols).drop_duplicates(cols[:2])
+        info[README_UNITS] = TableInfo(README_UNITS, [("README.md", None)], {}, {}, ["unit conversions read from the README text"])
 
     return Business(biz_id, split, readme, tables, info, warn, time.time() - t0 if t0 else 0.0, extra_roles=extra_roles)
 
