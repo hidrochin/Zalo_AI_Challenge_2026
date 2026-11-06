@@ -155,6 +155,12 @@ def cmd_fast_check(a) -> None:
     print(json.dumps(run_fast_checks(Path(a.data_root), Path(a.cache_dir)), ensure_ascii=False, indent=1))
 
 
+def cmd_facts_check(a) -> None:
+    from datamate.eval.factcheck import run_fact_checks
+
+    print(json.dumps(run_fact_checks(Path(a.data_root), Path(a.cache_dir)), ensure_ascii=False, indent=1))
+
+
 def cmd_make_dev(a) -> None:
     from collections import Counter
 
@@ -320,6 +326,11 @@ def main(argv=None) -> None:
     s.add_argument("--data-root", default="data")
     s.add_argument("--cache-dir", default="cache/ingest")
     s.set_defaults(func=cmd_fast_check)
+
+    s = sub.add_parser("facts-check", help="fact helpers against train gold: debt, trips, imports, profit, stock, lots (no LLM)")
+    s.add_argument("--data-root", default="data")
+    s.add_argument("--cache-dir", default="cache/ingest")
+    s.set_defaults(func=cmd_facts_check)
 
     s = sub.add_parser("make-dev", help="write a stratified train subset (all types, all businesses)")
     s.add_argument("--n", type=int, default=120)
