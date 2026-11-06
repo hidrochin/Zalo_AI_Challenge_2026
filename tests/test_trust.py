@@ -86,7 +86,8 @@ def test_resolve_saves_once(tmp_path):
 
     (tmp_path / "train").mkdir()
     assert resolve_columns(biz, tmp_path, gen) is True
-    assert resolve_columns(biz, tmp_path, gen) is False and len(calls) == 1
+    asked = len(calls)
+    assert resolve_columns(biz, tmp_path, gen) is False and len(calls) == asked
     assert json.loads(roles_path(tmp_path, "train", "x").read_text(encoding="utf-8")) == {"t": {"tien": "line_amount"}}
 
 

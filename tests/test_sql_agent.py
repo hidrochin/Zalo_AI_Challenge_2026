@@ -199,8 +199,8 @@ def test_cursors_of_a_pool_keep_their_own_as_of(path):
     pool = SqlPool(path, None, n=2)
     a = pool._free.get()
     b = pool._free.get()
-    assert execute(a, "-- type: count\nselect count(*) from sales_lines", "2025-01-01", None)["result"]["answer"] == 2
-    assert execute(b, "-- type: count\nselect count(*) from sales_lines", "2025-01-31", None)["result"]["answer"] == 4
+    assert execute(a, "-- type: count\nselect sum(1) from sales_lines", "2025-01-01", None)["result"]["answer"] == 2
+    assert execute(b, "-- type: count\nselect sum(1) from sales_lines", "2025-01-31", None)["result"]["answer"] == 4
     assert one(a, "select count(*) from sales_lines") == 2
     pool.close()
 
@@ -239,3 +239,18 @@ def test_saved_labels_name_the_store(tmp_path):
     status_path(tmp_path / "ingest", "train", "s").parent.mkdir(parents=True)
     status_path(tmp_path / "ingest", "train", "s").write_text("{}", encoding="utf-8")
     assert store_path(tmp_path, "train", "s") != before
+
+
+def test_lint_stops_query_shapes_that_are_always_wrong():
+    from datamate.sql.agent import lint
+
+    assert "percent" in lint("select round_half_up(100.0 * cancel_rate(date '2025-01-01', date '2025-01-31'), 2)")
+    assert "count(*)" in lint("select count(*) from sales_lines where counted")
+    assert "count(*)" in lint("select customer from sales_lines group by customer having count(*) >= 3")
+    assert "counted" in lint("select count(*) from orders where \"date\" = date '2025-01-01'")
+    assert "avg_import_price" in lint('select avg("Giá nhập") from raw_x')
+    assert "same_text" in lint('select sum(amount) from sales_lines where has_name("Hoạt chất", \'x\')')
+    assert "walkin" in lint("select count(*) from (select customer_key from orders where counted group by customer_key having count(distinct order_id) >= 4)")
+    assert lint("select customer from orders where counted and not walkin group by customer") is None
+    assert lint("select count(*) from orders where counted") is None
+    assert lint("select count(*) from (select product_key from sales_lines group by product_key having count(distinct order_id) >= 3)") is None

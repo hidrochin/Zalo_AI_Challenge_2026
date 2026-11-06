@@ -17,10 +17,12 @@ from datamate.agent.hints import time_hints
 from datamate.agent.prompt import build_system, business_part, check_message, extract_code, question_part, repair_message
 from datamate.agent.retrieve import ExampleBank
 from datamate.agent.columns import resolve_columns
+from datamate.agent.lint import grain_advice, ready_terms, term_advice
 from datamate.agent.sandbox import ExecPool, name_index
 from datamate.agent.statuses import resolve_statuses
 from datamate.agent.vote import decide
 from datamate.canon import build_sales
+from datamate.facts import build_facts
 from datamate.eval.scorer import read_jsonl, score
 from datamate.eval.semantic import CHECKS, is_gated
 from datamate.fast import fast_answer
@@ -57,6 +59,7 @@ class RunConfig:
     repair: int = 1
     k_examples: int = 4
     examples_path: Path | None = Path("assets/examples.jsonl")
+    keep_tables: Path | None = None  # experiment: JSON of question id -> raw tables to show, null = all (SQL engine)
     min_share: float = 0.5
     unans_share: float = 0.6
     llm_retries: int = 6  # server errors: back off 5..120 s, then stop the run (a resumed run retries)
@@ -215,7 +218,7 @@ def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], ind
 
 
 def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
-                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset()) -> dict:
+                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset()) -> dict:
     t0 = time.time()
     engine = ENGINES[cfg.engine]
     text, rw, pre = preprocess(q, llm, cfg, index)
@@ -232,6 +235,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
         history: list[dict] = []
         sample = {"seed": cfg.seed + s, "temperature": temperature, "attempts": []}
         out = {"result": None, "error": "not run", "stdout": ""}
+        contract = None  # the primitive's answer, when a check found the query disagrees with it
         for attempt in range(1 + cfg.repair):
             try:
                 text_reply = _generate(llm, cfg, system, user_parts, history, temperature=temperature, seed=cfg.seed + s)
@@ -242,8 +246,13 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
                 sample["attempts"].append({"llm_error": repr(e)})
                 break
             code = engine.extract(text_reply)
+            advice = None
+            if code and attempt == 0 and cfg.repair:
+                advice = term_advice(text, code, terms, cfg.engine) or (grain_advice(text, code) if cfg.engine == "pandas" else None)
             if code is None:
                 out = {"result": None, "error": engine.no_code, "stdout": ""}
+            elif advice:  # one rewrite, never a block: the second attempt runs as written
+                out = {"result": None, "error": advice, "stdout": ""}
             else:
                 out = pool.run(code, q["as_of_date"], shadow)
             if out["error"] is None and out["result"] is not None:
@@ -255,12 +264,15 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
                     out = {**out, "warning": "\n".join(w for w in (out.get("warning"), why) if w),
                            "sticky": bool(out.get("warning")) or hard}
             sample["attempts"].append({"reply": text_reply, "code": code, **out})
+            contract = out.get("contract") or contract
             if out["error"] is None and not (out.get("warning") and attempt < cfg.repair):
                 break
             msg = engine.repair_message(out) if out["error"] else engine.check_message(out["warning"])
             history += [{"role": "assistant", "content": text_reply}, {"role": "user", "content": msg}]
         if out["result"] is not None and out.get("warning") and out.get("sticky", True):
             out = {**out, "result": None, "error": f"unconfirmed: {out['warning']}"}  # 0 is rarely right; wrong shape is wrong
+        if contract and out["result"] is None:  # the repair still disagrees: the definition tested on train gold answers
+            out = {**out, "result": contract, "error": None, "warning": None}
         sample["result"], sample["error"] = out["result"], out["error"]
         samples.append(sample)
     final, vote = decide([s["result"] for s in samples], cfg.min_share, cfg.unans_share)
@@ -305,6 +317,7 @@ def run(cfg: RunConfig) -> dict:
     t_start = time.time()
     _LLM_DOWN.clear()
 
+    kept = json.loads(Path(cfg.keep_tables).read_text(encoding="utf-8")) if cfg.keep_tables else None
     by_biz: dict[str, list[dict]] = {}
     for q in todo:
         by_biz.setdefault(q["business_id"], []).append(q)
@@ -330,18 +343,22 @@ def run(cfg: RunConfig) -> dict:
             trust = assess(biz, sales)
             sales_desc += f"\n{trust.note()}" if trust.problems else ""
             shop_off = frozenset(c.name for c in CHECKS) if trust.states["revenue"] == "suspect" else off
+            terms = ready_terms(build_facts(biz, sales))
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
             left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
             if cfg.engine == "sql":
                 store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
                 pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout)
-                biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, [m for m in pool.macros() if m not in shop_off]))
+                macros = [m for m in pool.macros() if m not in shop_off]
+                biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros))
+                part_of = (lambda q: business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, kept.get(q["id"])))) if kept else None
             else:
                 biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
                 pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
+                part_of = None
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index, shop_off)
+                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms)
                             for q in left]
                     for f in as_completed(futs):
                         try:

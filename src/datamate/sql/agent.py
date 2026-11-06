@@ -48,6 +48,7 @@ Messages may name answer_number(), answer_string(), unanswerable() and the like:
 5. Rankings: descending by the criterion, ties by code ascending (ORDER BY amount DESC, code). When fewer than k candidates exist, return all of them.
 6. Answer type: a percentage -> percent; "ngày nào" -> date; "tháng nào" -> month; yes/no ("có ... không") -> boolean; top-k or several numbers in a given order -> list; per-object rows with amounts ("bảng", "kèm số tiền", "mỗi người ... bao nhiêu") -> table; one name -> string; otherwise money for VND amounts, count for counts, number for other quantities.
 - Use `sales_lines` for anything about sales (revenue, quantities sold, customers): it joins line items with order date/status/customer. Its `counted` column applies the default revenue rule (not cancelled, not returned, no returned line; 'đang giao' counts). Do not filter status = 'hoàn thành' only: use `counted`.
+- A macro in the schema card is the tested definition of its rulebook term: call it instead of rebuilding the logic from raw tables. Macros marked TABLE go after FROM.
 - Use `orders` (one row per order) for order counts and rates, never line rows. Revenue = sum of line amounts, never order-total columns (those include order discount/shipping).
 - If a "Time expressions, already resolved" block follows the question, use exactly those dates.
 - "normalized" is the question cleaned up (abbreviations, typos, diacritics, dialect). Use it to understand the question; if it conflicts with the original question, the original wins. Names listed under "names in this shop's data" are exact spellings: compare with `=`. For any other name use has_name(col, 'text'), which ignores case and diacritics.
@@ -83,6 +84,42 @@ select round_half_up(pct_change(revenue(date '2026-05-01', date '2026-05-31'), r
 ```
 ```sql
 -- type: count
+-- số đơn ca chiều: count orders, not sales_lines rows
+select count(*) from orders where counted and shift_of(order_ts) = 'chiều' and "date" between date '2026-02-01' and date '2026-02-28'
+```
+```sql
+-- type: table
+-- 3 khách còn nợ nhiều nhất đến hết 30/06/2026; khách còn nợ bao nhiêu: debt_total; tuổi nợ, đơn quá N ngày: debt_by_order
+select customer_name as khach_hang, debt as so_tien_no from debt_by_customer(date '2026-06-30') limit 3
+```
+```sql
+-- type: money
+-- tiền khách trả nợ tháng 6/2026; ghi nợ thêm: debt_new; one customer: debt_repaid_of('Tên', ...), debt_new_of('Tên', ...)
+select debt_repaid(date '2026-06-01', date '2026-06-30')
+```
+```sql
+-- type: percent
+-- X lên giá ngày 01/12/2025: so 30 ngày kể từ ngày đó với 30 ngày ngay trước (quantity, not money)
+select round_half_up(price_effect('Đậu hũ chiên giòn', date '2025-12-01', 30), 2)
+```
+```sql
+-- type: count
+-- mấy mặt hàng ế từ 21/07 đến 27/07/2025
+select count(*) from slow_products(date '2025-07-21', date '2025-07-27')
+```
+```sql
+-- type: date
+-- lô gần hết hạn nhất của một thuốc: lots with stock left, not yet expired
+select min(expiry) from lots_left(as_of()) where product_name = 'Oresol 245 DHG hộp 20 gói' and expiry >= as_of()
+```
+```sql
+-- type: percent
+-- tỉ trọng doanh thu nhóm khách: customer_group is on sales_lines, walk-in orders stay in the total
+select round_half_up(100.0 * sum(amount) filter (same_text(customer_group, 'sỉ')) / sum(amount), 2)
+from sales_lines where counted and "date" between date '2026-05-01' and date '2026-05-31'
+```
+```sql
+-- type: count
 -- khách mua từ 3 đơn trở lên tháng 1/2026 (khách lẻ excluded)
 select count(*) from (select customer from orders
   where counted and not walkin and "date" between date '2026-01-01' and date '2026-01-31'
@@ -110,11 +147,27 @@ MACROS = {
     "order_count": "order_count(a, b): orders that are not cancelled or returned",
     "cancel_count": "cancel_count(a, b): cancelled orders",
     "cancel_rate": "cancel_rate(a, b): percent of cancelled orders among all orders of the period, 2 decimals (12.5 means 12.5%: do not multiply by 100)",
+    "debt_total": "debt_total(x): 'khách còn nợ tổng cộng' at the end of day x, walk-in orders included; COD and marketplace orders are never debt",
+    "debt_by_order": "debt_by_order(x): TABLE of orders still owing at the end of day x: order_id, date, customer, customer_name, walkin, debt, age (days from the order date). Use it for 'tuổi nợ' and 'đơn đặt quá N ngày'",
+    "debt_by_customer": "debt_by_customer(x): TABLE customer, customer_name, debt, biggest first, no walk-in row. Use it for 'top khách nợ' and 'bao nhiêu khách còn nợ'",
+    "debt_repaid": "debt_repaid(a, b): 'thu nợ, trả nợ' in the period: payments dated in it, after the day of purchase, on any on-credit order, also of earlier periods",
+    "debt_repaid_of": "debt_repaid_of(customer_name, a, b): debt_repaid for one customer",
+    "debt_new": "debt_new(a, b): 'nợ thêm': what on-credit orders placed in the period left unpaid at the end of the day of purchase",
+    "debt_new_of": "debt_new_of(customer_name, a, b): debt_new for one customer",
+    "delivery_trips": "delivery_trips(a, b): 'số đợt giao': distinct (order, trip) pairs delivered in the period",
+    "avg_import_price": "avg_import_price(product_name, a, b): 'giá nhập bình quân', weighted by quantity; never avg() of prices",
+    "gross_profit": "gross_profit(a, b): 'lãi gộp': revenue minus quantity × the cost on each sale line",
+    "net_profit": "net_profit(a, b): 'lãi ròng': gross_profit minus every expense of the period",
+    "slow_products": "slow_products(a, b): TABLE product_name of 'hàng ế': sold before the period, not in it",
+    "price_effect": "price_effect(product_name, d, n): 'hiệu ứng tăng giá': percent change of the QUANTITY sold, n days from day d (d included) vs the n days before d",
+    "stock_at": "stock_at(product_name, d): stock at the end of day d in base units",
+    "lots_left": "lots_left(d): TABLE of lots with stock at the end of day d: lot, product_name, expiry, left, price",
     "avg_order_value": "avg_order_value(a, b): revenue / counted orders, rounded to đồng",
     "price_on": "price_on(product_name, d): 'giá bán X ngày D', price per base unit before line discount",
     "round_half_up": "round_half_up(x, n): rounds half away from zero",
     "pct_change": "pct_change(new, old): percent change, NULL when old is 0",
     "has_name": "has_name(col, 'text'): col contains text, ignoring case and diacritics",
+    "same_text": "same_text(col, 'text'): col equals text, ignoring case and diacritics; use it for 'hoạt chất X' (a combination drug is another active ingredient), has_name would count it",
     "fold_text": "fold_text(x): lowercase without diacritics",
     "shift_of": "shift_of(ts): 'sáng' for 06:00-13:59, 'chiều' for 14:00-21:59, else NULL",
     "as_of": "as_of(): today",
@@ -147,8 +200,9 @@ def _columns(title: str, df: pd.DataFrame, roles: dict | None = None, descs: dic
     return out
 
 
-def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros: list[str]) -> str:
-    """The prompt's description of this shop's database: views first, then raw tables, then macros."""
+def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros: list[str], keep: list[str] | None = None) -> str:
+    """The prompt's description of this shop's database: views first, then raw tables, then macros.
+    keep: the raw tables to list, by slug (table-selection experiment); None lists all of them."""
     out = [f"# Schema card: {biz.id}"]
     if biz.readme.data_end is not None:
         out.append(f"Data recorded until {biz.readme.data_end:%Y-%m-%d} (from README).")
@@ -160,11 +214,19 @@ def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros:
             out += _columns("View orders", build_orders(sales))
         out.append("\n" + sales_desc.replace("sales_lines()", "sales_lines").replace("orders()", "orders"))
     for name, df in biz.tables.items():
+        if keep is not None and f"raw_{_slug(name)}" not in keep:
+            continue
         ti = biz.info[name]
         out += _columns(f"Table raw_{_slug(name)}  source: {', '.join(sorted({f for f, _ in ti.sources}))}", df, ti.roles, ti.descs)
         out += [f"  note: {n}" for n in ti.notes]
     if biz.warnings:
         out.append("\nIngestion warnings: " + "; ".join(biz.warnings))
+    if "debt_total" in macros:
+        out.append("\nView payments: order_id, date, amount (one row per payment).")
+    if "delivery_trips" in macros:
+        out.append("\nView deliveries: order_id, trip, date.")
+    if "avg_import_price" in macros:
+        out.append("\nView imports: doc, date, product_name, qty, unit, price, amount, qty_base (receipts that are not cancelled).")
     out.append("\n## Macros\n" + "\n".join(f"- {MACROS[m]}" for m in MACROS if m in macros))
     return "\n".join(out)
 
@@ -254,23 +316,56 @@ def to_answer(kind: str, columns: list[str], rows: list[tuple]) -> dict:
     raise AnswerShape(f"Unknown answer type {kind!r} in the `-- type:` line.")
 
 
-def _shadow_warning(con, result: dict, shadow: tuple[str, str, str] | None, timeout: float) -> str | None:
+def _shadow_warning(con, result: dict, shadow: tuple[str, str, str] | None, timeout: float) -> tuple[str | None, dict | None]:
     """The macro of a semantic contract disagrees with the answer: same role as sandbox.shadow_check."""
     if not shadow or result.get("type") not in ("number", "percent"):
-        return None
+        return None, None
     text, start, end = shadow
     check = find_check(text, result["type"])
     if check is None:
-        return None
+        return None, None
     call = f"{check.name}(date '{start}', date '{end}')"
     try:
         value = run_select(con, f"select {call}", timeout)[1][0][0]
     except duckdb.Error:  # this shop has no such macro: no opinion
-        return None
+        return None, None
     if value is None or abs(float(value) - float(result["answer"])) <= 1e-6:
-        return None
-    return (f"Your answer disagrees with the rulebook definition of '{check.name}'. "
-            f"Use {call} (it applies the default counting rules) unless the question asks for something else.")
+        return None, None
+    warning = (f"Your answer disagrees with the rulebook definition of '{check.name}'. "
+               f"Use {call} (it applies the default counting rules) unless the question asks for something else.")
+    return warning, {"type": result["type"], "answer": float(value)}
+
+
+# Query shapes that are wrong whatever the shop: they never reach the database, and the message says what to do instead.
+_LINTS = [
+    (re.compile(r"\b100(\.0*)?\s*\*\s*cancel_rate\s*\(", re.I), "cancel_rate() already returns percent units: do not multiply it by 100."),
+    (re.compile(r"\bcount\(\s*\*\s*\)\s+from\s+sales_lines\b", re.I), "sales_lines has one row per product line, so count(*) counts lines, not orders. "
+                                                                         "Count orders in the `orders` view, or use count(distinct order_id)."),
+    (re.compile(r"\b(having|order\s+by)\s+count\(\s*\*\s*\)", re.I), None),
+    (re.compile(r"\bavg\(\s*\"?(gi[aá] nh[aậ]p|dongianhap|đơn giá|don gia)", re.I), "A mean of prices is not 'giá nhập bình quân': use avg_import_price(), weighted by quantity."),
+    (re.compile(r"has_name\(\s*\"?(ho[aạ]t ch[aấ]t|thanhphanchinh|th[aà]nh ph[aầ]n)", re.I), "'Hoạt chất X' means exactly X: use same_text(), has_name also counts combination drugs."),
+]
+_FROM_LINES = re.compile(r"\bfrom\s+sales_lines\b", re.I)
+_FROM_ORDERS = re.compile(r"\bcount\(\s*\*\s*\)\s+from\s+orders\b", re.I)
+_STATUS_WORDS = re.compile(r"\bcounted\b|\bstatus\b", re.I)
+_BY_CUSTOMER = re.compile(r"\bgroup\s+by\s+\"?customer(_key|_name)?\b", re.I)
+_NO_WALKIN = re.compile(r"\bwalkin\b|\bcustomer(_key)?\"?\s+is\s+not\s+null\b", re.I)
+
+
+def lint(code: str) -> str | None:
+    """Why this query shape is wrong, or None."""
+    for rx, message in _LINTS:
+        if rx.search(code):
+            if message:
+                return message
+            if _FROM_LINES.search(code):
+                return ("sales_lines has one row per product line, so count(*) in HAVING or ORDER BY counts lines, not orders. "
+                        "Use count(distinct order_id), or group the `orders` view.")
+    if _BY_CUSTOMER.search(code) and not _NO_WALKIN.search(code):
+        return "Walk-in orders share an empty customer and are not a customer: add `not walkin` before grouping by customer."
+    if _FROM_ORDERS.search(code) and not _STATUS_WORDS.search(code):
+        return "orders holds every status. Add `counted` to count orders that are not cancelled or returned, as the rulebook's Số đơn says."
+    return None
 
 
 _LIMIT = re.compile(r"\blimit\b", re.I)
@@ -290,6 +385,9 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         try:
             if _LIMIT.search(code) and not _ORDER_BY.search(code):
                 raise AnswerShape("LIMIT without ORDER BY picks rows at random: order by the criterion, then by code.")
+            why = lint(code)
+            if why:
+                raise AnswerShape(why)
             set_as_of(con, as_of)
             columns, rows = run_select(con, code, timeout)
             preview = repr(rows[:5])
@@ -297,9 +395,10 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         except (duckdb.Error, ValueError, TypeError) as e:  # ValueError covers SqlRejected and AnswerShape
             return {"result": None, "error": str(e)[:1500], "stdout": preview}
     error, warning = check_result(result, names)
+    contract = None
     if error is None and warning is None:
-        warning = _shadow_warning(con, result, shadow, timeout)
-    return {"result": result if error is None else None, "error": error, "warning": warning, "stdout": preview}
+        warning, contract = _shadow_warning(con, result, shadow, timeout)
+    return {"result": result if error is None else None, "error": error, "warning": warning, "contract": contract, "stdout": preview}
 
 
 class SqlPool:
