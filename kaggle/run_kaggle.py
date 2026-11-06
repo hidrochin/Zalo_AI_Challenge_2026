@@ -23,7 +23,7 @@ MODELS = [  # first one that starts and answers sanely is used
     ("Qwen/Qwen3.5-9B", ["--dtype", "half", "--limit-mm-per-prompt", '{"image":0,"video":0}']),
     ("Qwen/Qwen3-14B-AWQ", ["--dtype", "half", "--quantization", "awq"]),
 ]
-STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | train (all 3000, scored); push.sh sets it
+STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | dev120_oracle | train (all 3000, scored); push.sh sets it
 ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql; push.sh sets it
 
 
@@ -163,6 +163,9 @@ def main():
     if "dev120" in STAGES:
         n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
         proc = run_stage("dev120", "--split train --ids-file assets/dev120.txt", n, model, proc)
+    if "dev120_oracle" in STAGES:  # table-selection experiment: only the tables a right answer used
+        n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
+        proc = run_stage("dev120_oracle", "--split train --ids-file assets/dev120.txt --keep-tables assets/oracle_tables.json", n, model, proc)
     if "train" in STAGES:
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -20")
         sales_lines_report("train")
