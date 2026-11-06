@@ -72,7 +72,7 @@ def cmd_run(a) -> None:
         exec_workers=a.exec_workers, timeout=a.timeout, repair=a.repair, k_examples=a.k_examples,
         examples_path=Path(a.examples) if a.examples else None, min_share=a.min_share, unans_share=a.unans_share,
         seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=ids, resume=not a.no_resume,
-        llm_retries=a.llm_retries, normalize=a.normalize, fast=a.fast,
+        llm_retries=a.llm_retries, normalize=a.normalize, fast=a.fast, keep_tables=Path(a.keep_tables) if a.keep_tables else None,
     )
     try:
         summary = run(cfg)
@@ -125,6 +125,12 @@ def cmd_semantic_check(a) -> None:
     print(json.dumps(rep, ensure_ascii=False, indent=1))
     if a.out:
         Path(a.out).write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def cmd_facts_check(a) -> None:
+    from datamate.eval.factcheck import run_fact_checks
+
+    print(json.dumps(run_fact_checks(Path(a.data_root), Path(a.cache_dir)), ensure_ascii=False, indent=1))
 
 
 def cmd_make_dev(a) -> None:
@@ -247,6 +253,7 @@ def main(argv=None) -> None:
     s.add_argument("--no-resume", action="store_true")
     s.add_argument("--normalize", choices=["off", "rules", "llm"], default="llm",
                    help="question preprocessing: rules only, or rules + one LLM rewrite")
+    s.add_argument("--keep-tables", help="experiment: JSON of question id -> raw tables shown to the model (SQL engine)")
     s.add_argument("--fast", action="store_true", help="answer questions a closed frame explains in full without the model")
     s.set_defaults(func=cmd_run)
 
@@ -276,6 +283,11 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("sql-check", help="contract tests of the SQL macros against train gold")
     s.set_defaults(func=cmd_sql_check)
+
+    s = sub.add_parser("facts-check", help="fact helpers against train gold: debt, trips, imports, profit, stock, lots (no LLM)")
+    s.add_argument("--data-root", default="data")
+    s.add_argument("--cache-dir", default="cache/ingest")
+    s.set_defaults(func=cmd_facts_check)
 
     s = sub.add_parser("make-dev", help="write a stratified train subset (all types, all businesses)")
     s.add_argument("--n", type=int, default=120)
