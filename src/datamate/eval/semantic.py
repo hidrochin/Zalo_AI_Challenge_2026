@@ -57,7 +57,7 @@ CHECKS = [
           and not re.search(r"ti le|ty le|%|phan tram|ly do|vi sao|khach|ca |kenh", f),
           lambda p: int((_orders_in(p)["status"] == "huỷ").sum())),
     Check("cancel_rate", "percent",
-          lambda f: bool(re.search(r"\b(ti le|ty le)\b.*\bhuy\b|\bhuy\b.*(%|phan tram)", f))
+          lambda f: bool(re.search(r"\b(ti le|ty le)\b.*\bhuy\b|\bhuy\b.*(%|phan tram)|(%|phan tram) don\b.*\bhuy\b", f))
           and not re.search(r"khach|ca |kenh|zalo|mat hang|nhom|so voi|tang|giam", f),
           lambda p: dm.round_half_up((_orders_in(p)["status"] == "huỷ").sum() / len(_orders_in(p)) * 100, 2)),
 ]
