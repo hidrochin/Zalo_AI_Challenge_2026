@@ -407,9 +407,15 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         out["customer"] = cust.where(~out["walkin"])  # walk-ins have no customer key, so groupby drops them
         if "customer_group" in out.columns:  # rulebook: a walk-in order belongs to no group, not even `lẻ`
             out["customer_group"] = out["customer_group"].where(~out["walkin"])
+    out, n_split = split_toppings(out)
+    if n_split:
+        sources.append(f"{n_split} toppings written in a drink's cell moved to their own lines")
     out = with_entity_keys(out)
     if "customer_key" in out.columns:
         out["customer"] = out["customer_key"]
+    fee = drop_fee_items(out)
+    if fee:
+        sources.append(f"{fee} service-fee lines kept in revenue but not as products")
 
     order = ["order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base",
              "unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key", "customer_id",
@@ -430,6 +436,76 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     if flagged:
         desc += f"\nCheck before ranking customers: {', '.join(flagged)} hold(s) over 5% of orders, unusual for one customer."
     return out, desc
+
+
+_TOPPING = re.compile(r"\s+\+\s+(?:(\d+)\s+)?([^+()]+?)\s*\(\s*(\d[\d.,]*\s*(?:đ|k|vnđ|vnd)?)\s*\)", re.I)
+_FEE_ITEM = re.compile(r"^(phi (phuc vu|dich vu)|service charge)$")
+
+
+def split_toppings(out: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """'Latte (M) + 2 Trân châu đen (14.000đ)' -> a Latte line and a topping line of 2 portions, 14 000 đ.
+
+    Rulebook: a drink and the topping written in its cell are two items; the topping's quantity and money go to the
+    topping item (the same item as a topping sold on its own line), not to the drink. The number before the topping is
+    its portions, the money in brackets is already in the line amount."""
+    if "product_name" not in out.columns or "amount" not in out.columns:
+        return out, 0
+    names = out["product_name"]
+    cells = names.map(lambda v: list(_TOPPING.finditer(v)) if isinstance(v, str) else [])
+    has = cells.map(bool)
+    if not has.any():
+        return out, 0
+    from datamate.ingest.parsers import parse_number
+
+    plain = names[~has].dropna()
+    spelled = {fold(n): n for n in plain.unique()}
+    code_of = out.loc[~has].dropna(subset=["product_name"]).drop_duplicates("product_name").set_index("product_name").get("product_id")
+    out = out.copy()
+    extra = []
+    for i in out.index[has]:
+        name, found = out.at[i, "product_name"], cells[i]
+        if name[found[-1].end():].strip():  # text after the last topping: not this layout
+            continue
+        tops = []
+        for m in found:
+            n, top, money = int(m.group(1) or 1), m.group(2).strip(), parse_number(m.group(3))
+            money = int(money) if money is not None and float(money).is_integer() else money
+            if money is None:
+                break
+            tops.append((n, spelled.get(fold(f"topping {top}")) or spelled.get(fold(top)) or top, money))
+        if len(tops) != len(found):
+            continue
+        for n, top, money in tops:
+            row = out.loc[i].copy()
+            row["product_name"], row["amount"] = top, money
+            for c, v in (("qty", n), ("qty_base", n), ("unit_price", money / n), ("unit", None)):
+                if c in out.columns:
+                    row[c] = v
+            if "product_id" in out.columns:
+                row["product_id"] = code_of.get(top) if code_of is not None else None
+            extra.append(row)
+        out.at[i, "product_name"] = name[:found[0].start()].strip()
+        out.at[i, "amount"] = out.at[i, "amount"] - sum(money for _, _, money in tops)
+    if not extra:
+        return out, 0
+    return pd.concat([out, pd.DataFrame(extra)], ignore_index=True), len(extra)
+
+
+def drop_fee_items(out: pd.DataFrame) -> int:
+    """Rulebook: a 'Phí phục vụ' line is not an item (never ranked or counted) but stays in revenue. Its product name and
+    quantity are emptied in place, so rankings and item counts skip it; amount and `counted` are kept."""
+    if "product_name" not in out.columns:
+        return 0
+    fee = out["product_name"].map(lambda v: bool(_FEE_ITEM.match(fold(v).strip())) if isinstance(v, str) else False)
+    if not fee.any():
+        return 0
+    for c in ("qty", "qty_base", "unit_price"):
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").astype(float).mask(fee)
+    for c in ("product_name", "product_key", "product_id", "unit"):
+        if c in out.columns:
+            out[c] = out[c].astype("object").mask(fee)
+    return int(fee.sum())
 
 
 def build_orders(sales: pd.DataFrame) -> pd.DataFrame:
