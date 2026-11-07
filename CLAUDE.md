@@ -224,14 +224,16 @@ profit uses the **cost recorded on the sale line**.
   an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
 - **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
   pandas code generation is paused; Docker and vLLM work is deferred.
-- **Status (2026-11-07):** see the README "Status (2026-11-07)" section first.
+- **Status (2026-11-08):** read the README "Status (2026-11-08): start here" section first. Three branches, one worktree
+  each: `codegen` (pandas, `zalo_ai`), `text2sql` (SQL, `../zalo_ai_text2sql`), `combined` (both arms + combination,
+  `../zalo_ai_combined`, `datamate run --engine both`).
 - **Earlier status (2026-11-05):** README "Status (2026-11-05, evening)". E0 ran code older than
   `98d4c7b`, so its 0.473 is not comparable with the public 0.288.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
   - Public leaderboard: PA −0.110 → 0.040 → **0.288** (pipeline `98d4c7b`, precision ≈ 68%).
   - E0, all 3000 train questions on Kaggle: **PA 0.473** (precision 77.7%), logs in
     `outputs/kaggle/result_train/out/train`.
-  - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train DM_KERNEL=<name> DM_ENGINE=pandas|sql DM_DATASET=<bundle> kaggle/push.sh update`.
+  - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train DM_KERNEL=<name> DM_ENGINE=pandas|sql|both DM_DATASET=<bundle> kaggle/push.sh update`; outputs with `kaggle/fetch_output.py`.
   - The prompt is about 13–16k tokens, so a local server needs ≥ 24k context (set `num_ctx` through
     a Modelfile).
 - **Layout:**
