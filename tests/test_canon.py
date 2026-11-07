@@ -117,3 +117,37 @@ def test_order_only_shop_reads_each_order_as_one_line():
                            "TT": ["xong", "huỷ"], "TT__norm": ["hoàn thành", "huỷ"]})
     s, _ = build_sales({"o": orders}, {"o": {"Mã": "order_id", "Ngày": "order_date", "TT": "status"}})
     assert s.loc[s["counted"], "amount"].sum() == 100
+
+
+def test_boolean_cells_stay_boolean():
+    from datamate.ingest.business import TableInfo, _type_columns
+    df = pd.DataFrame({"Tên": ["A", "B", "C"], "Kê đơn": [True, "False", "TRUE"], "Ghi chú": ["True", "khác", None],
+                       "_file": ["f.xlsx"] * 3, "_sheet": ["s"] * 3})
+    out = _type_columns(df, ["Tên", "Kê đơn", "Ghi chú"], TableInfo("t", [("f.xlsx", None)], {}, {}))
+    assert out["Kê đơn"].dtype == bool and out["Kê đơn"].tolist() == [True, False, True]
+    assert out["Ghi chú"].iloc[:2].tolist() == ["True", "khác"] and out["Ghi chú"].isna().iloc[2]  # free text stays text
+
+
+def test_toppings_in_a_drink_cell_become_their_own_lines():
+    from datamate.canon import split_toppings
+
+    lines = pd.DataFrame({"order_id": ["A", "A", "B"], "amount": [97000, 7000, 59000], "qty": [2, 1, 1], "qty_base": [2, 1, 1],
+                          "unit_price": [45000, 7000, 45000],
+                          "product_name": ["Latte (M) + Trân châu đen (7.000đ)", "Topping Trân châu đen", "Latte (M) + 2 Kem cheese (14.000đ)"]})
+    out, n = split_toppings(lines)
+    assert n == 2
+    got = out.groupby("product_name").agg(qty=("qty_base", "sum"), amount=("amount", "sum")).to_dict("index")
+    assert got["Latte (M)"] == {"qty": 3, "amount": 90000 + 45000}
+    assert got["Topping Trân châu đen"] == {"qty": 2, "amount": 14000}  # same item as the topping sold alone
+    assert got["Kem cheese"] == {"qty": 2, "amount": 14000}
+    assert out["amount"].sum() == lines["amount"].sum()
+
+
+def test_service_fee_stays_in_revenue_but_is_not_an_item():
+    from datamate.canon import drop_fee_items
+
+    lines = pd.DataFrame({"product_name": ["Bia Tiger lon", "Phí phục vụ"], "qty": [2, 1], "qty_base": [2.0, 1.0], "amount": [40000, 5000],
+                          "counted": [True, True]})
+    assert drop_fee_items(lines) == 1
+    assert lines["product_name"].isna().tolist() == [False, True] and pd.isna(lines.loc[1, "qty_base"])
+    assert lines.loc[lines["counted"], "amount"].sum() == 45000
