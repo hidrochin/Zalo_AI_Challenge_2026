@@ -45,3 +45,25 @@ def decide(results: list[dict | None], min_share: float = 0.5, unans_share: floa
     if share >= min_share:
         return first, info
     return {"type": "abstain"}, {**info, "reason": "low agreement"}
+
+
+def _agree_key(result: dict) -> str:
+    """answer_key, but a table is its rows only: each engine names its columns its own way."""
+    if result["type"] == "table":
+        rows = sorted(json.dumps(_canon(r), ensure_ascii=False) for r in (result.get("answer") or {}).get("rows", []))
+        return json.dumps(["table", rows], ensure_ascii=False)
+    return answer_key(result)
+
+
+def combine(finals: dict[str, dict]) -> tuple[dict, dict]:
+    """One final answer from several engines' finals: the shared answer when they agree, the only answer when the
+    others abstain, and abstain when two disagree. On train and public, agreeing answers were right 99% and 94% of
+    the time, and each side of a disagreement about a third of the time, so a disagreement is worth less than 0."""
+    answered = {name: f for name, f in finals.items() if f.get("type") != "abstain"}
+    info = {"answered": sorted(answered)}
+    if not answered:
+        return {"type": "abstain"}, {**info, "reason": "no engine answered"}
+    if len({_agree_key(f) for f in answered.values()}) > 1:
+        return {"type": "abstain"}, {**info, "reason": "engines disagree"}
+    name = next(n for n in finals if n in answered)  # first engine in order; equal answers but its own formatting
+    return answered[name], {**info, "agree": len(answered) > 1, "from": name}

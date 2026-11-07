@@ -25,7 +25,7 @@ MODELS = [  # first one that starts and answers sanely is used
     ("Qwen/Qwen3-14B-AWQ", ["--dtype", "half", "--quantization", "awq"]),
 ]
 STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | dev120_oracle | train (all 3000, scored); push.sh sets it
-ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql; push.sh sets it
+ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql | both; push.sh sets it
 BUILD = os.environ.get("DM_BUILD", "")  # sha1 of assets/BUILD.txt at push time; push.sh sets it
 
 
