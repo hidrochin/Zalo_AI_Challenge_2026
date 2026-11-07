@@ -254,3 +254,50 @@ def test_lint_stops_query_shapes_that_are_always_wrong():
     assert lint("select customer from orders where counted and not walkin group by customer") is None
     assert lint("select count(*) from orders where counted") is None
     assert lint("select count(*) from (select product_key from sales_lines group by product_key having count(distinct order_id) >= 3)") is None
+
+
+def test_walkin_filter_added_where_the_source_has_it():
+    from datamate.sql.agent import add_not_walkin
+
+    q = "select customer_name from orders\nwhere counted or x group by customer, customer_name order by count(*) desc, customer limit 1"
+    assert "where (counted or x) and not walkin\ngroup by customer" in add_not_walkin(q)
+    assert "sales_lines s where not walkin\ngroup by customer" in add_not_walkin("select customer from sales_lines s group by customer")
+    inner = "select count(*) from (select customer from orders where counted group by customer having count(distinct order_id) >= 4)"
+    assert "(counted) and not walkin" in add_not_walkin(inner)
+    for kept in ("select customer from sales_lines s join orders o using (order_id) where counted group by customer",  # join: ambiguous
+                 "select customer_name from raw_x where a group by customer_name",  # no walkin column
+                 "select customer from orders where counted and not walkin group by customer"):
+        assert add_not_walkin(kept) == kept
+
+
+def test_walkins_left_out_of_a_customer_ranking(tmp_path):
+    tables, roles = shop()
+    tables["lines"].loc[3, "kh"] = "Khách lẻ"
+    path = tmp_path / "s.duckdb"
+    build_store(path, tables, roles, None)
+    con = connect(path, "2025-01-31")
+    q = "-- type: list\nselect customer_name from orders where counted group by customer, customer_name order by count(*) desc, customer"
+    out = execute(con, q, "2025-01-31", None)
+    assert out["error"] is None and out["result"]["answer"] == ["Lan", "Đỗ Hà"]
+    assert "not walkin" in out["ran"]
+
+
+def test_entity_key_alias_rebound_to_the_offered_column():
+    from datamate.sql.agent import rebind_key
+
+    err = 'Binder Error: Referenced column "customer_key" not found in FROM clause!\nCandidate bindings: "customer", "customer_name"'
+    q = "select customer_name from debt_by_customer(date '2025-07-12') order by debt desc, customer_key limit 5"
+    assert rebind_key(q, err).endswith("order by debt desc, customer limit 5")
+    assert rebind_key(q, err.replace('"customer", ', "")) .endswith("customer_name limit 5")
+    assert rebind_key("select qty_base", 'Referenced column "qty_base" not found in FROM clause!\nCandidate bindings: "_file"') is None
+
+
+def test_limit_alone_on_a_ranked_macro():
+    con = duckdb.connect()
+    con.execute("set variable as_of = date '2025-01-01'")
+    con.execute("create macro debt_by_customer(x) as table select * from (values ('b', 'B', 5), ('a', 'A', 9), ('c', 'C', 5)) t(customer, customer_name, debt)"
+                " order by debt desc, customer")
+    out = execute(con, "-- type: list\nselect customer_name from debt_by_customer(date '2025-01-01') limit 2", "2025-01-01", None)
+    assert out["error"] is None and out["result"]["answer"] == ["A", "B"]
+    assert "ORDER BY" in execute(con, "-- type: list\nselect customer_name from debt_by_customer(date '2025-01-01') where debt > 1 limit 2",
+                                 "2025-01-01", None)["error"]

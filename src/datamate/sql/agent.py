@@ -368,14 +368,84 @@ def lint(code: str) -> str | None:
     return None
 
 
+def _depths(code: str) -> list[int]:
+    """Parenthesis depth at each character, quotes skipped."""
+    out, d, quote = [], 0, None
+    for ch in code:
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            d += 1
+        elif ch == ")":
+            d -= 1
+        out.append(d)
+    return out
+
+
+_WORD = re.compile(r"\b(select|from|where|join)\b", re.I)
+_WALKIN_SOURCE = re.compile(r"from\s+(sales_lines|orders|debt_by_order\s*\([^()]*\))(\s+(as\s+)?\w+)?(\s+where\b|\s*$)", re.I)
+
+
+def add_not_walkin(code: str) -> str:
+    """`not walkin` added to the SELECT that groups by customer, when its one source has the column; else the code unchanged
+    and lint() asks the model. Walk-ins are no customer (rulebook), so the rewrite cannot change a right answer."""
+    m = _BY_CUSTOMER.search(code)
+    if m is None or _NO_WALKIN.search(code):
+        return code
+    depth = _depths(code)
+    d = depth[m.start()]
+    words = [w for w in _WORD.finditer(code, 0, m.start()) if depth[w.start()] == d]
+    starts = [i for i, w in enumerate(words) if w.group(1).lower() == "select"]
+    if not starts:
+        return code
+    scope = words[starts[-1] + 1:]
+    kinds = [w.group(1).lower() for w in scope]
+    if "join" in kinds or kinds.count("from") != 1 or kinds.count("where") > 1:
+        return code
+    frm = scope[kinds.index("from")]
+    if "where" in kinds:
+        where = scope[kinds.index("where")]
+        if not _WALKIN_SOURCE.match(code[frm.start():where.end()]):
+            return code
+        cond = code[where.end():m.start()].strip()
+        return f"{code[:where.end()]} ({cond}) and not walkin\n{code[m.start():]}"
+    if not _WALKIN_SOURCE.match(code[frm.start():m.start()].rstrip()):
+        return code
+    return f"{code[:m.start()].rstrip()} where not walkin\n{code[m.start():]}"
+
+
+# The model names an entity key the way other schemas do; the view calls it otherwise. Rebound only to a column DuckDB offers.
+_KEY_ALIASES = {f"{e}_{s}": (f"{e}_key", e, f"{e}_id", f"{e}_name") for e in ("customer", "product") for s in ("key", "code", "id")}
+_MISSING_COLUMN = re.compile(r'Referenced column "([^"]+)" not found.*?Candidate bindings: ([^\n]*)', re.S)
+
+
+def rebind_key(code: str, error: str) -> str | None:
+    """The query with a missing entity-key column renamed to the key the source has, or None."""
+    m = _MISSING_COLUMN.search(error)
+    if m is None or m.group(1).lower() not in _KEY_ALIASES:
+        return None
+    offered = {c.split(".")[-1] for c in re.findall(r'"([^"]+)"', m.group(2))}
+    to = next((c for c in _KEY_ALIASES[m.group(1).lower()] if c in offered and c != m.group(1)), None)
+    return re.sub(rf'"?\b{re.escape(m.group(1))}\b"?', to, code) if to else None
+
+
 _LIMIT = re.compile(r"\blimit\b", re.I)
 _ORDER_BY = re.compile(r"\border\s+by\b", re.I)
+# Table macros that already return rows in rank order (criterion, then key), so `limit k` alone is a top-k
+_RANKED_SOURCE = re.compile(r"^\s*select\b(?:(?!\b(?:join|group\s+by|where)\b).)*\bfrom\s+(debt_by_customer|slow_products)\s*\([^()]*\)\s*(limit\b|$)",
+                            re.I | re.S)
+
+
+def _body(code: str) -> str:
+    return "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("--"))
 
 
 def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, timeout: float = 30.0) -> dict:
     """Same record as sandbox._execute, for a reply taken by extract_sql."""
     m = _UNANSWERABLE.match(code)
-    preview = ""
+    preview, written = "", code
     if m:
         result = {"type": "unanswerable", "reason": m.group(1).strip(), "_src": "model"}
     else:
@@ -383,22 +453,37 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         if declared is None:
             return {"result": None, "error": "The first line of the query must be `-- type: <t>`.", "stdout": ""}
         try:
-            if _LIMIT.search(code) and not _ORDER_BY.search(code):
+            if _LIMIT.search(code) and not _ORDER_BY.search(code) and not _RANKED_SOURCE.match(_body(code)):
                 raise AnswerShape("LIMIT without ORDER BY picks rows at random: order by the criterion, then by code.")
+            code = add_not_walkin(code)
             why = lint(code)
             if why:
                 raise AnswerShape(why)
             set_as_of(con, as_of)
-            columns, rows = run_select(con, code, timeout)
+            for tries in range(3):
+                try:
+                    columns, rows = run_select(con, code, timeout)
+                    break
+                except duckdb.BinderException as e:
+                    again = rebind_key(code, str(e))
+                    if again is None or tries == 2:
+                        raise
+                    code = again
             preview = repr(rows[:5])
             result = to_answer(declared.group(1).lower(), columns, rows)
         except (duckdb.Error, ValueError, TypeError) as e:  # ValueError covers SqlRejected and AnswerShape
-            return {"result": None, "error": str(e)[:1500], "stdout": preview}
+            return {"result": None, "error": str(e)[:1500], "stdout": preview, **_ran(written, code)}
     error, warning = check_result(result, names)
     contract = None
     if error is None and warning is None:
         warning, contract = _shadow_warning(con, result, shadow, timeout)
-    return {"result": result if error is None else None, "error": error, "warning": warning, "contract": contract, "stdout": preview}
+    return {"result": result if error is None else None, "error": error, "warning": warning, "contract": contract, "stdout": preview,
+            **_ran(written, code)}
+
+
+def _ran(written: str, code: str) -> dict:
+    """The query as executed, in the log, when a rewrite changed the model's query."""
+    return {"ran": code} if code != written else {}
 
 
 class SqlPool:
