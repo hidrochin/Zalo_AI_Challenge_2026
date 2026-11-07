@@ -7,6 +7,7 @@ Everything lands in /kaggle/working/out (download with `kaggle kernels output`).
 """
 
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -24,6 +25,7 @@ MODELS = [  # first one that starts and answers sanely is used
     ("Qwen/Qwen3-14B-AWQ", ["--dtype", "half", "--quantization", "awq"]),
 ]
 STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | train (all 3000, scored); push.sh sets it
+BUILD = os.environ.get("DM_BUILD", "")  # sha1 of assets/BUILD.txt at push time; push.sh sets it
 
 
 def sh(cmd, **kw):
@@ -46,7 +48,12 @@ def setup():
     else:  # Kaggle unpacks archives in datasets
         root = os.path.dirname(min(glob.glob("/kaggle/input/**/pyproject.toml", recursive=True), key=len))
         sh(f"cp -r {root} {PROJ} && find {PROJ} -name '._*' -delete")
-    sh(f"cp {PROJ}/assets/BUILD.txt {OUT}/ || true")  # a record only: never stop a run for it
+    sh(f"cp {PROJ}/assets/BUILD.txt {OUT}/ || true")
+    if BUILD:  # a stale dataset version mounts old code: stop before hours of GPU time
+        got = hashlib.sha1(open(f"{PROJ}/assets/BUILD.txt", "rb").read()).hexdigest()
+        if got != BUILD:
+            log(f"mounted build {got} is not the pushed build {BUILD}; stopping")
+            sys.exit(1)
     sh("pip install -q uv")
     sh(f"cd {PROJ} && uv sync --frozen --no-dev -q")
     sh(f"uv venv -q --python 3.12 {ENV} && uv pip install -q --python {ENV}/bin/python vllm")
