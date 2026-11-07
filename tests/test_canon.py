@@ -117,3 +117,12 @@ def test_order_only_shop_reads_each_order_as_one_line():
                            "TT": ["xong", "huỷ"], "TT__norm": ["hoàn thành", "huỷ"]})
     s, _ = build_sales({"o": orders}, {"o": {"Mã": "order_id", "Ngày": "order_date", "TT": "status"}})
     assert s.loc[s["counted"], "amount"].sum() == 100
+
+
+def test_boolean_cells_stay_boolean():
+    from datamate.ingest.business import TableInfo, _type_columns
+    df = pd.DataFrame({"Tên": ["A", "B", "C"], "Kê đơn": [True, "False", "TRUE"], "Ghi chú": ["True", "khác", None],
+                       "_file": ["f.xlsx"] * 3, "_sheet": ["s"] * 3})
+    out = _type_columns(df, ["Tên", "Kê đơn", "Ghi chú"], TableInfo("t", [("f.xlsx", None)], {}, {}))
+    assert out["Kê đơn"].dtype == bool and out["Kê đơn"].tolist() == [True, False, True]
+    assert out["Ghi chú"].iloc[:2].tolist() == ["True", "khác"] and out["Ghi chú"].isna().iloc[2]  # free text stays text

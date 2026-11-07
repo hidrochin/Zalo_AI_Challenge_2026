@@ -44,8 +44,8 @@ answer_number(revenue(p, mine), kind='money')
 ```python
 # top 3 khách chi nhiều nhất tháng 12/2025 (khách lẻ excluded)
 s = sales_lines()
-ok = s['counted'] & in_period(s['date'], month(2025, 12)) & ~s['walkin']
-g = s[ok].groupby(['customer', 'customer_name'], as_index=False)['amount'].sum()
+mine = s[s['counted'] & in_period(s['date'], month(2025, 12)) & ~s['walkin']]   # select rows; a bare mask is not a table
+g = mine.groupby(['customer', 'customer_name'], as_index=False)['amount'].sum()
 answer_list(rank_top(g, by='amount', k=3, code='customer')['customer_name'].tolist())
 ```
 ```python

@@ -6,6 +6,7 @@ Periods are inclusive date ranges; `in_period` clips their end to AS_OF because 
 today "have not happened yet" (rulebook).
 """
 
+import datetime as _dt
 import difflib
 import inspect
 import math
@@ -24,7 +25,7 @@ from datamate.text import fold, norm_key
 # Version of the business definitions behind the primitives (sales_lines, orders, revenue, avg_order_value, ...).
 # Bump it whenever a definition changes; it is logged with every run. `datamate semantic-check` tests the
 # definitions against train gold answers.
-SEMANTIC_VERSION = "2026-11-07.2"
+SEMANTIC_VERSION = "2026-11-07.3"
 
 AS_OF: pd.Timestamp | None = None
 CAL: pd.DataFrame | None = None
@@ -39,9 +40,12 @@ class Unanswerable(Exception):
 
 
 class Period(NamedTuple):
-    """Inclusive date range: fields .start and .end (pd.Timestamp, midnight) and .days. Build it with the period helpers below (month, this_month, ...), not with Period(...)."""
+    """Inclusive date range: fields .start and .end (pd.Timestamp, midnight) and .days. Build it with the period helpers below (month, this_month, ...), not with Period(...).
+    Against a date column, p means its days: col == p is "inside p" (no clip at AS_OF), col >= p is on or after p.start, col <= p is on or before p.end."""
     start: pd.Timestamp
     end: pd.Timestamp
+
+    __pandas_priority__ = 5000  # pandas hands `column <op> period` to the comparisons below
 
     @property
     def days(self) -> int:
@@ -49,6 +53,49 @@ class Period(NamedTuple):
 
     def __repr__(self) -> str:
         return f"Period({self.start:%Y-%m-%d} .. {self.end:%Y-%m-%d})"
+
+    def __getitem__(self, k):
+        return getattr(self, k) if isinstance(k, str) else tuple.__getitem__(self, k)
+
+    def _dates(self, other):
+        """other as midnight datetimes when it is a date column or a date; None otherwise (then tuple semantics apply)."""
+        if isinstance(other, (pd.Series, pd.Index)):
+            if not pd.api.types.is_datetime64_any_dtype(other):
+                first = pd.Series(other).dropna().head(1)
+                if first.empty or not isinstance(first.iloc[0], (_dt.date, np.datetime64)):
+                    return None
+            x = pd.to_datetime(other)
+            return x.dt.normalize() if isinstance(x, pd.Series) else x.normalize()
+        if isinstance(other, (_dt.date, np.datetime64)):
+            return pd.Timestamp(other).normalize()
+        return None
+
+    # a reflected comparison arrives here: `col >= p` calls p.__le__(col), so each method answers for the column's side
+    def __eq__(self, other):
+        x = self._dates(other)
+        return tuple.__eq__(self, other) if x is None else (x >= self.start) & (x <= self.end)
+
+    def __ne__(self, other):
+        x = self._dates(other)
+        return tuple.__ne__(self, other) if x is None else ~((x >= self.start) & (x <= self.end))
+
+    def __le__(self, other):  # other >= p
+        x = self._dates(other)
+        return tuple.__le__(self, other) if x is None else x >= self.start
+
+    def __ge__(self, other):  # other <= p
+        x = self._dates(other)
+        return tuple.__ge__(self, other) if x is None else x <= self.end
+
+    def __lt__(self, other):  # other > p
+        x = self._dates(other)
+        return tuple.__lt__(self, other) if x is None else x > self.end
+
+    def __gt__(self, other):  # other < p
+        x = self._dates(other)
+        return tuple.__gt__(self, other) if x is None else x < self.start
+
+    __hash__ = tuple.__hash__
 
 
 def set_context(as_of, cal: pd.DataFrame | None, sales: pd.DataFrame | None = None, facts: _facts.Facts | None = None) -> None:
@@ -60,7 +107,9 @@ def set_context(as_of, cal: pd.DataFrame | None, sales: pd.DataFrame | None = No
     _FACTS = facts
 
 
-def _d(x) -> pd.Timestamp:
+def _d(x, end: bool = False) -> pd.Timestamp:
+    if isinstance(x, Period):  # day(...) or another period where a date is expected: its first day, or its last when `end`
+        return x.end if end else x.start
     if isinstance(x, str):
         t = parse_date(x)
         if t is None:
@@ -88,13 +137,13 @@ def yesterday() -> Period:
 
 
 def between(a, b) -> Period:
-    """Từ a đến b, both inclusive."""
-    return Period(_d(a), _d(b))
+    """Từ a đến b, both inclusive (dates, or periods: from a's first day to b's last)."""
+    return Period(_d(a), _d(b, end=True))
 
 
 def until(d=None) -> Period:
     """From the start of the data to the end of day d (default today): for point-in-time questions (còn nợ, còn tồn)."""
-    return Period(pd.Timestamp("1900-01-01"), _d(d if d is not None else AS_OF))
+    return Period(pd.Timestamp("1900-01-01"), _d(d if d is not None else AS_OF, end=True))
 
 
 def month(y: int, m: int) -> Period:
@@ -270,7 +319,13 @@ def round_half_up(x, nd: int = 0) -> float:
 
 
 def rank_top(df: pd.DataFrame, by: str, k: int | None = None, code: str | None = None, name: str | None = None) -> pd.DataFrame:
-    """Sort descending by `by`; ties by `code` ascending (else `name`); keep top k (all if fewer)."""
+    """Sort descending by `by`; ties by `code` ascending (else `name`); keep top k (all if fewer).
+    Rows that repeat the key (e.g. sales lines) are first summed per key; columns constant within a key (its name) are kept."""
+    key = next((c for c in (code, name) if c and c in df.columns and c != by), None)
+    if key and by in df.columns and pd.api.types.is_numeric_dtype(df[by]) and df[key].duplicated().any():
+        g = df.groupby(key, sort=False, dropna=False)
+        same = [c for c in df.columns if c not in (key, by) and (g[c].nunique(dropna=False) <= 1).all()]
+        df = g[same].first().assign(**{by: g[by].sum()}).reset_index() if same else g[by].sum().reset_index()
     keys, asc = [by], [False]
     for c in (code, name):
         if c and c in df.columns and c != by:
@@ -305,6 +360,15 @@ def sales_lines() -> pd.DataFrame:
     return _SALES.copy(deep=False)
 
 
+def _lines(lines) -> pd.DataFrame:
+    """The `lines` argument of a helper: all sales lines when None; a True/False mask over sales_lines() selects its rows."""
+    if lines is None:
+        return sales_lines()
+    if isinstance(lines, pd.Series) and lines.dtype == bool and _SALES is not None and lines.index.equals(_SALES.index):
+        return sales_lines()[lines]
+    return lines
+
+
 def orders() -> pd.DataFrame:
     """One row per order: order_id, date, status, counted (not cancelled/returned), goods_amount (= order revenue), n_lines, customer, walkin + header columns."""
     key = id(_SALES)
@@ -316,7 +380,7 @@ def orders() -> pd.DataFrame:
 
 def price_on(product: str, d, lines: pd.DataFrame | None = None) -> float:
     """'Giá bán X ngày D': unit price per BASE unit before line discount on lines of X ordered on day D (cancelled/returned orders included); the most frequent value."""
-    s = sales_lines() if lines is None else lines
+    s = _lines(lines)
     names = find(s["product_name"], product, n=1)
     if not names:
         raise RuntimeError(f"product {product!r} not found in sales_lines()['product_name']")
@@ -334,14 +398,14 @@ def price_on(product: str, d, lines: pd.DataFrame | None = None) -> float:
 
 def revenue(p: Period, lines: pd.DataFrame | None = None) -> float:
     """Default-rule revenue in p: sum of `amount` over counted lines dated in p (pass filtered lines to restrict, e.g. one product)."""
-    s = sales_lines() if lines is None else lines
+    s = _lines(lines)
     require_coverage(sales_lines()["date"], p, "sales")
     return float(s.loc[s["counted"] & in_period(s["date"], p).values, "amount"].sum())
 
 
 def avg_order_value(p: Period, lines: pd.DataFrame | None = None) -> float:
     """'Giá trị trung bình một đơn' in p: revenue(p, lines) / number of counted orders among those lines in p, rounded half-up to đồng (train gold 167/168)."""
-    s = sales_lines() if lines is None else lines
+    s = _lines(lines)
     rev = revenue(p, s)
     n = s.loc[s["counted"] & in_period(s["date"], p).values, "order_id"].nunique()
     if n == 0:
@@ -450,7 +514,7 @@ def avg_import_price(product: str, p: Period) -> float:
 def gross_profit(p: Period, lines: pd.DataFrame | None = None) -> float:
     """'Lãi gộp' in p: revenue minus qty × the cost recorded on each sale line (pass filtered lines for one product)."""
     col = _fact("cost_col", "cost on its sale lines")
-    s = sales_lines() if lines is None else lines
+    s = _lines(lines)
     x = s[s["counted"] & in_period(s["date"], p).values]
     return float(x["amount"].sum() - (pd.to_numeric(x[col], errors="coerce") * pd.to_numeric(x["qty"], errors="coerce")).sum())
 
