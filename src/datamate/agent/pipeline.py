@@ -16,7 +16,7 @@ from datamate.agent.prompt import build_system, business_part, check_message, ex
 from datamate.agent.retrieve import ExampleBank
 from datamate.agent.sandbox import ExecPool
 from datamate.agent.columns import resolve_columns
-from datamate.agent.lint import grain_advice, ready_terms, term_advice
+from datamate.agent.lint import grain_advice, mask_advice, ready_terms, term_advice
 from datamate.agent.statuses import resolve_statuses
 from datamate.agent.vote import decide
 from datamate.canon import build_sales
@@ -215,7 +215,7 @@ def solve_question(q: dict, llm, pool: ExecPool, system: str, biz_part: str, ban
                 sample["attempts"].append({"llm_error": repr(e)})
                 break
             code = extract_code(text_reply)
-            advice = (term_advice(text, code, terms, "pandas") or grain_advice(text, code)) if code and attempt == 0 and cfg.repair else None
+            advice = (mask_advice(code) or term_advice(text, code, terms, "pandas") or grain_advice(text, code)) if code and attempt == 0 and cfg.repair else None
             if code is None:
                 out = {"result": None, "error": "No ```python code block found in the reply.", "stdout": ""}
             elif advice:  # one rewrite, never a block: the second attempt runs as written

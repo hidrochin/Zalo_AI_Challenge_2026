@@ -1,9 +1,11 @@
-"""A look at a program before it runs: the question is a term with a tested helper, or the program counts at the wrong grain.
+"""A look at a program before it runs: the question is a term with a tested helper, the program counts at the wrong grain,
+or it uses a True/False mask as if it were a table.
 
 The model tends to rebuild a rulebook term from raw tables, where it fails most. This asks for one rewrite and never
 blocks: a second attempt runs as written, so a question that only looks like a term is not lost.
 """
 
+import ast
 import re
 
 from datamate.eval.factcheck import group_of
@@ -51,6 +53,51 @@ def term_advice(text: str, code: str, terms: frozenset[str], engine: str) -> str
         return None
     return (f"This question looks like the rulebook term behind {' / '.join(names)}, a tested definition. Call it instead of rebuilding the "
             "logic from raw tables, unless the question really asks for something else.")
+
+
+_FRAME_ATTRS = {"groupby", "loc", "iloc", "merge", "columns", "pivot_table", "drop_duplicates", "reset_index"}
+_MASK_CALLS = {"in_period", "isin", "contains", "startswith", "endswith", "between", "isna", "notna", "duplicated"}
+
+
+def _is_mask(node: ast.AST) -> bool:
+    """An expression that yields one True/False per row: a & b, ~a, a == b, in_period(...), .isin(...)."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitAnd, ast.BitOr)):
+        return True
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Invert):
+        return True
+    if isinstance(node, ast.Compare):
+        return True
+    if isinstance(node, ast.Call):
+        f = node.func
+        return (isinstance(f, ast.Name) and f.id in _MASK_CALLS) or (isinstance(f, ast.Attribute) and f.attr in _MASK_CALLS)
+    return False
+
+
+def mask_advice(code: str) -> str | None:
+    """A variable holding a row mask, then read like a table (`ok.groupby(...)`, `ok['col']`): it raises or returns nonsense."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    assigned: dict[str, list[tuple[int, bool]]] = {}  # name -> (line, is mask), in program order
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            assigned.setdefault(node.targets[0].id, []).append((node.lineno, _is_mask(node.value)))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _FRAME_ATTRS:
+            var, use = node.value, f".{node.attr}"
+        elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+            var, use = node.value, f"[{node.slice.value!r}]"
+        else:
+            continue
+        if not isinstance(var, ast.Name) or var.id not in assigned:
+            continue
+        before = [m for line, m in sorted(assigned[var.id]) if line < node.lineno]
+        if before and before[-1]:
+            v = var.id
+            return (f"`{v}` is a True/False mask (one flag per row), not a table, so `{v}{use}` fails or reads the wrong thing. "
+                    f"Select the rows first, e.g. `mine = s[{v}]`, then use `mine{use}`.")
+    return None
 
 
 def grain_advice(text: str, code: str) -> str | None:

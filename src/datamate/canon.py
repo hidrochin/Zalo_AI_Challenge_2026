@@ -327,7 +327,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         M = P[add].assign(__k=kcol.values).drop_duplicates("__k").set_index("__k")
         k = out[key].astype(str).map(fold) if key == "product_name" else out[key]
         for c in add:
-            out[c] = k.map(M[c]).values
+            v = k.map(M[c])
+            out[c] = (v.fillna(False).astype(bool) if M[c].dtype == bool else v).values  # a product missing from the list has no flag
         sources.append(f"T['{n}'] (product attributes: {', '.join(add)})")
 
     for n, r in roles_by_table.items():  # the customer's group, so a share needs no join that would drop walk-in orders

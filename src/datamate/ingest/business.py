@@ -16,7 +16,7 @@ from datamate.ingest.roles import assign_roles, is_known_status, normalize_statu
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 18
+INGEST_VERSION = 19
 META_COLS = ("_file", "_sheet")
 README_UNITS = "README.QuyDoi"
 
@@ -328,8 +328,18 @@ def _type_columns(df: pd.DataFrame, data_cols: list[str], ti: TableInfo) -> pd.D
                 vals = vals.round().astype("int64")
             df[c] = vals
             continue
+        if sample.map(lambda v: _as_flag(v) is not None).all():  # Excel TRUE/FALSE or 'True'/'False' text: a flag, not text
+            flags = col.map(lambda v: None if _is_null(v) else _as_flag(v))
+            df[c] = flags.astype(bool) if flags.notna().all() else flags
+            continue
         df[c] = col.map(lambda v: None if _is_null(v) else str(v).strip())
     return df
+
+
+def _as_flag(v) -> bool | None:
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    return {"true": True, "false": False}.get(v.strip().lower()) if isinstance(v, str) else None
 
 
 def _as_code(v) -> str:
