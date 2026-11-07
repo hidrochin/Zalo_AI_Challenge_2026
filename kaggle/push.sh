@@ -31,18 +31,23 @@ fi
 # stages the kernel runs: DM_STAGES=train kaggle/push.sh update (default: public)
 sed -e "s/os.environ.get(\"DM_STAGES\", \"public\")/os.environ.get(\"DM_STAGES\", \"${DM_STAGES:-public}\")/" \
     -e "s/os.environ.get(\"DM_ENGINE\", \"pandas\")/os.environ.get(\"DM_ENGINE\", \"${DM_ENGINE:-pandas}\")/" \
+    -e "s/os.environ.get(\"DM_BUILD\", \"\")/os.environ.get(\"DM_BUILD\", \"$(shasum assets/BUILD.txt | cut -d' ' -f1)\")/" \
   kaggle/run_kaggle.py > "$KERNEL/run_kaggle.py"
 cat > "$KERNEL/kernel-metadata.json" <<EOF
 {"id": "$USER/${DM_KERNEL:-datamate-public-run}", "title": "${DM_KERNEL:-datamate-public-run}", "code_file": "run_kaggle.py",
  "language": "python", "kernel_type": "script", "is_private": true, "enable_gpu": true,
  "enable_internet": true, "dataset_sources": ["$USER/$DATASET"], "competition_sources": [], "kernel_sources": []}
 EOF
-echo "waiting for the dataset to finish processing..."
-sleep 30
-for _ in $(seq 1 60); do
-  s=$(uvx --with six kaggle datasets status "$USER/$DATASET" 2>&1 | tail -1) || true  # a new dataset errors until it exists
-  [ "$s" = "ready" ] && break
+# "ready" can still describe the previous version, so wait until the dataset serves this BUILD.txt
+echo "waiting for the dataset to serve this build..."
+SEEN=$(mktemp -d)
+for _ in $(seq 1 90); do
   sleep 20
+  s=$(uvx --with six kaggle datasets status "$USER/$DATASET" 2>&1 | tail -1) || true  # a new dataset errors until it exists
+  rm -rf "${SEEN:?}"/*
+  uvx --with six kaggle datasets download "$USER/$DATASET" -f assets/BUILD.txt -p "$SEEN" --force -q >/dev/null 2>&1 || true
+  [ "$s" = "ready" ] && cmp -s "$SEEN/assets/BUILD.txt" assets/BUILD.txt && break
 done
 echo "dataset: $s"
+cmp -s "$SEEN/assets/BUILD.txt" assets/BUILD.txt || { echo "dataset still serves another build; kernel not pushed" >&2; exit 1; }
 uvx --with six kaggle kernels push -p "$KERNEL" --accelerator NvidiaTeslaT4
