@@ -6,6 +6,7 @@ Periods are inclusive date ranges; `in_period` clips their end to AS_OF because 
 today "have not happened yet" (rulebook).
 """
 
+import datetime as _dt
 import difflib
 import inspect
 import math
@@ -17,19 +18,21 @@ import pandas as pd
 
 from datamate.canon import build_orders as _build_orders
 from datamate.canon import is_walkin as _is_walkin
+from datamate import facts as _facts
 from datamate.ingest.parsers import parse_date
 from datamate.text import fold, norm_key
 
 # Version of the business definitions behind the primitives (sales_lines, orders, revenue, avg_order_value, ...).
 # Bump it whenever a definition changes; it is logged with every run. `datamate semantic-check` tests the
 # definitions against train gold answers.
-SEMANTIC_VERSION = "2026-11-06.1"
+SEMANTIC_VERSION = "2026-11-07.3"
 
 AS_OF: pd.Timestamp | None = None
 CAL: pd.DataFrame | None = None
 _RESULT: dict | None = None
 _SALES: pd.DataFrame | None = None
 _ORDERS: dict[int, pd.DataFrame] = {}
+_FACTS: _facts.Facts | None = None
 
 
 class Unanswerable(Exception):
@@ -37,9 +40,12 @@ class Unanswerable(Exception):
 
 
 class Period(NamedTuple):
-    """Inclusive date range: fields .start and .end (pd.Timestamp, midnight) and .days. Build it with the period helpers below (month, this_month, ...), not with Period(...)."""
+    """Inclusive date range: fields .start and .end (pd.Timestamp, midnight) and .days. Build it with the period helpers below (month, this_month, ...), not with Period(...).
+    Against a date column, p means its days: col == p is "inside p" (no clip at AS_OF), col >= p is on or after p.start, col <= p is on or before p.end."""
     start: pd.Timestamp
     end: pd.Timestamp
+
+    __pandas_priority__ = 5000  # pandas hands `column <op> period` to the comparisons below
 
     @property
     def days(self) -> int:
@@ -48,16 +54,62 @@ class Period(NamedTuple):
     def __repr__(self) -> str:
         return f"Period({self.start:%Y-%m-%d} .. {self.end:%Y-%m-%d})"
 
+    def __getitem__(self, k):
+        return getattr(self, k) if isinstance(k, str) else tuple.__getitem__(self, k)
 
-def set_context(as_of, cal: pd.DataFrame | None, sales: pd.DataFrame | None = None) -> None:
-    global AS_OF, CAL, _RESULT, _SALES
+    def _dates(self, other):
+        """other as midnight datetimes when it is a date column or a date; None otherwise (then tuple semantics apply)."""
+        if isinstance(other, (pd.Series, pd.Index)):
+            if not pd.api.types.is_datetime64_any_dtype(other):
+                first = pd.Series(other).dropna().head(1)
+                if first.empty or not isinstance(first.iloc[0], (_dt.date, np.datetime64)):
+                    return None
+            x = pd.to_datetime(other)
+            return x.dt.normalize() if isinstance(x, pd.Series) else x.normalize()
+        if isinstance(other, (_dt.date, np.datetime64)):
+            return pd.Timestamp(other).normalize()
+        return None
+
+    # a reflected comparison arrives here: `col >= p` calls p.__le__(col), so each method answers for the column's side
+    def __eq__(self, other):
+        x = self._dates(other)
+        return tuple.__eq__(self, other) if x is None else (x >= self.start) & (x <= self.end)
+
+    def __ne__(self, other):
+        x = self._dates(other)
+        return tuple.__ne__(self, other) if x is None else ~((x >= self.start) & (x <= self.end))
+
+    def __le__(self, other):  # other >= p
+        x = self._dates(other)
+        return tuple.__le__(self, other) if x is None else x >= self.start
+
+    def __ge__(self, other):  # other <= p
+        x = self._dates(other)
+        return tuple.__ge__(self, other) if x is None else x <= self.end
+
+    def __lt__(self, other):  # other > p
+        x = self._dates(other)
+        return tuple.__lt__(self, other) if x is None else x > self.end
+
+    def __gt__(self, other):  # other < p
+        x = self._dates(other)
+        return tuple.__gt__(self, other) if x is None else x < self.start
+
+    __hash__ = tuple.__hash__
+
+
+def set_context(as_of, cal: pd.DataFrame | None, sales: pd.DataFrame | None = None, facts: _facts.Facts | None = None) -> None:
+    global AS_OF, CAL, _RESULT, _SALES, _FACTS
     AS_OF = pd.Timestamp(as_of).normalize()
     CAL = cal
     _RESULT = None
     _SALES = sales
+    _FACTS = facts
 
 
-def _d(x) -> pd.Timestamp:
+def _d(x, end: bool = False) -> pd.Timestamp:
+    if isinstance(x, Period):  # day(...) or another period where a date is expected: its first day, or its last when `end`
+        return x.end if end else x.start
     if isinstance(x, str):
         t = parse_date(x)
         if t is None:
@@ -85,13 +137,13 @@ def yesterday() -> Period:
 
 
 def between(a, b) -> Period:
-    """Từ a đến b, both inclusive."""
-    return Period(_d(a), _d(b))
+    """Từ a đến b, both inclusive (dates, or periods: from a's first day to b's last)."""
+    return Period(_d(a), _d(b, end=True))
 
 
 def until(d=None) -> Period:
     """From the start of the data to the end of day d (default today): for point-in-time questions (còn nợ, còn tồn)."""
-    return Period(pd.Timestamp("1900-01-01"), _d(d if d is not None else AS_OF))
+    return Period(pd.Timestamp("1900-01-01"), _d(d if d is not None else AS_OF, end=True))
 
 
 def month(y: int, m: int) -> Period:
@@ -267,7 +319,13 @@ def round_half_up(x, nd: int = 0) -> float:
 
 
 def rank_top(df: pd.DataFrame, by: str, k: int | None = None, code: str | None = None, name: str | None = None) -> pd.DataFrame:
-    """Sort descending by `by`; ties by `code` ascending (else `name`); keep top k (all if fewer)."""
+    """Sort descending by `by`; ties by `code` ascending (else `name`); keep top k (all if fewer).
+    Rows that repeat the key (e.g. sales lines) are first summed per key; columns constant within a key (its name) are kept."""
+    key = next((c for c in (code, name) if c and c in df.columns and c != by), None)
+    if key and by in df.columns and pd.api.types.is_numeric_dtype(df[by]) and df[key].duplicated().any():
+        g = df.groupby(key, sort=False, dropna=False)
+        same = [c for c in df.columns if c not in (key, by) and (g[c].nunique(dropna=False) <= 1).all()]
+        df = g[same].first().assign(**{by: g[by].sum()}).reset_index() if same else g[by].sum().reset_index()
     keys, asc = [by], [False]
     for c in (code, name):
         if c and c in df.columns and c != by:
@@ -302,6 +360,15 @@ def sales_lines() -> pd.DataFrame:
     return _SALES.copy(deep=False)
 
 
+def _lines(lines) -> pd.DataFrame:
+    """The `lines` argument of a helper: all sales lines when None; a True/False mask over sales_lines() selects its rows."""
+    if lines is None:
+        return sales_lines()
+    if isinstance(lines, pd.Series) and lines.dtype == bool and _SALES is not None and lines.index.equals(_SALES.index):
+        return sales_lines()[lines]
+    return lines
+
+
 def orders() -> pd.DataFrame:
     """One row per order: order_id, date, status, counted (not cancelled/returned), goods_amount (= order revenue), n_lines, customer, walkin + header columns."""
     key = id(_SALES)
@@ -313,7 +380,7 @@ def orders() -> pd.DataFrame:
 
 def price_on(product: str, d, lines: pd.DataFrame | None = None) -> float:
     """'Giá bán X ngày D': unit price per BASE unit before line discount on lines of X ordered on day D (cancelled/returned orders included); the most frequent value."""
-    s = sales_lines() if lines is None else lines
+    s = _lines(lines)
     names = find(s["product_name"], product, n=1)
     if not names:
         raise RuntimeError(f"product {product!r} not found in sales_lines()['product_name']")
@@ -331,14 +398,14 @@ def price_on(product: str, d, lines: pd.DataFrame | None = None) -> float:
 
 def revenue(p: Period, lines: pd.DataFrame | None = None) -> float:
     """Default-rule revenue in p: sum of `amount` over counted lines dated in p (pass filtered lines to restrict, e.g. one product)."""
-    s = sales_lines() if lines is None else lines
+    s = _lines(lines)
     require_coverage(sales_lines()["date"], p, "sales")
     return float(s.loc[s["counted"] & in_period(s["date"], p).values, "amount"].sum())
 
 
 def avg_order_value(p: Period, lines: pd.DataFrame | None = None) -> float:
     """'Giá trị trung bình một đơn' in p: revenue(p, lines) / number of counted orders among those lines in p, rounded half-up to đồng (train gold 167/168)."""
-    s = sales_lines() if lines is None else lines
+    s = _lines(lines)
     rev = revenue(p, s)
     n = s.loc[s["counted"] & in_period(s["date"], p).values, "order_id"].nunique()
     if n == 0:
@@ -354,6 +421,161 @@ def is_walkin(names) -> pd.Series:
 def same_name(a, b) -> bool:
     """True if two names differ only in case, spacing, punctuation or diacritics."""
     return fold(norm_key(a)) == fold(norm_key(b))
+
+
+class NoFact(RuntimeError):
+    """A fact helper found no table for this: the shop may not record it, or may name it in a way the helper cannot see."""
+
+
+def _fact(name: str, what: str):
+    v = getattr(_FACTS, name, None)
+    if v is None:
+        raise NoFact(f"No table for {what} was recognised in this shop. Look through T in the schema card: compute it from the "
+                     "raw tables if they hold it, and call unanswerable() only if no table does.")
+    return v
+
+
+def _end(d=None) -> pd.Timestamp:
+    """The day a state is read at: a date, or the last day of a Period, never after today."""
+    return AS_OF if d is None else min(d.end if isinstance(d, Period) else _d(d), AS_OF)
+
+
+def _customer(name) -> str | None:
+    if name is None:
+        return None
+    o = _fact("orders", "orders with totals")
+    names = find(o["customer_name"], name, n=1)
+    if not names:
+        raise RuntimeError(f"customer {name!r} not found")
+    return o.loc[o["customer_name"] == names[0], "customer"].iloc[0]
+
+
+def same_text(a, b) -> bool:
+    """True if two texts are equal apart from case and diacritics: 'hoạt chất ghi đúng như vậy' needs this, not a substring match."""
+    return fold(a) == fold(b)
+
+
+def debt_orders(d=None) -> pd.DataFrame:
+    """Orders still owing at the end of day d (default today): order_id, date, customer, customer_name, walkin, debt, age (days from the order date). COD, marketplace and cancelled orders are already left out."""
+    _fact("orders", "orders with totals")
+    _fact("payments", "payments")
+    return _facts.debt_rows(_FACTS, _end(d))
+
+
+def debt_total(d=None) -> float:
+    """'Khách còn nợ tổng cộng' at the end of day d, walk-in orders included."""
+    return float(debt_orders(d)["debt"].sum())
+
+
+def debt_customers(d=None) -> pd.DataFrame:
+    """Debt per customer at the end of day d, biggest first: customer, customer_name, debt. Walk-in orders have no row."""
+    o = debt_orders(d)
+    o = o[~o["walkin"]]
+    return (o.groupby(["customer", "customer_name"], as_index=False)["debt"].sum()
+            .sort_values(["debt", "customer"], ascending=[False, True], kind="mergesort").reset_index(drop=True))
+
+
+def debt_repaid(p: Period, customer: str | None = None) -> float:
+    """'Thu nợ, trả nợ' in p: payments dated in p, after the day of purchase, on any on-credit order (also of earlier periods)."""
+    _fact("orders", "orders with totals")
+    _fact("payments", "payments")
+    return _facts.repaid(_FACTS, p.start, _end(p.end), _customer(customer))
+
+
+def debt_new(p: Period, customer: str | None = None) -> float:
+    """'Nợ thêm' in p: what the on-credit orders placed in p left unpaid at the end of the day of purchase."""
+    _fact("orders", "orders with totals")
+    _fact("payments", "payments")
+    return _facts.new_debt(_FACTS, p.start, _end(p.end), _customer(customer))
+
+
+def delivery_trips(p: Period) -> int:
+    """'Số đợt giao' in p: distinct (order, trip) pairs with a delivery date in p."""
+    d = _fact("deliveries", "deliveries")
+    return int(d[(d["date"] >= p.start) & (d["date"] <= _end(p.end))][["order_id", "trip"]].drop_duplicates().shape[0])
+
+
+def imports() -> pd.DataFrame:
+    """Import lines of receipts that are not cancelled, up to today: doc, date, product_name, qty, unit, price (per import unit), amount, qty_base."""
+    f = _fact("imports", "imports")
+    return f[f["date"] <= AS_OF]
+
+
+def avg_import_price(product: str, p: Period) -> float:
+    """'Giá nhập bình quân' of a product in p, weighted by quantity: sum(qty*price)/sum(qty), in whole đồng."""
+    f = imports()
+    names = find(f["product_name"], product, n=1)
+    x = f[(f["product_name"] == names[0]) & (f["date"] >= p.start) & (f["date"] <= p.end)] if names else f.iloc[0:0]
+    if x.empty:
+        raise Unanswerable(f"no import of {product} in {p}")
+    return round_half_up(x["amount"].sum() / x["qty"].sum(), 0)
+
+
+def gross_profit(p: Period, lines: pd.DataFrame | None = None) -> float:
+    """'Lãi gộp' in p: revenue minus qty × the cost recorded on each sale line (pass filtered lines for one product)."""
+    col = _fact("cost_col", "cost on its sale lines")
+    s = _lines(lines)
+    x = s[s["counted"] & in_period(s["date"], p).values]
+    return float(x["amount"].sum() - (pd.to_numeric(x[col], errors="coerce") * pd.to_numeric(x["qty"], errors="coerce")).sum())
+
+
+def net_profit(p: Period) -> float:
+    """'Lãi ròng' of p: gross_profit(p) minus every expense dated in p."""
+    e = _fact("expenses", "expenses")
+    return gross_profit(p) - float(e.loc[(e["date"] >= p.start) & (e["date"] <= _end(p.end)), "amount"].sum())
+
+
+def slow_products(p: Period) -> list[str]:
+    """'Hàng ế' in p: products sold before p (counted orders) with no counted order in p."""
+    s = sales_lines()
+    s = s[s["counted"] & s["is_goods"]]
+    before = set(s.loc[s["date"] < p.start, "product_name"].dropna())
+    return sorted(before - set(s.loc[in_period(s["date"], p).values, "product_name"].dropna()))
+
+
+def price_effect(product: str, d, n: int) -> float:
+    """'Hiệu ứng tăng giá': percent change of the quantity sold (base units), n days from day d (d included) vs the n days right before d."""
+    s = sales_lines()
+    names = find(s["product_name"], product, n=1)
+    x = s[s["counted"] & (s["product_name"] == names[0])] if names else s.iloc[0:0]
+    t, span = _d(d), pd.Timedelta(days=int(n))
+    new = x.loc[(x["date"] >= t) & (x["date"] < t + span) & (x["date"] <= AS_OF), "qty_base"].sum()
+    old = x.loc[(x["date"] >= t - span) & (x["date"] < t), "qty_base"].sum()
+    return pct_change(new, old)
+
+
+def stock(product: str | None = None, d=None):
+    """Stock at the end of day d (default today) in base units: one product's number, or a Series by product_name."""
+    try:
+        s = _facts.stock_of(_FACTS, sales_lines(), _end(d))
+    except (LookupError, AttributeError):
+        raise NoFact("No stock table was recognised in this shop. Look through T in the schema card: compute it from the raw "
+                     "tables if they hold it, and call unanswerable() only if no table does.") from None
+    if product is None:
+        return s
+    names = find(s.index, product, n=1)
+    if not names:
+        raise Unanswerable(f"{product} has no stock record")
+    return float(s[names[0]])
+
+
+def stock_split(product: str, unit: str, d=None) -> list[int]:
+    """'Tồn theo đơn vị lớn': [whole big units, loose base units] of a product at the end of day d."""
+    u = _fact("units", "unit conversions")
+    names = find(u["product_name"], product, n=1)
+    x = u[(u["product_name"] == names[0]) & (u["unit"] == fold(unit))] if names else u.iloc[0:0]
+    if x.empty:
+        raise Unanswerable(f"no conversion of {unit} for {product}")
+    total, factor = stock(names[0], d), float(x["factor"].iloc[0])
+    return [int(total // factor), int(round(total - factor * (total // factor)))]
+
+
+def lots_left(d=None) -> pd.DataFrame:
+    """Lots at the end of day d with stock left: lot, product_name, expiry, left (base units), price."""
+    _fact("lots", "lots")
+    _fact("lot_sales", "sales by lot")
+    x = _facts.lot_stock(_FACTS, sales_lines(), _end(d))
+    return x[x["left"] > 0]
 
 
 # ---------------------------------------------------------------- answers
@@ -448,7 +670,8 @@ __all__ = [
     "week_prev", "last_n_days", "quarter",
     "quarter_auto", "year", "ytd", "tet", "pre_tet", "in_period", "require", "require_coverage", "shift_of",
     "count_weekday", "pct_change", "round_half_up", "rank_top", "find", "sales_lines", "orders", "revenue", "avg_order_value",
-    "price_on", "is_walkin",
+    "price_on", "is_walkin", "same_text", "debt_orders", "debt_total", "debt_customers", "debt_repaid", "debt_new", "delivery_trips", "imports",
+    "avg_import_price", "gross_profit", "net_profit", "slow_products", "price_effect", "stock", "stock_split", "lots_left",
     "same_name", "fold", "norm_key",
     "answer_number", "answer_percent", "answer_string", "answer_date", "answer_month", "answer_bool",
     "answer_list", "answer_table", "unanswerable",

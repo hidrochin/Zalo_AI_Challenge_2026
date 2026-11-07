@@ -224,7 +224,8 @@ profit uses the **cost recorded on the sale line**.
   an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
 - **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
   pandas code generation is paused; Docker and vLLM work is deferred.
-- **Status (2026-11-05):** see the README "Status (2026-11-05, evening)" section first. E0 ran code older than
+- **Status (2026-11-07, evening):** read the README "Status (2026-11-07, evening)" section first.
+- **Earlier status (2026-11-05):** README "Status (2026-11-05, evening)". E0 ran code older than
   `98d4c7b`, so its 0.473 is not comparable with the public 0.288.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
   - Public leaderboard: PA −0.110 → 0.040 → **0.288** (pipeline `98d4c7b`, precision ≈ 68%).
@@ -239,19 +240,22 @@ profit uses the **cost recorded on the sale line**.
   - `src/datamate/preprocess/`: question cleanup (Telex, abbreviations/dialect, amounts/dates, shop names)
     + one LLM rewrite
   - `src/datamate/postprocess.py`: answer expectations and checks, official output format
-  - `src/datamate/agent/`: prompt, retrieval, local and Claude backends, sandbox, vote, pipeline
+  - `src/datamate/facts.py`: fact tables at the rulebook's grain (debt, payments, trips, imports, expenses, stock, lots), found by
+    README description, header or value shape; the `dm` helpers and SQL macros read them, `datamate facts-check` tests them on gold
+  - `src/datamate/agent/`: prompt, retrieval, local and Claude backends, sandbox, vote, pipeline, query lint (`lint.py`), model column mapping (`columns.py`)
   - `src/datamate/eval/`: exact PA scorer (`scorer.py`), paired run comparison (`compare.py`), offline
     answer-check eval (`checks.py`), semantic contract tests of `dm` primitives (`semantic.py`)
   - `src/datamate/sql/`: entity dimensions (`dims.py`), per-business DuckDB views and macros (`store.py`), contract
     replay (`check.py`); not wired into the pipeline yet
   - `src/datamate/cli.py`: `datamate ingest | run | score | compare | eval-checks | semantic-check | sql-build |
-    sql-check | normalize | validate | export-examples`
+    sql-check | facts-check | normalize | validate | export-examples`
 - Bump `dm.SEMANTIC_VERSION` whenever a primitive's definition changes, and re-run `datamate semantic-check`.
 - Bump `STORE_VERSION` in `sql/store.py` whenever a view, macro or dimension changes, and re-run `datamate sql-check`.
 - **Commands:**
   - `uv run pytest -q`: unit tests
   - `uv run datamate ingest --split train`: writes `outputs/ingest/<split>/<biz>.md` cards
   - `uv run datamate run --backend local --model <ollama/vLLM model> --limit N`: scores on train
+- `src/datamate/rules.py` gates fixed definitions on rulebook clauses; `src/datamate/fast.py` is the fast branch; `ingest/trust.py` checks roles by value.
 - Bump `INGEST_VERSION` in `ingest/business.py` whenever ingestion output changes, so the caches
   rebuild.
 - Python ≥ 3.11 managed with **uv** (`uv sync`, `uv run ...`, `uv add <pkg>`).

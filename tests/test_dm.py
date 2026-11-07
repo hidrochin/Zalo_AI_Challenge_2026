@@ -78,3 +78,38 @@ def test_avg_order_value_counts_orders_not_lines():
     })
     dm.set_context("2025-08-31", None, sales)
     assert dm.avg_order_value(dm.month(2025, 7)) == 126  # (150 + 101) / 2 orders = 125.5 -> half-up
+
+
+def test_period_against_date_columns():
+    s = pd.Series(pd.to_datetime(["2025-10-19", "2025-10-20", "2025-10-26 15:30", "2025-10-27"], format="mixed"))
+    p = dm.between(dm.day("2025-10-20"), dm.day("2025-10-26"))  # periods where dates are expected
+    assert p == (pd.Timestamp("2025-10-20"), pd.Timestamp("2025-10-26"))
+    assert p["start"] == p.start and p[1] == p.end
+    assert (s == p).tolist() == [False, True, True, False]
+    assert (s.dt.date == p).tolist() == [False, True, True, False]  # python dates too
+    assert (s >= p).tolist() == [False, True, True, True]
+    assert (s <= p).tolist() == [True, True, True, False]
+    assert (s > p).tolist() == [False, False, False, True]
+    assert (s != dm.day("2025-10-20")).tolist() == [True, False, True, True]
+    assert dm.until(dm.day("2025-09-30")).end == pd.Timestamp("2025-09-30")
+    start, end = p
+    assert end - start == pd.Timedelta(days=6)
+
+
+def test_rank_top_sums_repeated_keys():
+    lines = pd.DataFrame({"product_id": ["B", "A", "B", "C", "A"], "product_name": ["Bia", "Coca", "Bia", "Mì", "Coca"],
+                          "qty_base": [2, 3, 2, 9, 1], "order_id": [1, 2, 3, 4, 5]})
+    top = dm.rank_top(lines, by="qty_base", k=2, code="product_id")
+    assert top["product_id"].tolist() == ["C", "A"]  # A: 4 ties B: 4, code ascending
+    assert top["product_name"].tolist() == ["Mì", "Coca"] and top["qty_base"].tolist() == [9, 4]
+    assert "order_id" not in top  # differs within a product
+
+
+def test_helpers_take_a_row_mask():
+    sales = pd.DataFrame({
+        "date": pd.to_datetime(["2025-07-01", "2025-07-02", "2025-07-03"]),
+        "order_id": ["A", "B", "C"], "counted": [True, True, True], "amount": [100.0, 50.0, 7.0], "staff": ["x", "y", "x"],
+    })
+    dm.set_context("2025-08-31", None, sales)
+    s = dm.sales_lines()
+    assert dm.revenue(dm.month(2025, 7), s["staff"] == "x") == 107

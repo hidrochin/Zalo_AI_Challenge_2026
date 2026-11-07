@@ -196,7 +196,7 @@ def validate_submission(lines: list[dict], ids: list[str]) -> dict:
 
 # ---------------------------------------------------------------- invariants (no data needed)
 
-_RATE = re.compile(r"\bti le\b|\bty le\b|\bchiem\b|\bti trong\b|\bty trong\b|\bdong gop\b|\bphan cua\b")
+_RATE = re.compile(r"\bti le\b|\bty le\b|\bchiem\b|\bti trong\b|\bty trong\b|\bdong gop\b|\bphan cua\b|(%|\bphan tram) don\b")
 _CHANGE = re.compile(r"\btang\b|\bgiam\b|\bthay doi\b|\bso (voi|vs)\b|\bchenh\b|\bhon\b|\bkem\b|\blen\b|\bxuong\b")
 _COUNT = re.compile(r"\b(bao nhieu|may|so|dem)\s+(don|khach|lan|ngay|mat hang|mon|san pham|hoa don|phieu|nguoi|ky|chuyen|dot)\b")
 _MONEY = re.compile(r"\bdoanh thu\b|\bdoanh so\b|\bbao nhieu tien\b|\bso tien\b|\btien hang\b")
