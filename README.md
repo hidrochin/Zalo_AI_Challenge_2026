@@ -233,9 +233,31 @@ full pipeline has not been run on all of train or on public yet.
 **Table selection.** JEV is TypeSafe AI's hosted decision model, not JEPA; no open weights, so it cannot go in the offline image. Rule set by the team: if `dev120_oracle` beats
 `dev120` by under 0.01 PA, drop table selection; if by much more, a small embedder of about 0.6B is enough.
 
-**Kaggle.** Two accounts, work split evenly: SQL arm on `hydrochii` (`KAGGLE_API_TOKEN`), pandas arm on `hydrochiii` (`KAGGLE_API_TOKEN_2`, dataset `datamate-bundle-pandas`).
+**Kaggle runs pushed on 2026-11-07.** SQL v3 mounted a stale dataset and ran old code `4abdef9` (train 0.6857), so it does not count for G1. `datamate-sql-run` v4 runs `249b031` and was `RUNNING` at handoff; save it to `outputs/kaggle/result_sql_v4` and check `out/BUILD.txt` first. Pandas v3 scored train 0.8333, public 0.554; the `dm` fixes made after that are on `codegen` only (see its README "Status (2026-11-07, evening)"). Two accounts, work split evenly, one arm each; each run takes 4.5 to 5 hours.
 
-**Next:** read the two Kaggle runs, compare with the 2026-11-06 runs, apply the table selection rule, then decide directions 2 and 10.
+| account | token in `.env` | arm | commit | kernel | dataset | stages |
+|---|---|---|---|---|---|---|
+| `hydrochii` | `KAGGLE_API_TOKEN` | SQL | `249b031` | `datamate-sql-run` v3 | `datamate-bundle-sql` | dev120, dev120_oracle, train, public |
+| `hydrochiii` | `KAGGLE_API_TOKEN_2` | pandas | `28acb2a` | `datamate-codegen-run` v1 | `datamate-bundle-pandas` | dev120, train, public |
+
+Output is available only once a kernel ends. Under zsh, run commands with several arguments in a variable from a bash script. For the second account, set the token for that command only and never print it:
+
+```bash
+uvx --with six kaggle kernels status hydrochii/datamate-sql-run
+KAGGLE_API_TOKEN="$(grep '^KAGGLE_API_TOKEN_2=' .env | cut -d= -f2-)" uvx --with six kaggle kernels status hydrochiii/datamate-codegen-run
+```
+
+To download: `kaggle kernels output --file-pattern` filters only inside the first page of files, so it misses per-question logs. Page through
+`list_kernel_session_output` instead (`ApiListKernelSessionOutputRequest` from `kagglesdk`, `page_size=200`, `user_name` set to the account, run with `uvx --with six --from kaggle python`) and fetch each file's `url`.
+Save to `outputs/kaggle/result_sql_v3` and `outputs/kaggle/result_codegen_v3`. First check that `out/BUILD.txt` names the commit above, since the push does not prove the kernel mounted the new dataset version.
+
+**Next:**
+1. Score `dev120`, `dev120_oracle`, `train` and `public`, and compare with the 2026-11-06 runs (train SQL 0.687, pandas 0.669, public 0.356).
+2. Apply the table selection rule above.
+3. Leave the public submission to the user: label scorings are limited to about 3 or 4 before the deadline, 2 used so far.
+4. Decide directions 2 and 10.
+
+**Open items.** `orders` on `biz_109` still takes a wrong total in the renamed-column test. Debt in shops with only a `Còn nợ` snapshot and "3 tháng liền" are not handled. `dev_010` debt_top is not investigated. `fast-check` and `mutate-check` exist only in the `codegen` CLI; the fast branch itself runs on both. `ground_truth.json` stays on `origin/main` until the user starts the Docker image, and must not be merged into a working branch.
 
 ## Status (2026-11-06, night)
 
