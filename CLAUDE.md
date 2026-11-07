@@ -224,7 +224,9 @@ profit uses the **cost recorded on the sale line**.
   an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
 - **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
   pandas code generation is paused; Docker and vLLM work is deferred.
-- **Status (2026-11-07, evening):** read the README "Status (2026-11-07, evening)" section first.
+- **Status (2026-11-08):** read the README "Status (2026-11-08): start here" section first. Three branches, one worktree
+  each: `codegen` (pandas, `zalo_ai`), `text2sql` (SQL, `../zalo_ai_text2sql`), `combined` (both arms + combination,
+  `../zalo_ai_combined`, `datamate run --engine both`).
 - **Earlier status (2026-11-05):** README "Status (2026-11-05, evening)". E0 ran code older than
   `98d4c7b`, so its 0.473 is not comparable with the public 0.288.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
