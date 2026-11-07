@@ -301,3 +301,12 @@ def test_limit_alone_on_a_ranked_macro():
     assert out["error"] is None and out["result"]["answer"] == ["A", "B"]
     assert "ORDER BY" in execute(con, "-- type: list\nselect customer_name from debt_by_customer(date '2025-01-01') where debt > 1 limit 2",
                                  "2025-01-01", None)["error"]
+
+
+def test_status_norm_asked_of_a_view_is_rebound_and_not_linted():
+    from datamate.sql.agent import lint, rebind_key
+
+    q = "select count(*) from orders where \"date\" = date '2025-01-01' and status__norm = 'huỷ'"
+    assert lint(q) is None
+    err = 'Binder Error: Referenced column "status__norm" not found in FROM clause!\nCandidate bindings: "status", "customer_name"'
+    assert rebind_key(q, err).endswith("status = 'huỷ'")

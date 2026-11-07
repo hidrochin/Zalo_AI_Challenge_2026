@@ -42,7 +42,7 @@ Messages may name answer_number(), answer_string(), unanswerable() and the like:
 
 ## Rules
 1. The RULEBOOK below fixes the default meaning of every business term. Apply it exactly unless the question says otherwise. If a macro disagrees with the rulebook, the rulebook wins.
-2. Read the README notes: they explain how this shop records returns, cancellations, units, debts, etc. Status columns with role=status have a normalized copy "<col>__norm" with values hoàn thành / huỷ / trả hàng / đang giao.
+2. Read the README notes: they explain how this shop records returns, cancellations, units, debts, etc. In the views `sales_lines` and `orders` the normalized status is the column "status" (hoàn thành / huỷ / trả hàng / đang giao); in `raw_*` tables a status column with role=status has a normalized copy "<col>__norm" with the same values.
 3. Names in answers are copied exactly from the data (or the code, if the data has codes).
 4. Answer UNANSWERABLE when a needed table/column does not exist, for subjective questions, external knowledge, or a period entirely outside the data range. Missing data is never 0. An empty result usually means a bug in your filter, not a reason for UNANSWERABLE.
 5. Rankings: descending by the criterion, ties by code ascending (ORDER BY amount DESC, code). When fewer than k candidates exist, return all of them.
@@ -347,7 +347,7 @@ _LINTS = [
 ]
 _FROM_LINES = re.compile(r"\bfrom\s+sales_lines\b", re.I)
 _FROM_ORDERS = re.compile(r"\bcount\(\s*\*\s*\)\s+from\s+orders\b", re.I)
-_STATUS_WORDS = re.compile(r"\bcounted\b|\bstatus\b", re.I)
+_STATUS_WORDS = re.compile(r"\bcounted\b|\bstatus(__norm)?\b", re.I)
 _BY_CUSTOMER = re.compile(r"\bgroup\s+by\s+\"?customer(_key|_name)?\b", re.I)
 _NO_WALKIN = re.compile(r"\bwalkin\b|\bcustomer(_key)?\"?\s+is\s+not\s+null\b", re.I)
 
@@ -416,13 +416,14 @@ def add_not_walkin(code: str) -> str:
     return f"{code[:m.start()].rstrip()} where not walkin\n{code[m.start():]}"
 
 
-# The model names an entity key the way other schemas do; the view calls it otherwise. Rebound only to a column DuckDB offers.
+# The model names an entity key (or the normalized status) the way other tables do; the view calls it otherwise. Rebound only to a column DuckDB offers.
 _KEY_ALIASES = {f"{e}_{s}": (f"{e}_key", e, f"{e}_id", f"{e}_name") for e in ("customer", "product") for s in ("key", "code", "id")}
+_KEY_ALIASES["status__norm"] = ("status",)  # the raw tables' normalized copy, asked of a view
 _MISSING_COLUMN = re.compile(r'Referenced column "([^"]+)" not found.*?Candidate bindings: ([^\n]*)', re.S)
 
 
 def rebind_key(code: str, error: str) -> str | None:
-    """The query with a missing entity-key column renamed to the key the source has, or None."""
+    """The query with a missing entity-key or status column renamed to the one the source has, or None."""
     m = _MISSING_COLUMN.search(error)
     if m is None or m.group(1).lower() not in _KEY_ALIASES:
         return None
