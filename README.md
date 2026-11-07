@@ -188,9 +188,70 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
-## Status (2026-11-08): start here
+## Status (2026-11-08, evening): start here
 
-The same section is in the README of all three branches. Each branch has its own worktree. Nothing is pushed to GitHub.
+**Decision (the user, 2026-11-08):** text-to-SQL only. The `codegen` (pandas) and `combined` (both arms) directions are
+dropped: the combination scored highest, but it doubles the pipeline, and SQL is ahead of pandas on train.
+- Both branches stay on `origin` as they are; their sections below are history.
+- `text2sql` is merged into `main` (local only, not pushed). Work continues on `main`.
+
+**`text2sql` now holds the SQL commits of `combined`** (cherry-picked):
+- `a83ba5f` `status__norm` asked of a view;
+- `ecd8cf5` toppings in a drink's cell, `Phí phục vụ` not an item (`STORE_VERSION` 8);
+- `e8b8f96` `kaggle/fetch_output.py`.
+- `src/datamate/sql/`, `canon.py` and `store.py` are now identical to `combined`. What differs is pandas or `--engine both` code only.
+- 320 tests pass; `sql-check` has no misses.
+- The default engine of `datamate run` and `kaggle/run_kaggle.py` is still `pandas`: pass `--engine sql` / `DM_ENGINE=sql`.
+
+**Last Kaggle run** (`combined`, code `124709f`, `src` hash `daa2a42`, checked in `out/BUILD.txt`).
+Saved in `outputs/kaggle/result_combined_{train,public}`. Public is scored with the labels, not submitted.
+
+| | train | public (labels) |
+|---|---|---|
+| combined (vote) | 0.9053 (2771/55/174) | 0.636 (742/106/152) |
+| **SQL arm** | **0.8893** (2781/113/106) | **0.597** (735/138/127) |
+| pandas arm | 0.8827 (2768/120/112) | 0.582 (739/157/104) |
+| wall time, 2× T4, both arms | 19 243 s (6.4 s/question) | 8 880 s (8.9 s/question) |
+
+- The SQL arm ran the same SQL code as `text2sql` head, so it is the current estimate for this branch: train 0.889, public about 0.60.
+- In this run the arms share one preprocess. The SQL arm's answers are read from `arms.sql` in each log.
+- Public, SQL arm: known industries 0.701 (790 questions), new industries dev_011–014 0.205 (210 questions, 167 points lost).
+
+**Offline replay vs Kaggle.**
+- Each arm did better on Kaggle than its replay: SQL 0.8893 vs 0.8847, pandas 0.8827 vs 0.8773.
+- The combination did worse: 0.9053 vs 0.9147 on train, 0.636 vs 0.651 on public.
+- Cause: the replay counts a question that needs a new reply as an abstain. That made 141 train questions "SQL only" (89% right). Fresh pandas replies answered them and often disagreed.
+- Not the cause: the shared preprocess. Its text equals the old runs' text on 2989/3000 (SQL) and 2991/3000 (pandas) train questions.
+- Lesson: the replay is fine for one arm and misleading for a combination.
+
+**SQL arm errors found in this run** (verified on logs, not fixed):
+- **Month answers, all abstain** (train 16/16, public 12/13, "tháng nào doanh thu cao nhất").
+  - The query returns `'2025-08'`; the result is coerced to the date `'2025-08-01'`.
+  - The check then asks for `answer_month(year, month)`, which does not exist in SQL (Catalog Error when the model tries it).
+- **Unanswerable answered** (public: 30 references, SQL right on 9, answered 7; train 70 / 28 / 8):
+  - "nhóm X" when the shop has no product-group column: the model matches product names (dev_002, dev_004).
+  - Subjective words the rulebook does not define: khách trung thực / thân thiện / khó tính nhất, NCC uy tín / đáng tin cậy.
+- **Contract fallback replaced a right count:** "bao nhiêu đơn có doanh thu từ 410.000" 846 → 858 023 000 (monthly revenue), because the question says "doanh thu".
+  Elsewhere the fallback helps (pandas train +12, public +7), so it needs a guard for counts, not removal.
+- **Preprocess:** "mí đơn tổg cộg" (= mấy đơn tổng cộng) is not normalized; the model answered revenue instead of an order count.
+- **Weakest SQL intents on train** (points lost): stock as `[chẵn, lẻ]` 26 (PA −0.37, SQL returns one number), shifts 25, stock 25, drink size M/L 24, units sold ("mấy ly/gói/m3") 24.
+  On public (known industries): units sold 23 (PA 0.26), price-change effect 12, customer ranking by money 14 and by frequency 13.
+- Still open from the previous section: `orders` grain, price-change date, new-industry definitions, `has_name` substrings, the "đồng implausibly small" invariant.
+
+**Outputs cleaned** (2026-11-08, 362 MB → 175 MB):
+- Deleted: `outputs/kaggle/dataset` and `kernel` (rebuilt by `push.sh`), `kaggle/result2` (log of a broken run), `kaggle/result_codegen_run1` (kernel log only), `results_v8.zip` (same logs as `kaggle/result_train`), `smoke_dummy`, and the progress-bar logs `dev120_v1.log`, `dev120_v2.log`, `e1_off.log`, `wrong_v3.log`.
+- Kept everything else, pandas runs included: they are baselines and paired controls.
+
+**Next** (SQL only):
+1. Fix month answers in SQL (format `YYYY-MM` when the expected answer is a month), the count guard on the contract fallback, and the "mí đơn" normalization. Measure each with `debug/replay_sql.py` on train and public.
+2. Unanswerable: undefined subjective superlatives and missing group columns → `unanswerable`, gated on the rulebook and the schema, not on wording alone.
+3. The grain and new-industry items listed below.
+4. Make `sql` the default engine, then a Kaggle run of the SQL arm alone to get its time per question (about 4.3 s on 2× T4 before).
+5. Docker is still deferred. Deadline 2026-11-15.
+
+## Status (2026-11-08)
+
+The same section is in the README of all three branches. Each branch has its own worktree. Nothing was pushed to GitHub at the time.
 
 | direction | branch | worktree | head | last Kaggle run | head, offline replay |
 |---|---|---|---|---|---|
