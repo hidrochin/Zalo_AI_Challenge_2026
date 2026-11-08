@@ -90,6 +90,23 @@ def fit_month(result: dict, e: Expect) -> dict:
     return result
 
 
+_MONEY_WORD = re.compile(r"\b(tien|doanh thu|doanh so|gia tri|gia von|tien von|lai|loi nhuan|no|chi phi|dong|vnd|von)\b")
+_NOT_MONEY = re.compile(r"\b(bao nhieu|may|so|dem)\s+(don|khach|lan|ngay|mat hang|mon|san pham|hoa don|phieu|nguoi|ky|chuyen|"
+                        r"dot|luot|xe|ly|goi|lon|chai|cai|hop|vien|bich|may|chiec)\b|\bluot\b|\bphan tram\b|%")
+
+
+def fit_money(result: dict, rules_text: str) -> dict:
+    """Rulebook: money is whole đồng, an average of money too, half up. A fractional number asked about money is rounded
+    (never a non-integer gold among 1427 money-like train and public questions)."""
+    a = result.get("answer")
+    if result.get("type") != "number" or isinstance(a, bool) or not isinstance(a, float) or a == int(a):
+        return result
+    f = fold(rules_text)
+    if not _MONEY_WORD.search(f) or _NOT_MONEY.search(f):
+        return result
+    return {**result, "answer": int(math.floor(a + 0.5))}
+
+
 def check_answer(result: dict, e: Expect) -> tuple[str | None, bool]:
     """(message for one re-check round, hard) when the executed answer contradicts the expectation, else (None, False).
     A hard contradiction that survives the re-check makes the question abstain. A type that only the LLM rewrite expects
@@ -211,6 +228,7 @@ _RATE = re.compile(r"\bti le\b|\bty le\b|\bchiem\b|\bti trong\b|\bty trong\b|\bd
 _CHANGE = re.compile(r"\btang\b|\bgiam\b|\bthay doi\b|\bso (voi|vs)\b|\bchenh\b|\bhon\b|\bkem\b|\blen\b|\bxuong\b")
 _COUNT = re.compile(r"\b(bao nhieu|may|so|dem)\s+(don|khach|lan|ngay|mat hang|mon|san pham|hoa don|phieu|nguoi|ky|chuyen|dot)\b")
 _MONEY = re.compile(r"\bdoanh thu\b|\bdoanh so\b|\bbao nhieu tien\b|\bso tien\b|\btien hang\b")
+_AMOUNT = re.compile(r"\d[\d.,]*\s*(d|dong|k|nghin|trieu|tr|cu)\b|\b\d{1,3}(\.\d{3})+\b|\b\d{5,}\b")  # 'từ 760.000đ': money is the filter
 _SIGNED = re.compile(r"\blai\b|\bloi nhuan\b|\bchenh\b|\blo\b|\bam\b|\btru\b|\bhieu\b")
 _WALKIN_NAME = re.compile(r"^(khach le|khach vang lai|vang lai|le|khach)$")
 
@@ -233,7 +251,7 @@ def invariants(result: dict, rules_text: str, window: tuple[str, str] | None = N
                 out.append(("days_le_period", f"{a} days is more than the {days} days of the period asked."))
     if t == "number" and num and a < 0 and not _SIGNED.search(f):
         out.append(("negative", f"{a} is negative, but the question asks for an amount or count that cannot be."))
-    if t == "number" and num and _MONEY.search(f) and not _COUNT.search(f) and 0 < abs(a) < 1000:
+    if t == "number" and num and _MONEY.search(f) and not _COUNT.search(f) and not _AMOUNT.search(f) and 0 < abs(a) < 1000:
         out.append(("money_unit", f"{a} đồng is implausibly small for a VND amount; check units (VND, not thousands)."))
     names = [a] if t == "string" else a if t == "list" else [r[0] for r in (a or {}).get("rows", []) if r] if t == "table" else []
     if any(isinstance(v, str) and _WALKIN_NAME.match(fold(v)) for v in names):
