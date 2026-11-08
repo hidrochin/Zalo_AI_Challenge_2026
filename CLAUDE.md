@@ -224,8 +224,12 @@ profit uses the **cost recorded on the sale line**.
   an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
 - **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
   pandas code generation is paused; Docker and vLLM work is deferred.
-- **Status (2026-11-08, night):** read the README "Status (2026-11-08, night): start here" section first.
-  - Text-to-SQL only. Work on the `text2sql` branch in the worktree `../zalo_ai_text2sql`, commit there, and merge to `main` by pull request.
+- **Status (2026-11-08, end of day):** read the README "Status (2026-11-08, end of day): start here" section first.
+  - All fixes committed on `text2sql` (8 commits to `fd767ea`, not pushed). Replay train 0.9037, public 0.655.
+  - Kaggle public-test SQL run in flight: `hydrochii/datamate-sql-public`.
+  - Design rule from the user: question normalization keeps the content (wording only). Intent/semantic extraction is a separate
+    step, and normalization never decides business logic.
+  - Text-to-SQL only. One folder, no worktrees: develop on `text2sql`, `main` = final code, merge by pull request.
   - `codegen` (pandas) and `combined` (both arms) are dropped and kept as branches only.
   - Train error analysis and fixes: `debug/sql_train_*.txt` (gitignored, local). Replay PA is 0.9037.
   - Model-behaviour groups M1–M21 await the user's choice.

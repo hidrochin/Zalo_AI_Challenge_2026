@@ -188,9 +188,127 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
-## Status (2026-11-08, night): start here
+## Status (2026-11-08, end of day): start here
 
-**Where to work.** Branch `text2sql`, in the worktree `../zalo_ai_text2sql`. Commit there and open pull requests to `main`;
+**Where to work.** One folder, `zalo_ai`, on branch `text2sql`. `main` is the final code and takes pull requests from `text2sql`.
+Everything below is **committed** on `text2sql` (`4dd9655`..`fd767ea`, 8 commits). Nothing is pushed to GitHub; opening the PR is the user's call.
+The user's own uncommitted changes (`ground_truth.json` and `ground_submission` deleted, `ground_truth.jsonl` untracked) are left alone.
+
+**Commits** (the first four are fixes 1–3 of the section below):
+
+| commit | content |
+|---|---|
+| `4dd9655` fix(ingest) | customer group, `base_unit`, product codes, order columns, debt from notes, price list; `INGEST_VERSION` 20 |
+| `160cb28` fix(preprocess) | 'từ mùng 1', month lists, Northern dish words, slang |
+| `28f23d9` fix(answer) | money rounded half up; `money_unit` skipped on amount filters; revenue contract off for counts |
+| `29fe362` feat(sql) | formula catalog: macros + one-rewrite advice; order-money and scalar-macro lints; prompt examples use placeholders |
+| `1a1a89d` feat(sql) | `stock_split`, `stock_value` (+ `Facts.catalog_cost`); `STORE_VERSION` 11 |
+| `71e5e77` fix(hints) | 'N tháng liền nhau kết thúc ở tháng X' lists all N months |
+| `4775f9c` fix(answer) | whole/loose stock ('mấy hộp chẵn, mấy viên lẻ') is a list of exactly 2, else a hard re-check |
+| `fd767ea` fix(rewrite) | a rewrite that changes a business word (ca sáng/chiều, chẵn/lẻ, mọi/mỗi, bounds, status, size) is dropped |
+
+**Where the new fixes came from.** Six hard train questions were traced live with local Qwen (`debug/example_io/q_*.md`: full prompt,
+replies, execution). The questions covered missing stock data, whole/loose stock, stock value, a run of 3 months, net profit and COD vs cash.
+Before the fixes, 3/6 were right. Ollama/MLX and Kaggle vLLM decode differently, so one local run is no measurement.
+- `stock_value`: train gold 5/5; the one shop without it is gold-unanswerable. `stock_split`: 16/16; 3 shops without it are
+  unanswerable. Scripts: `debug/fix4/oracle_stock_{value,split}.py`.
+- Month runs: the time-hint diff changes only those questions (train 7/3000, public 1/1000).
+- Rewrite check, against the train logs: 12/2935 rewrites are rejected (6 lost 'ca chiều', 4 wrote 'chính' for 'chẵn'). `debug/fix4/rewrite_markers.py`.
+
+**Rejected: a "this shop has no X data" note in the schema card.** On train it separates perfectly: 23/23 questions in shops
+without a fact are unanswerable, and 318/318 in shops with it are answerable. On public it fails: 13 questions in shops where the fact
+detector found nothing are answerable (dev_014 debt 6 and stock 2, dev_013 deliveries 3, lots 2), and none are unanswerable.
+The detector misses new formats, so the note would push wrong UNANSWERABLEs. Script: `debug/fix4/missing_facts.py`.
+Better fact detection for those formats comes first.
+
+**Design note from the user (2026-11-08).** Keep two responsibilities apart:
+- question normalization keeps the content and only fixes the wording;
+- intent and semantic extraction finds the object, measure, unit, time, operation and output shape.
+
+Normalization must never decide business logic. Today one LLM call does both. It returns the `normalized` text plus
+`answer_type`/`top_k`/`sub_questions`, and the LLM fields are only soft hints under the deterministic rules. `fd767ea` enforces the
+normalization half. A clean split, with normalization only and then a separate intent frame (deterministic first, LLM for the rest), is the next design step.
+
+**Measured after all commits:**
+- 356 tests pass;
+- `sql-check` and `facts-check`: no misses;
+- A1 oracle: 28/28; catalog oracle: 68/69;
+- replay: train 0.9037, public 0.655, both unchanged. The new fixes act only through new model replies, which replay cannot make.
+
+**Kaggle run in flight:** kernel `hydrochii/datamate-sql-public`, dataset `hydrochii/datamate-bundle-sql`, `DM_STAGES=public`,
+`DM_ENGINE=sql`, code `fd767ea`. Download it with `kaggle/fetch_output.py` into `outputs/kaggle/result_sql_public_v5`. Score it with
+`ground_truth.jsonl` (evaluation only), and compare with the combined run's SQL arm (public 0.597 by labels) and with replay 0.655.
+Submitting to the leaderboard is the user's call.
+
+**Next:**
+1. Read the Kaggle run:
+   - PA by labels, known industries vs new;
+   - time per question (one local stock-value question took 1038 s; find out why);
+   - how often catalog advice fired and was followed.
+2. Split normalization from intent extraction (design note above).
+3. Fact detection for the new formats that `missing_facts.py` found: installments as debt, deliveries in dev_013. Hold dev_012
+   and dev_013 out of further new-industry work, so they keep an honest estimate.
+4. Make `sql` the default engine; Docker; deadline 2026-11-15.
+
+## Status (2026-11-08, late night)
+
+**Where to work.** One folder, `zalo_ai`; the worktree `../zalo_ai_text2sql` is removed. Develop on `text2sql` and switch to
+`main` with `git checkout`. `main` holds the final code and takes pull requests from `text2sql`. The work below was
+committed at end of day (see above).
+
+**Step 0: public error attribution** (labels for evaluation only). The report is `debug/sql_err_public/REPORT.md` (gitignored), with
+253 labelled questions in `labels.tsv`, put in stages S1 data, S2 reading, S3 query and S4 decide, and in remedy buckets A1–A5, B, C, D and E.
+`replay.py` replays the logged public replies against `ground_truth.jsonl`. A question that needs a new reply counts as an abstain,
+so replay gives a lower bound. Labels have no aliases, so a name answered without its phone number counts as wrong locally.
+
+**Fix 1: store, facts and guards.** These changes are deterministic. `STORE_VERSION` 10, `INGEST_VERSION` 20, `SEMANTIC_VERSION` unchanged.
+- `canon`: the customer group column is found by header and value shape (`customer_group_col`). The `base_unit` column comes from a role, a
+  base-unit header, a master with one row per product, or a sold unit that has no conversion row. Product codes come from a master's code column,
+  so conversion tables keyed by code now join. `orders` keeps the role columns plus only columns that are constant within an order.
+  `_NOT_MASTER` no longer matches "TongHop".
+- `facts`: expense headers are wider. Payments come from order notes when there is no payments table (`note_payments`):
+  "đưa trước X, còn lại ghi sổ", "nợ X", and a debt paid up later. The price list comes from a price table (`Facts.price_list`).
+- Guards: `fit_money` rounds a fractional money answer half up; no money gold in train or public is fractional. `money_unit` is skipped
+  when the question names an amount. The revenue contract no longer matches count questions. The new `order_money_lint` flags summing
+  order-level money over lines. The new scalar-macro lint flags `revenue()` with FILTER/FROM/WHERE/OVER.
+- Reading: "từ mùng 1" means this month. A bare month in a list takes the year of a later dated month. Northern dish words map to
+  southern ones (lợn/heo, rán/chiên, ngao/nghêu, đậu phụ/hũ…). Slang added: mí, tổg, cộg, đơng, xi ô đi, cháy hàng. "kiểm tra lại" is no return.
+
+**Fix 2: formula catalog.** These are store macros: `customer_stats`, `item_stats`, `day_stats`, `month_stats`, shift/hour, customers or
+items with at least N orders, group AOV, `size_qty`, `model_line`/`brand_of`, `extra_lines`, `price_increase_day`/`price_effect_at`,
+`debt_aging`/`debt_customers`, `import_minus_sales` and `expiring_lots`. Each is created only where the shop's data has what it needs.
+`agent/lint.CATALOG` maps question shapes to them, and `term_advice` asks for one rewrite with that macro.
+On gold, with arguments parsed from the question (`debug/sql_err_public/catalog_train.py`, `oracle_catalog.py`):
+- train: every parsed question is exact (customers ≥N orders 29/29, items 18/18, days 12/12, months 16/16, shift 77/77, size 46/46);
+- public: 68/69, and the one miss is the phone-in-name label.
+
+**Fix 3: new industries.** Only mechanisms that transfer to other shops: price list, `base_unit`, size and model from the name, extra
+lines (voucher/ship/points), debt from notes. A global abstention rule was not adopted. Raw-table-only queries have precision 0.39 in the
+new industries but 0.71–0.87 in known ones. Linting raw sales tables would touch 29 right train answers.
+
+**Measured** (logged replies replayed through the new code):
+- tests: 352 pass;
+- `sql-check` and `facts-check`: no misses;
+- A1 join oracle: 28/28;
+- train replay: **0.9037**, the same as before; no question changed;
+- public replay: 0.608 (step 0) → **0.655**. Against the previous replay, 10 wrong→right, 5 wrong→abstain and 1 right→abstain.
+  The right→abstain one (q_701bf339bd9e) needs a new reply. Catalog advice and the new lints only pay off in a live run.
+
+**Not done:**
+- repair: plate/model split;
+- installments;
+- main supplier ("NCC chính");
+- delivered quantity;
+- `extra_lines` ship for one month: 4.80M vs gold 4.825M.
+
+**Next**:
+1. A live model run to measure what the catalog and advice add, either on the local dev subset or with the Kaggle SQL arm (`DM_ENGINE=sql`).
+2. Make `sql` the default engine.
+3. Docker. Deadline 2026-11-15.
+
+## Status (2026-11-08, night)
+
+**Where to work (superseded above).** Branch `text2sql`, in the worktree `../zalo_ai_text2sql`. Commit there and open pull requests to `main`;
 do not commit to `main` directly. `main` already has PR #4 (the evening merge). The `combined` worktree is removed;
 `codegen` and `combined` exist only as branches (local and on `origin`), as history.
 
