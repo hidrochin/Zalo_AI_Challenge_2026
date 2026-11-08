@@ -57,7 +57,7 @@ CHECKS = [
           and not re.search(r"ti le|ty le|%|phan tram|ly do|vi sao|khach|ca |kenh", f),
           lambda p: int((_orders_in(p)["status"] == "huỷ").sum())),
     Check("cancel_rate", "percent",
-          lambda f: bool(re.search(r"\b(ti le|ty le)\b.*\bhuy\b|\bhuy\b.*(%|phan tram)", f))
+          lambda f: bool(re.search(r"\b(ti le|ty le)\b.*\bhuy\b|\bhuy\b.*(%|phan tram)|(%|phan tram) don\b.*\bhuy\b", f))
           and not re.search(r"khach|ca |kenh|zalo|mat hang|nhom|so voi|tang|giam", f),
           lambda p: dm.round_half_up((_orders_in(p)["status"] == "huỷ").sum() / len(_orders_in(p)) * 100, 2)),
 ]
@@ -69,17 +69,22 @@ def find_check(text: str, answer_type: str) -> Check | None:
     return next((c for c in CHECKS if c.gold_type == answer_type and c.match(f)), None)
 
 
+def is_gated(text: str, off: frozenset[str]) -> bool:
+    """True when the question matches a contract whose definition is off (rules.py)."""
+    f = fold(text)
+    return any(c.name in off and c.match(f) for c in CHECKS)
+
+
 def shadow_value(check: Check, period_call: str) -> float:
     """Compute a check's quantity in the current dm context (set_context with the shop's sales)."""
     return check.compute(eval(period_call, {n: getattr(dm, n) for n in dm.__all__}))
 
 
-def run_checks(data_root: Path, cache_dir: Path, names: list[str] | None = None, max_misses: int = 8) -> dict:
-    train = Path(data_root) / "train"
-    cal = load_calendar(train)
+def contract_items(train: Path, names: list[str] | None = None) -> tuple[list[Check], dict, dict]:
+    """(checks, business -> [(check, question, text)], gold by id): the train questions each contract covers."""
     gold = {a["id"]: a for a in read_jsonl(train / "answers.jsonl")}
     checks = [c for c in CHECKS if not names or c.name in names]
-    todo = defaultdict(list)  # business -> [(check, question, text)]
+    todo = defaultdict(list)
     for q in read_jsonl(train / "questions.jsonl"):
         text = rules_normalize(q["question"]).text
         f = fold(text)
@@ -87,31 +92,46 @@ def run_checks(data_root: Path, cache_dir: Path, names: list[str] | None = None,
             if gold[q["id"]]["type"] == c.gold_type and c.match(f):
                 todo[q["business_id"]].append((c, q, text))
                 break
-    rep = {c.name: {"matched": 0, "exact": 0, "skipped": defaultdict(int), "misses": []} for c in checks}
+    return checks, todo, gold
+
+
+def score_contracts(biz, items: list, cal, gold: dict, rep: dict, max_misses: int = 8) -> None:
+    """Add one shop's contract results to rep (check name -> matched / exact / skipped / misses)."""
+    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
+    for c, q, text in items:
+        r = rep[c.name]
+        r["matched"] += 1
+        if sales is None:
+            r["skipped"]["no sales_lines"] += 1
+            continue
+        calls = [h.split(" -> ")[1].split(" = ")[0].split("  #")[0] for h in time_hints(text, q["as_of_date"], cal)]
+        if len(calls) != 1:
+            r["skipped"]["periods != 1"] += 1
+            continue
+        dm.set_context(q["as_of_date"], cal, sales)
+        try:
+            value = c.compute(eval(calls[0], {n: getattr(dm, n) for n in dm.__all__}))
+        except Exception as e:  # noqa: BLE001 - a failing primitive is a finding, not a crash
+            r["skipped"][f"error {type(e).__name__}"] += 1
+            continue
+        g = gold[q["id"]]["answer"]
+        if abs(value - g) < 1e-6:
+            r["exact"] += 1
+        elif len(r["misses"]) < max_misses:
+            r["misses"].append(f"{biz.id} {q['id']} {q['question'][:70]!r} gold={g} got={value}")
+
+
+def empty_report(checks: list[Check]) -> dict:
+    return {c.name: {"matched": 0, "exact": 0, "skipped": defaultdict(int), "misses": []} for c in checks}
+
+
+def run_checks(data_root: Path, cache_dir: Path, names: list[str] | None = None, max_misses: int = 8) -> dict:
+    train = Path(data_root) / "train"
+    cal = load_calendar(train)
+    checks, todo, gold = contract_items(train, names)
+    rep = empty_report(checks)
     for biz_id in sorted(todo):
-        biz = load_business(train, biz_id, Path(cache_dir))
-        sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
-        for c, q, text in todo[biz_id]:
-            r = rep[c.name]
-            r["matched"] += 1
-            if sales is None:
-                r["skipped"]["no sales_lines"] += 1
-                continue
-            calls = [h.split(" -> ")[1].split(" = ")[0].split("  #")[0] for h in time_hints(text, q["as_of_date"], cal)]
-            if len(calls) != 1:
-                r["skipped"]["periods != 1"] += 1
-                continue
-            dm.set_context(q["as_of_date"], cal, sales)
-            try:
-                value = c.compute(eval(calls[0], {n: getattr(dm, n) for n in dm.__all__}))
-            except Exception as e:  # noqa: BLE001 - a failing primitive is a finding, not a crash
-                r["skipped"][f"error {type(e).__name__}"] += 1
-                continue
-            g = gold[q["id"]]["answer"]
-            if abs(value - g) < 1e-6:
-                r["exact"] += 1
-            elif len(r["misses"]) < max_misses:
-                r["misses"].append(f"{biz_id} {q['id']} {q['question'][:70]!r} gold={g} got={value}")
+        score_contracts(load_business(train, biz_id, Path(cache_dir)), todo[biz_id], cal, gold, rep, max_misses)
     for r in rep.values():
         r["skipped"] = dict(r["skipped"])
     return {"semantic_version": dm.SEMANTIC_VERSION, "checks": rep}

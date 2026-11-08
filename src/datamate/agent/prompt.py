@@ -72,10 +72,31 @@ n = o.groupby('customer')['order_id'].nunique()
 answer_number((n >= 3).sum(), kind='count')
 ```
 ```python
-# doanh thu nhóm / hoạt chất / kênh / thuốc kê đơn: filter sales_lines() on the source column listed in the schema card
+# doanh thu nhóm / kênh / thuốc kê đơn: filter sales_lines() on the source column listed in the schema card.
+# 'hoạt chất X' means exactly X: s['Hoạt chất'].map(lambda v: same_text(v, 'Paracetamol')), a combination drug is another active ingredient.
 s = sales_lines()
 mine = s[s['Nhóm hàng'].astype(str).map(fold).str.contains(fold('hải sản'), na=False)]
 answer_percent(round_half_up(revenue(month(2025, 3), mine) / revenue(month(2025, 3)) * 100, 2))
+```
+```python
+# Terms with a helper: call it, do not rebuild them from raw tables. A helper raises when the shop has no such table: then look in T.
+answer_number(debt_total('2026-06-30'), kind='money')  # khách còn nợ tổng cộng
+top = debt_customers('2026-06-30').head(3)  # top khách nợ, bao nhiêu khách còn nợ: len(debt_customers(d))
+answer_table(['khach_hang', 'so_tien_no'], top[['customer_name', 'debt']].values.tolist(), kind='money')
+o = debt_orders('2026-06-30'); answer_number(o.loc[o['age'] > 15, 'debt'].sum(), kind='money')  # tuổi nợ, đơn quá 15 ngày
+answer_list([debt_new(month(2026, 2), 'Tên khách'), debt_repaid(month(2026, 2), 'Tên khách')], kind='money')  # nợ thêm, trả nợ
+answer_number(delivery_trips(month(2026, 1)), kind='count')  # số đợt giao
+answer_number(avg_import_price('Tên hàng', month(2026, 1)), kind='money')  # giá nhập bình quân
+answer_number(gross_profit(month(2026, 1)), kind='money')  # lãi gộp; net_profit: lãi ròng
+answer_number(len(slow_products(between('2025-07-21', '2025-07-27'))), kind='count')  # số mặt hàng ế
+answer_percent(price_effect('Tên hàng', '2025-12-01', 30))  # lên giá ngày D: so số lượng N ngày từ D với N ngày trước
+answer_number(stock('Tên hàng', '2026-06-30'), kind='count')  # tồn cuối ngày; stock_split: [đơn vị lớn nguyên, lẻ]
+l = lots_left(); answer_date(l[(l['product_name'] == 'Tên hàng') & (l['expiry'] >= AS_OF)]['expiry'].min())  # lô gần hết hạn nhất
+```
+```python
+# doanh thu nhóm khách: customer_group is on sales_lines, walk-in orders stay in the total
+s = sales_lines(); mine = s[s['customer_group'].map(lambda v: same_text(v, 'sỉ'))]
+answer_percent(round_half_up(revenue(month(2026, 5), mine) / revenue(month(2026, 5)) * 100, 2))
 ```
 ```python
 # giá bán X ngày D; doanh thu ca chiều (order_ts)
@@ -118,7 +139,7 @@ def _fmt_answer(ex: dict) -> str:
 
 
 def question_part(question: str, as_of: str, examples: list[dict], hints: list[str] | None = None,
-                  norm: dict | None = None) -> str:
+                  norm: dict | None = None, fence: str = "python") -> str:
     """norm (from preprocessing): normalized, sub_questions, expect, names, amounts."""
     out = []
     if examples:
@@ -126,7 +147,7 @@ def question_part(question: str, as_of: str, examples: list[dict], hints: list[s
         for ex in examples:
             out.append(f"Q: {ex['question']}  (as_of {ex['as_of_date']})")
             if ex.get("code"):
-                out.append(f"```python\n{ex['code'].strip()}\n```")
+                out.append(f"```{fence}\n{ex['code'].strip()}\n```")
             out.append(f"A: {_fmt_answer(ex)}\n")
     wd = WEEKDAYS[pd.Timestamp(as_of).weekday()]
     out.append(f"# Question\nas_of_date (hôm nay): {as_of}, {wd}\nquestion: {question}")
