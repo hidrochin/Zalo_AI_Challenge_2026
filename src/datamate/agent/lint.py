@@ -43,6 +43,8 @@ CATALOG = [
     ("month_rank", r"\bthang nao\b|thang sau.*(cao|hon).*thang truoc|tang (deu|lien tuc)", ("month_stats",)),
     ("peak_hour", r"gio cao diem|khung gio", ("hour_stats",)),
     ("import_minus", r"nhap.*\btru\b.*ban|chenh.*nhap.*ban|nhap vao tru", ("import_minus_sales",)),
+    ("stock_split", r"\b(chan|nguyen)\b.*\ble\b|\ble\b.*\b(chan|nguyen)\b", ("stock_split",)),
+    ("stock_value", r"\bgia von\b.*\bkho\b|\bkho\b.*\bgia von\b|gia tri (hang )?ton", ("stock_value",)),
     ("expiring", r"het han trong \d+ ngay|han (dung|su dung).*\btu\b.*\b(den|toi)\b|sap het han", ("expiring_lots",)),
     ("size", r"\bsize (m|l|s)\b", ("size_qty",)),
     ("model_line", r"\bdong may\b|\bmay (iphone|samsung|xiaomi|oppo|vivo|realme|nokia)\b|\biphone \d+", ("model_line", "brand_of")),

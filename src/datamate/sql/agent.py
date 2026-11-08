@@ -166,6 +166,8 @@ MACROS = {
     "price_effect_at": "price_effect_at(product_name, new_price, n): the same when the question gives the new price, not the day ('từ khi X lên giá Y đ'): the day is the first increase to that price in the price list",
     "price_increase_day": "price_increase_day(product_name, new_price): the first day the price rose to new_price (price list), NULL if never",
     "stock_at": "stock_at(product_name, d): stock at the end of day d in base units",
+    "stock_split": "stock_split(product_name, big_unit, d): TABLE one row (whole, loose): 'mấy hộp chẵn, mấy viên lẻ' at the end of day d, whole big units and the rest in base units; answer it as a list of 2",
+    "stock_value": "stock_value(d): 'giá trị hàng tồn kho theo giá vốn' at the end of day d: stock left of each product × its cost per base unit in the product list",
     "lots_left": "lots_left(d): TABLE of lots with stock at the end of day d: lot, product_name, expiry, left, price",
     "expiring_lots": "expiring_lots(d, n): TABLE of lots with stock whose expiry is from day d to d + n: lot, product_name, expiry, left, capital (= left × the lot's own price, 'tiền vốn'); count rows for 'mấy lô'",
     "avg_order_value": "avg_order_value(a, b): revenue / counted orders, rounded to đồng",

@@ -58,6 +58,7 @@ class Facts:
     units: pd.DataFrame | None = None  # product_name, unit, factor
     cost_col: str | None = None  # column of sales_lines with the cost of one unit sold
     price_list: pd.DataFrame | None = None  # product_name, date, price (the shop's price list: each row a price from that day)
+    catalog_cost: pd.DataFrame | None = None  # product_name, cost (cost of one base unit in the product list)
 
 
 def _order_fields(biz: Business) -> dict[str, pd.Series]:
@@ -351,6 +352,23 @@ def _cost_col(biz: Business, sales: pd.DataFrame) -> str | None:
     return None
 
 
+def _catalog_cost(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
+    """Cost of one base unit as the product list records it (rulebook: Giá trị hàng tồn kho): a table that is no sale,
+    import or lot list, one row per product, with a cost column. The cost on a sale line is another figure."""
+    for name, t in biz.tables.items():
+        ti = biz.info[name]
+        if re.search(r"nhap|import|ncc|lo hang", fold(name)) or {"order_id", "line_amount", "lot_id"} & set(ti.roles.values()):
+            continue
+        cost = pick(t, ti, "catalog_cost", r"^gia von", r"^(gia von( hien tai| hang| co ban)?|giavonhang|von)$")
+        names = _product_names(t, ti, lookup)
+        if cost is None or names is None:
+            continue
+        f = pd.DataFrame({"product_name": names, "cost": _money(t[cost])}).dropna()
+        if len(f) and not f["product_name"].duplicated().any():
+            return f.reset_index(drop=True)
+    return None
+
+
 def _units(biz: Business, sales: pd.DataFrame) -> pd.DataFrame | None:
     keys = {k: sales[k] for k in ("product_id", "product_name") if k in sales.columns}
     roles = {n: ti.roles for n, ti in biz.info.items()}
@@ -400,6 +418,7 @@ def _read_facts(biz: Business, sales: pd.DataFrame | None) -> Facts:
     f.lots, f.lot_sales = _lots(biz, lookup)
     f.cost_col = _cost_col(biz, sales)
     f.price_list = _price_list(biz, lookup)
+    f.catalog_cost = _catalog_cost(biz, lookup)
     return f
 
 

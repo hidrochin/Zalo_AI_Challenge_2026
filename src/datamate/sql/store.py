@@ -22,7 +22,7 @@ from datamate.ingest.business import INGEST_VERSION, roles_path, status_path
 from datamate.sql.dims import entity_dims
 from datamate.text import fold
 
-STORE_VERSION = 10
+STORE_VERSION = 11
 
 BASE_MACROS = [
     "create macro round_half_up(x, n) as cast(round(cast(x as decimal(38, 10)), n) as double)",
@@ -174,6 +174,12 @@ STOCK_LOTS = """create macro stock_at(p, d) as (select sum("left") from lots_lef
 STOCK_REPORT = """create macro stock_at(p, d) as ((select sum(qty) from stock_report_all where product_name = p)
        + coalesce((select sum(qty_base) from sales_all where order_ok and is_goods and product_name = p and "date" > least(d, as_of())), 0)
        - {imports})"""
+# rulebook 'Tồn theo đơn vị lớn': [whole big units, loose base units]; 'Giá trị hàng tồn kho': stock left x catalogue cost
+STOCK_SPLIT = """create macro stock_split(p, u, d) as table select cast(floor(s / f) as bigint) as whole,
+       cast(round(s - f * floor(s / f)) as bigint) as loose from (select stock_at(p, d) as s,
+       (select factor from product_units where product_name = p and same_text(unit, u) limit 1) as f)"""
+STOCK_VALUE = """create macro stock_value(d) as (select round_half_up(sum(s * cost), 0) from
+       (select cost, stock_at(product_name, d) as s from catalog_cost_all) where s > 0)"""
 EXPIRING_LOTS = """create macro expiring_lots(d, n) as table select lot, product_name, expiry, "left", "left" * price as capital
        from lots_left(d) where expiry between d and d + cast(n as integer) order by expiry, product_name"""
 LOT_MACRO = """create macro lots_left(d) as table select l.lot, l.product_name, l.expiry, l.qty - coalesce(m.moved, 0) as "left", l.price
@@ -215,7 +221,7 @@ def _write_facts(con, f: Facts, sales: pd.DataFrame) -> None:
     for name, df, date_col in (("debt_orders_all", f.orders, "date"), ("payments_all", f.payments, "date"), ("deliveries_all", f.deliveries, "date"),
                                ("imports_all", f.imports, "date"), ("expenses_all", f.expenses, "date"), ("stock_card_all", f.stock_card, None),
                                ("stock_report_all", f.stock_report, None), ("lots_all", f.lots, "expiry"), ("lot_sales_all", f.lot_sales, None),
-                               ("product_units", f.units, None)):
+                               ("product_units", f.units, None), ("catalog_cost_all", f.catalog_cost, None)):
         if df is not None:
             _write(con, name, df, date_col)
     if f.orders is not None and f.payments is not None:
@@ -254,6 +260,11 @@ def _write_facts(con, f: Facts, sales: pd.DataFrame) -> None:
         con.execute(STOCK_REPORT.format(imports=came))
     elif f.lots is not None and f.lot_sales is not None:
         con.execute(STOCK_LOTS)
+    has_stock = f.stock_card is not None or f.stock_report is not None or (f.lots is not None and f.lot_sales is not None)
+    if has_stock and f.units is not None:
+        con.execute(STOCK_SPLIT)
+    if has_stock and f.catalog_cost is not None:
+        con.execute(STOCK_VALUE)
 
 
 def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, dict[str, str]],
