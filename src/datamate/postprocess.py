@@ -26,6 +26,9 @@ HARD_RULES: list[tuple[str, bool | None, re.Pattern]] = [
     ("table", None, re.compile(r"\bkem (theo )?so (tien|no)\b|\bmoi (nguoi|khach) (con )?no\b|\bso no cua tung\b")),
     ("list", None, re.compile(r"\btop \d+\b|\blan luot\b|\btheo thu tu\b|\btuoi no\b")),
 ]
+# 'mấy hộp chẵn, mấy viên lẻ': rulebook 'Tồn theo đơn vị lớn' is a list of exactly 2 (train: 17 lists of 2, 3 unanswerable)
+_SPLIT = re.compile(r"\b(chan|nguyen)\b.*\b(le|cai le|vien le)\b|\ble\b.*\b(chan|nguyen)\b")
+HARD_RULES.append(("list", None, _SPLIT))
 _K = re.compile(r"\btop (\d+)\b|\b(\d+) (?:mat hang|mon|san pham|khach hang|khach|loai|nguoi|nhan vien|thuoc|nha cung cap|"
                 r"hang|ma|sp|tho|nhom)\b(?! (?:tro|tu|tro len))")
 
@@ -37,6 +40,7 @@ class Expect:
     k: int | None = None       # top-k: a list/table answer has at most k items
     hard: bool = False         # type/month expectation from a ≥ 99%-precise rule
     k_hard: bool = False       # k read off the question by rule (train: 120/120), not guessed by the rewrite
+    size: int | None = None    # a list of exactly this many items
     source: str = ""
     window: tuple[str, str] | None = None  # a date answer lies in [start, end] of the periods the question names
 
@@ -61,6 +65,8 @@ def expect_answer(rules_text: str, llm: dict | None = None) -> Expect:
         if rx.search(f):
             e.type, e.month, e.hard, e.source = t, month, True, f"rule: {rx.pattern[:40]}"
             break
+    if _SPLIT.search(f):
+        e.size = 2
     m = _K.search(f)
     if m and e.type in (None, "list", "table"):
         k = int(m.group(1) or m.group(2))
@@ -131,6 +137,10 @@ def check_answer(result: dict, e: Expect) -> tuple[str | None, bool]:
         if hi < e.window[0] or lo > e.window[1]:
             return (f"The answer {a} lies outside the period the question asks about ({e.window[0]}..{e.window[1]}). "
                     "Filter the rows with in_period(...) on that period before ranking."), True
+    if e.size and t == "list" and isinstance(a, list) and len(a) != e.size:
+        return (f"The question asks for exactly {e.size} numbers [whole big units, loose base units], but the answer has "
+                f"{len(a)}. Use stock_split(product, big unit, day) if it is listed, else divide the base-unit stock by the "
+                "big unit's factor."), True
     if e.k and t in ("list", "table"):
         n = len(a) if t == "list" else len(a.get("rows", []))
         if n > e.k:
