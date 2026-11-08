@@ -29,6 +29,23 @@ _WALKIN = re.compile(r"^(khach (le|vang lai)|le|vang lai|khach)$|^(tong|cong|tot
 _PARTIAL_OK = {"product", "group"}  # a person's name must match in full
 
 
+# Northern words for dishes and goods that Southern menus write otherwise ('cháo ngao' = 'Cháo nghêu'); tried as a second
+# reading of the question, so a shop that writes the Northern word still matches as written. Keys are lowercase with
+# diacritics, except where the bare spelling has no other common meaning ('ngao', 'ran'); 'lon' (can) is not 'lợn'.
+_NORTH_SOUTH = {"lợn": "heo", "rán": "chiên", "ran": "chiên", "ngao": "nghêu", "vừng": "mè", "vung": "mè",
+                "lạc": "đậu phộng", "dứa": "thơm", "ngô": "bắp", "ngo": "bắp", "chén": "bát"}
+_NORTH_SOUTH_PAIR = {("đậu", "phụ"): "hũ", ("dau", "phu"): "hũ"}
+
+
+def _southern(qlow: list[str]) -> list[str] | None:
+    """The question's words with Northern dish words in their Southern form, or None when nothing changes."""
+    out = []
+    for i, w in enumerate(qlow):
+        rep = _NORTH_SOUTH_PAIR.get((qlow[i - 1], w)) if i else None
+        out.append(rep or _NORTH_SOUTH.get(w, w))
+    return out if out != qlow else None
+
+
 @dataclass
 class Mention:
     kind: str
@@ -103,27 +120,11 @@ class EntityIndex:
 
     def find(self, question: str, max_per_span: int = 3) -> list[Mention]:
         words = list(_TOKEN.finditer(question))
-        qlow = [m.group(0).lower() for m in words]
-        qtok = [fold(w) for w in qlow]
-        # candidates share at least one fairly rare token with the question ('clear', 'son'; not 'hop', 'chai')
-        cands = {i for t in set(qtok) if 0 < len(self.by_token.get(t, ())) <= 300 for i in self.by_token[t]}
         found: list[tuple[float, int, int, int, bool]] = []  # score, start tok, end tok, entry, full
-        for i in cands:
-            kind, name, toks, low = self.entries[i]
-            run, at = self._longest_run(toks, low, qtok, qlow)
-            if run == 0:
-                continue
-            full = run == len(toks)
-            if not full and kind not in _PARTIAL_OK:
-                continue
-            cue = qtok[at - 1] if at > 0 else ""
-            if len(toks) == 1 and kind != "code" and not (
-                    (kind in ("staff", "customer") and cue in _PERSON_CUE) or (kind == "group" and cue in _GROUP_CUE)):
-                continue
-            cov = self._coverage(toks, qtok[at:at + run])
-            if not full and (run < 2 or cov < 0.6):
-                continue
-            found.append((cov + (1 if full else 0) + 0.01 * run, at, at + run, i, full))
+        qlow = [m.group(0).lower() for m in words]
+        for low_q in filter(None, (qlow, _southern(qlow))):  # word for word, so spans stay the question's
+            found += self._matches([fold(w) for w in low_q], low_q)
+        found = list({(a, b, i): (sc, a, b, i, f) for sc, a, b, i, f in sorted(found)}.values())
         found.sort(key=lambda x: (-x[0], x[1]))
         out: list[Mention] = []
         per_span: dict[tuple[int, int], int] = defaultdict(int)
@@ -143,6 +144,28 @@ class EntityIndex:
                 end += len(tail.group(0))
             out.append(Mention(kind, name, start, end, full))
         return sorted(out, key=lambda m: (m.start, not m.full))
+
+    def _matches(self, qtok: list[str], qlow: list[str]) -> list[tuple[float, int, int, int, bool]]:
+        # candidates share at least one fairly rare token with the question ('clear', 'son'; not 'hop', 'chai')
+        cands = {i for t in set(qtok) if 0 < len(self.by_token.get(t, ())) <= 300 for i in self.by_token[t]}
+        found: list[tuple[float, int, int, int, bool]] = []
+        for i in cands:
+            kind, name, toks, low = self.entries[i]
+            run, at = self._longest_run(toks, low, qtok, qlow)
+            if run == 0:
+                continue
+            full = run == len(toks)
+            if not full and kind not in _PARTIAL_OK:
+                continue
+            cue = qtok[at - 1] if at > 0 else ""
+            if len(toks) == 1 and kind != "code" and not (
+                    (kind in ("staff", "customer") and cue in _PERSON_CUE) or (kind == "group" and cue in _GROUP_CUE)):
+                continue
+            cov = self._coverage(toks, qtok[at:at + run])
+            if not full and (run < 2 or cov < 0.6):
+                continue
+            found.append((cov + (1 if full else 0) + 0.01 * run, at, at + run, i, full))
+        return found
 
     def _coverage(self, toks: tuple[str, ...], matched: list[str]) -> float:
         tot = sum(self.idf.get(t, 0) for t in toks) or 1.0

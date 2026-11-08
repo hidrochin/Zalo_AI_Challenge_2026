@@ -38,7 +38,9 @@ RELATIVE = [
     (re.compile(r"\bnam (ngoai|truoc|roi|vua roi|qua|trc)\b"), "year({py})"),
 ]
 _SAME_LAST_YEAR = re.compile(r"\bcung ky (nam|nam ngoai|nam truoc|nam trc|nam roi|nam ngoai)\b|\bcung thang (nam|nam ngoai|nam truoc|nam trc)\b")
-_THIS_MONTH = re.compile(r"\bthang (nay|hien tai)\b|\btu dau thang\b")
+_THIS_MONTH = re.compile(r"\bthang (nay|hien tai)\b|\btu dau thang\b|\btu (?:ngay )?mung (?:1|mot)\b")
+# between a bare month and a later month with a year, only more months of one list: 'tháng 3, tháng 4, tháng 5 năm 2025'
+_MONTH_LIST_GAP = re.compile(r"^(?:\s*(?:,|va|den|toi|het|-|thang|th|t|\d{1,2})\s*)*$")
 _PREV_MONTH = re.compile(r"\b(?:thang|th) (truoc|roi|vua roi|vua qua|lien truoc|lien trc|trc|qua)\b|\bky truoc\b")
 _UNTIL = re.compile(r"\b(den|toi|tinh den|tinh toi|cuoi|het)\s*(het\s*)?(ngay\s*)?(hom nay|nay|bay gio|gio)\b|\bhet hom nay\b|\bcuoi ngay hom nay\b")
 _UNTIL_D = re.compile(r"\b(?:den|toi|tinh den|tinh toi|cuoi)\s*(?:het\s*)?(?:ngay\s*)?(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})")
@@ -104,12 +106,14 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
                 if free(m) and 1 <= mm <= 12 and 2000 < yy < 2100:
                     add(m, f"month({yy}, {mm})")
                     anchor = anchor or f"month({yy}, {mm})"
+        dated = [(m.start(), _year(m.group(2))) for rx in (_MONTH_Y, _MONTH_BARE_Y) for m in rx.finditer(f)]
         for m in _MONTH.finditer(f):
             mm = int(m.group(1))
             if free(m) and 1 <= mm <= 12:
-                p = dm.month_auto(mm)
-                add(m, f"month({p.start.year}, {mm})")
-                anchor = anchor or f"month({p.start.year}, {mm})"
+                listed = next((yy for a, yy in sorted(dated) if a >= m.end() and _MONTH_LIST_GAP.match(f[m.end():a])), None)
+                yy = listed if listed and 2000 < listed < 2100 else dm.month_auto(mm).start.year
+                add(m, f"month({yy}, {mm})")
+                anchor = anchor or f"month({yy}, {mm})"
         for m in _YEAR.finditer(f):
             if free(m):
                 add(m, f"year({m.group(1)})")
@@ -134,7 +138,7 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
             for m in _BEFORE_D.finditer(f):
                 if free(m):
                     add(m, f"days_before({d0}, {int(m.group(1))})")
-        range_end = re.search(r"\btu dau\b|\btu ngay\b|\bthang nay\b|\btuan nay\b|\bdau (?:nam|thang|tuan)\b|\btu \d{1,2}/\d{1,2}\b", f)
+        range_end = re.search(r"\btu dau\b|\btu ngay\b|\btu mung\b|\bthang nay\b|\btuan nay\b|\bdau (?:nam|thang|tuan)\b|\btu \d{1,2}/\d{1,2}\b", f)
         for m in _UNTIL.finditer(f):
             if free(m) and not range_end:
                 add(m, "until()  # point-in-time: everything from the start of the data to the end of today")
