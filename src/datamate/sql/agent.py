@@ -149,20 +149,41 @@ MACROS = {
     "cancel_rate": "cancel_rate(a, b): percent of cancelled orders among all orders of the period, 2 decimals (12.5 means 12.5%: do not multiply by 100)",
     "debt_total": "debt_total(x): 'khách còn nợ tổng cộng' at the end of day x, walk-in orders included; COD and marketplace orders are never debt",
     "debt_by_order": "debt_by_order(x): TABLE of orders still owing at the end of day x: order_id, date, customer, customer_name, walkin, debt, age (days from the order date). Use it for 'tuổi nợ' and 'đơn đặt quá N ngày'",
-    "debt_by_customer": "debt_by_customer(x): TABLE customer, customer_name, debt, biggest first, no walk-in row. Use it for 'top khách nợ' and 'bao nhiêu khách còn nợ'",
+    "debt_by_customer": "debt_by_customer(x): TABLE customer, customer_name, debt, biggest first, no walk-in row. Use it for 'top khách nợ'",
+    "debt_customers": "debt_customers(x): 'bao nhiêu khách còn nợ': the NUMBER of customers still owing at the end of day x (not an amount)",
+    "debt_aging": "debt_aging(x): TABLE of one row \"0-7\", \"8-15\", \"over 15\": debt by age in days at the end of day x (for 'tuổi nợ 0–7, 8–15, trên 15')",
     "debt_repaid": "debt_repaid(a, b): 'thu nợ, trả nợ' in the period: payments dated in it, after the day of purchase, on any on-credit order, also of earlier periods",
     "debt_repaid_of": "debt_repaid_of(customer_name, a, b): debt_repaid for one customer",
     "debt_new": "debt_new(a, b): 'nợ thêm': what on-credit orders placed in the period left unpaid at the end of the day of purchase",
     "debt_new_of": "debt_new_of(customer_name, a, b): debt_new for one customer",
     "delivery_trips": "delivery_trips(a, b): 'số đợt giao': distinct (order, trip) pairs delivered in the period",
     "avg_import_price": "avg_import_price(product_name, a, b): 'giá nhập bình quân', weighted by quantity; never avg() of prices",
+    "import_minus_sales": "import_minus_sales(product_name, a, b): 'nhập trừ bán, chênh nhập và bán' in base units (sold = counted orders)",
     "gross_profit": "gross_profit(a, b): 'lãi gộp': revenue minus quantity × the cost on each sale line",
     "net_profit": "net_profit(a, b): 'lãi ròng': gross_profit minus every expense of the period",
     "slow_products": "slow_products(a, b): TABLE product_name of 'hàng ế': sold before the period, not in it",
-    "price_effect": "price_effect(product_name, d, n): 'hiệu ứng tăng giá': percent change of the QUANTITY sold, n days from day d (d included) vs the n days before d",
+    "price_effect": "price_effect(product_name, d, n): 'hiệu ứng tăng giá': percent change of the QUANTITY sold, n days from day d (d included) vs the n days before d. Use it when the question gives the day",
+    "price_effect_at": "price_effect_at(product_name, new_price, n): the same when the question gives the new price, not the day ('từ khi X lên giá Y đ'): the day is the first increase to that price in the price list",
+    "price_increase_day": "price_increase_day(product_name, new_price): the first day the price rose to new_price (price list), NULL if never",
     "stock_at": "stock_at(product_name, d): stock at the end of day d in base units",
     "lots_left": "lots_left(d): TABLE of lots with stock at the end of day d: lot, product_name, expiry, left, price",
+    "expiring_lots": "expiring_lots(d, n): TABLE of lots with stock whose expiry is from day d to d + n: lot, product_name, expiry, left, capital (= left × the lot's own price, 'tiền vốn'); count rows for 'mấy lô'",
     "avg_order_value": "avg_order_value(a, b): revenue / counted orders, rounded to đồng",
+    "avg_order_value_group": "avg_order_value_group(group, a, b): avg_order_value of one customer group ('khách nhóm G trung bình mỗi đơn')",
+    "customer_stats": "customer_stats(a, b): TABLE one row per customer (walk-ins excluded): customer, customer_name, orders, days (days with an order), revenue, avg_order, cancels. Rulebook: mua nhiều tiền nhất = revenue; trung thành nhất = days; sộp nhất = avg_order among orders >= 3; hay đổi ý nhất = cancels; mua nhiều lần/đơn nhất = orders. Ties: order by the measure desc, then customer",
+    "customers_min_orders": "customers_min_orders(n, a, b): how many customers have at least n counted orders in the period",
+    "share_customers_min_orders": "share_customers_min_orders(n, a, b): percent of the customers who bought in the period that have at least n orders ('khách mua từ N đơn trở lên chiếm mấy %')",
+    "item_stats": "item_stats(a, b): TABLE one row per item: product_name, product_key, qty (base units), revenue, orders (orders containing it)[, profit]. bán chạy = qty; nhiều tiền = revenue; ưa chuộng nhất / có mặt trong nhiều đơn = orders; lời nhất = profit",
+    "items_in_min_orders": "items_in_min_orders(n, a, b): how many items appear in at least n counted orders",
+    "day_stats": "day_stats(a, b): TABLE one row per day with orders: date, revenue, orders. 'ngày bán nhiều tiền nhất' = revenue; 'ngày đắt khách nhất' = orders; 'mấy ngày/bữa bán được từ X' = count(*) where revenue >= X",
+    "month_stats": "month_stats(a, b): TABLE one row per month: month ('YYYY-MM'), revenue, orders. 'tháng nào cao nhất' = select month ... order by revenue desc; growth month after month = compare consecutive rows",
+    "shift_revenue": "shift_revenue(s, a, b): revenue of shift s ('sáng' or 'chiều') in the period",
+    "shift_orders": "shift_orders(s, a, b): counted orders of shift s. Ca chiều vs ca sáng: pct_change(<chiều>, <sáng>), the morning shift is the base",
+    "hour_stats": "hour_stats(a, b): TABLE hour, orders, busiest first. 'giờ cao điểm' = the first hour (a number)",
+    "size_qty": "size_qty(s, a, b): cups of size s ('M', 'L') sold: items whose name ends with '(s)', base units",
+    "model_line": "model_line(product_name): 'dòng máy': the name before its capacity '…GB' (the whole name when it has none)",
+    "brand_of": "brand_of(product_name): 'hãng': the first word of the name; iPhone is Apple",
+    "extra_lines": "extra_lines('voucher' | 'ship' | 'điểm', a, b): money of the lines that are not goods (voucher discount, shipping fee, points used) as a positive number, by invoice day, orders not cancelled or returned",
     "price_on": "price_on(product_name, d): 'giá bán X ngày D', price per base unit before line discount",
     "round_half_up": "round_half_up(x, n): rounds half away from zero",
     "pct_change": "pct_change(new, old): percent change, NULL when old is 0",
@@ -212,7 +233,13 @@ def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros:
     else:
         out += _columns("View sales_lines", sales)
         if "order_id" in sales.columns:
-            out += _columns("View orders", build_orders(sales))
+            orders = build_orders(sales)
+            out += _columns("View orders", orders)
+            money = [c for c in orders.columns if _is_order_money(c) and pd.api.types.is_numeric_dtype(orders[c])
+                     and not pd.api.types.is_bool_dtype(orders[c])]
+            if money:
+                out.append("  note: " + ", ".join(f'"{c}"' for c in money) + " belong to the whole order and are repeated on "
+                           "each of its lines: sum or average them over `orders`, never over sales_lines.")
         out.append("\n" + sales_desc.replace("sales_lines()", "sales_lines").replace("orders()", "orders"))
     for name, df in biz.tables.items():
         if keep is not None and f"raw_{_slug(name)}" not in keep:
@@ -353,10 +380,17 @@ def _shadow_warning(con, result: dict, shadow: tuple[str, str, str] | None, time
 
 
 # Query shapes that are wrong whatever the shop: they never reach the database, and the message says what to do instead.
+_SCALAR_MACRO = r"\b(revenue|order_count|cancel_count|cancel_rate|avg_order_value|gross_profit|net_profit|debt_total)\s*\((?:[^()]|\([^()]*\))*\)"
 _LINTS = [
+    (re.compile(_SCALAR_MACRO + r"\s*(filter|from|where|over)\b", re.I),
+     "revenue(), order_count() and the other scalar macros give ONE number for the whole shop and period: they take no "
+     "FILTER, FROM, WHERE or OVER. For part of the sales (a shift, a channel, a payment method, a group, an item) sum "
+     "amount over sales_lines where counted and \"date\" between a and b and <condition>, or use shift_revenue / "
+     "shift_orders / customer_stats / item_stats."),
     (re.compile(r"\b100(\.0*)?\s*\*\s*cancel_rate\s*\(", re.I), "cancel_rate() already returns percent units: do not multiply it by 100."),
-    (re.compile(r"\bcount\(\s*\*\s*\)\s+from\s+sales_lines\b", re.I), "sales_lines has one row per product line, so count(*) counts lines, not orders. "
-                                                                         "Count orders in the `orders` view, or use count(distinct order_id)."),
+    (re.compile(r"\bcount\(\s*\*\s*\)\s+from\s+sales_lines\b", re.I), "sales_lines has one row per product line, so count(*) counts lines. "
+                                                                         "Orders: count(distinct order_id) or the `orders` view. Items sold "
+                                                                         "('bán mấy máy/chiếc/lon'): sum(qty_base)."),
     (re.compile(r"\b(having|order\s+by)\s+count\(\s*\*\s*\)", re.I), None),
     (re.compile(r"\bavg\(\s*\"?(gi[aá] nh[aậ]p|dongianhap|đơn giá|don gia)", re.I), "A mean of prices is not 'giá nhập bình quân': use avg_import_price(), weighted by quantity."),
     (re.compile(r"has_name\(\s*\"?(ho[aạ]t ch[aấ]t|thanhphanchinh|th[aà]nh ph[aầ]n)\"?\s*,\s*'[^']+'", re.I),
@@ -369,8 +403,27 @@ _BY_CUSTOMER = re.compile(r"\bgroup\s+by\s+\"?customer(_key|_name)?\b", re.I)
 _NO_WALKIN = re.compile(r"\bwalkin\b|\bcustomer(_key)?\"?\s+is\s+not\s+null\b", re.I)
 
 
-def lint(code: str, walkin: bool = True) -> str | None:
-    """Why this query shape is wrong, or None. walkin: the views have the `walkin` column (the shop records customers)."""
+_FROM_LINES_ONLY = re.compile(r"\bfrom\s+sales_lines\b", re.I)
+_FROM_ORDERS_VIEW = re.compile(r"\b(from|join)\s+orders\b", re.I)
+
+
+def order_money_lint(code: str, order_cols: tuple[str, ...]) -> str | None:
+    """A sum or average over sales_lines of an order field (repeated on every line of the order) counts it once per line."""
+    if not order_cols or not _FROM_LINES_ONLY.search(code) or _FROM_ORDERS_VIEW.search(code):
+        return None
+    for c in order_cols:
+        if re.search(rf'\b(sum|avg)\s*\(\s*(?:\w+\.)?"?{re.escape(c)}"?\s*\)', code, re.I):
+            return (f'"{c}" belongs to the whole order and is repeated on each of its lines: sum or average it over the `orders` '
+                    "view (one row per order; `counted` = not cancelled or returned), not over sales_lines.")
+    return None
+
+
+def lint(code: str, walkin: bool = True, order_cols: tuple[str, ...] = ()) -> str | None:
+    """Why this query shape is wrong, or None. walkin: the views have the `walkin` column (the shop records customers).
+    order_cols: money columns of the order repeated on its lines."""
+    why = order_money_lint(code, order_cols)
+    if why:
+        return why
     for rx, message in _LINTS:
         if rx.search(code):
             if message:
@@ -489,7 +542,8 @@ def macro_only(code: str) -> bool:
 
 
 def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, timeout: float = 30.0,
-            periods: list[tuple[str | None, str]] = (), span: tuple[str, str] | None = None, walkin: bool = True) -> dict:
+            periods: list[tuple[str | None, str]] = (), span: tuple[str, str] | None = None, walkin: bool = True,
+            order_cols: tuple[str, ...] = ()) -> dict:
     """Same record as sandbox._execute, for a reply taken by extract_sql.
     periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`."""
     m = _UNANSWERABLE.match(code)
@@ -504,7 +558,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
             if _LIMIT.search(code) and not _ORDER_BY.search(code) and not _RANKED_SOURCE.match(_body(code)):
                 raise AnswerShape("LIMIT without ORDER BY picks rows at random: order by the criterion, then by code.")
             code = add_named_products(add_not_walkin(code, walkin))
-            why = lint(code, walkin)
+            why = lint(code, walkin, order_cols)
             if why:
                 raise AnswerShape(why)
             set_as_of(con, as_of)
@@ -535,6 +589,23 @@ def _ran(written: str, code: str) -> dict:
     return {"ran": code} if code != written else {}
 
 
+_ORDER_OWN = {"order_id", "date", "order_ts", "counted", "goods_amount", "n_lines", "qty_base", "walkin"}
+_MONEY_HEAD = re.compile(r"\b(tien|tong|tra|no|giam|bot|thu|phi|ship|chiet khau|ck|gia tri|thanh toan|coc|may cu|vat|thue)\b")
+
+
+def _is_order_money(c: str) -> bool:
+    from datamate.ingest.roles import header_key
+
+    return c not in _ORDER_OWN and bool(_MONEY_HEAD.search(header_key(c)))
+
+
+def order_money_cols(con) -> tuple[str, ...]:
+    """Numeric columns of the orders view other than its own: order fields copied onto every sales line."""
+    rows = con.execute("select column_name, data_type from duckdb_columns() where table_name = 'orders_all'").fetchall()
+    num = ("DOUBLE", "BIGINT", "INTEGER", "DECIMAL", "FLOAT", "HUGEINT", "SMALLINT")
+    return tuple(c for c, t in rows if _is_order_money(c) and str(t).upper().startswith(num))
+
+
 class SqlPool:
     """N cursors on one read-only store; run() is thread-safe, each cursor keeps its own as_of."""
 
@@ -548,6 +619,7 @@ class SqlPool:
         self.walkin = "walkin" in cols
         lo, hi = self.base.execute('select min("date"), max("date") from sales_all').fetchone() if cols else (None, None)
         self.span = (lo.isoformat(), hi.isoformat()) if lo is not None else None
+        self.order_cols = order_money_cols(self.base)
 
     def macros(self) -> list[str]:
         return [r[0] for r in self.base.execute("select distinct function_name from duckdb_functions() where not internal").fetchall()]
@@ -555,7 +627,7 @@ class SqlPool:
     def run(self, code: str, as_of: str, shadow=None, periods: list[tuple[str | None, str]] = ()) -> dict:
         con = self._free.get()
         try:
-            return execute(con, code, str(as_of), self.names, shadow, self.timeout, periods, self.span, self.walkin)
+            return execute(con, code, str(as_of), self.names, shadow, self.timeout, periods, self.span, self.walkin, self.order_cols)
         finally:
             self._free.put(con)
 

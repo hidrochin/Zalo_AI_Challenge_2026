@@ -29,7 +29,7 @@ from datamate.fast import fast_answer
 from datamate.ingest import load_business, load_calendar
 from datamate.ingest.trust import assess
 from datamate.ingest.schema_card import schema_card
-from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, fit_month, invariants
+from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, fit_money, fit_month, invariants
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
 from datamate.rules import rule_gate, rule_note
@@ -218,7 +218,8 @@ def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], ind
 
 
 def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
-                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset()) -> dict:
+                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset(),
+                   macros=()) -> dict:
     t0 = time.time()
     engine = ENGINES[cfg.engine]
     text, rw, pre = preprocess(q, llm, cfg, index)
@@ -249,7 +250,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
             code = engine.extract(text_reply)
             advice = None
             if code and attempt == 0 and cfg.repair:
-                advice = term_advice(text, code, terms, cfg.engine) or (grain_advice(text, code) if cfg.engine == "pandas" else None)
+                advice = term_advice(text, code, terms, cfg.engine, macros) or (grain_advice(text, code) if cfg.engine == "pandas" else None)
             if code is None:
                 out = {"result": None, "error": engine.no_code, "stdout": ""}
             elif advice:  # one rewrite, never a block: the second attempt runs as written
@@ -257,7 +258,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
             else:
                 out = pool.run(code, q["as_of_date"], shadow, **extra)
             if out["error"] is None and out["result"] is not None:
-                out["result"] = fit_month(out["result"], expect)
+                out["result"] = fit_money(fit_month(out["result"], expect), text)
                 why, hard = check_answer(out["result"], expect)
                 broken = invariants(out["result"], text, expect.window)  # never fire on train gold: hard
                 if broken:
@@ -348,6 +349,7 @@ def run(cfg: RunConfig) -> dict:
             terms = ready_terms(build_facts(biz, sales))
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
             left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
+            macros = []
             if cfg.engine == "sql":
                 store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
                 pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout)
@@ -360,7 +362,7 @@ def run(cfg: RunConfig) -> dict:
                 part_of = None
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms)
+                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros)
                             for q in left]
                     for f in as_completed(futs):
                         try:
