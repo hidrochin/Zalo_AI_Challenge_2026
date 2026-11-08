@@ -175,6 +175,10 @@ Nguyên tắc: **kiểm định bằng giá trị, không tin tên cột.**
 - Ingest cảnh báo khi bảng còn dòng không có mã đơn sau forward-fill. Hiện 0 cảnh báo trên 44 shop.
 - `busy_customers` phát hiện nhãn khách lẻ chưa biết bằng tần suất: ≥ 5% số đơn và ≥ 20 lần trung vị (khách thật tối đa 0,64% và 3 lần). Có từ gợi ý thì coi là khách lẻ, không có thì chỉ ghi chú cho model. Không mở rộng danh sách từ, vì mẫu rộng hơn bắt nhầm tên thật như `Lê Hiếu Ngân`. Ngưỡng đo trên train và public, chưa kiểm chứng ở ngành có khách lớn thật.
 
+**Trạng thái lạ (thêm 2026-11-06):** `normalize_status` hiện trả `hoàn thành` cho mọi giá trị không khớp, nên `Không nhận hàng`, `Bom hàng`, `Chờ xác nhận` sẽ âm thầm thành doanh thu. Sửa: danh sách đóng cho `hoàn thành`; giá trị lạ được LLM phân loại **một lần cho mỗi giá trị** lúc ingest, về đúng 4 nhãn của rulebook (không dùng taxonomy riêng, vì rulebook quy định "đúng một trong bốn trạng thái"). Không chắc thì đánh dấu `suspect`, không mặc định là hoàn thành.
+
+**Vai trò gán nhầm đã thấy (quét 44 shop, 2026-11-06):** tình trạng máy ở shop điện thoại (`pin yếu`, `móp cạnh`, `đẹp 99%`) bị gán vai trò `status`; `đang giao dịch` thành `đang giao`. Chưa đo tác động đến đáp án.
+
 **Xử lý khi không map được:**
 1. Giữ mọi cột không có vai trò dưới dạng bảng `raw_*` kèm mô tả từ README, để SQL vẫn truy vấn được.
 2. Gọi LLM **một lần cho mỗi bảng** lúc ingest: đầu vào gồm tiêu đề, 5 giá trị mẫu, mô tả README; đầu ra là vai trò dạng JSON. Greedy, cache lại, không tốn thời gian theo câu.
@@ -183,7 +187,7 @@ Nguyên tắc: **kiểm định bằng giá trị, không tin tên cột.**
 
 `absent` phải xét trên **cả bảng gốc**, không chỉ vai trò. `dev_012` chỉ gán được vai trò cho 1/13 cột, nhưng thiếu vai trò không có nghĩa là thiếu dữ liệu.
 
-**Kiểm thử bằng đột biến:** đổi tên cột, xáo cột và đổi định dạng trên shop train, rồi đo tỉ lệ khôi phục vai trò và tỉ lệ giữ đúng 733 câu contract. Việc này mô phỏng "shop chưa gặp" mà vẫn có đáp án thật.
+**Kiểm thử bằng đột biến:** đổi tên cột, xáo cột và đổi định dạng trên shop train, rồi đo tỉ lệ khôi phục vai trò và tỉ lệ giữ đúng 733 câu contract. Việc này mô phỏng "shop chưa gặp" mà vẫn có đáp án thật. Bộ đột biến làm **trước** các phần AI và gồm cả trạng thái lạ, tên biến thể, dòng tổng, đổi định nghĩa rulebook. Tách riêng thay đổi giá trị với thay đổi luật, vì hai loại này đo hai năng lực khác nhau.
 
 ### W3. Rule theo business
 
@@ -271,34 +275,40 @@ Cách này xử lý đúng cảnh báo của mentor về hai câu gần nghĩa n
 | việc | mô tả | trạng thái hiện tại |
 |---|---|---|
 | Tạo DB mỗi shop | Xuất bảng sạch sang `cache/duckdb/<split>/`; `sales_all` chưa cắt `as_of`; bảng gốc thành `raw_*` | **xong** |
-| Views | `sales_lines`, `orders`, `dim_*` xong; các view theo năng lực chờ W4 | **một phần** |
-| Thẻ schema cho SQL | Chỉ views + mô tả + giá trị mẫu + danh sách macro | chưa có; `schema_card.py` dùng lại một phần |
-| Prompt SQL | Quy ước đầu ra, rulebook, schema, ví dụ, kỳ đã giải, tên đã nối | chưa có |
-| Đầu ra | Một câu SELECT, kèm dòng `-- type: number` hoặc `UNANSWERABLE: lý do` | chưa có |
+| Views | `sales_lines`, `orders`, `dim_*`, `calendar` xong; các view theo năng lực chờ W4 | **một phần** |
+| Thẻ schema cho SQL | Views + bảng `raw_*` + mô tả + giá trị mẫu + macro của shop | **xong** (`sql/agent.py`) |
+| Prompt SQL | Quy ước đầu ra, rulebook, schema, ví dụ, kỳ đã giải, tên đã nối | **xong** |
+| Đầu ra | Một câu SELECT, kèm dòng `-- type: money` hoặc `UNANSWERABLE: lý do` | **xong** |
 | Kiểm tra trước khi chạy | `extract_statements`: đúng một SELECT; binder bắt sai tên cột | **xong** (`run_select`) |
-| Thực thi | Kết nối read-only, `set variable as_of`, chặn truy cập ngoài, timeout, `threads=1` | **xong**, chưa nối vào pipeline |
-| Sửa lỗi | Một vòng, kèm `Candidate bindings` | có khung trong `pipeline.py` |
-| Chuyển kết quả thành đáp án | Từ tập dòng sang kiểu đáp án; dùng lại `finalize`, `check_answer`, `invariants` | phần kiểm tra có sẵn; phần chuyển chưa có |
+| Thực thi | Kết nối read-only, `set variable as_of`, chặn truy cập ngoài và đồng hồ thật, timeout, `threads=1` | **xong**, chạy bằng `--engine sql` |
+| Sửa lỗi | Một vòng, kèm `Candidate bindings` | **xong** |
+| Chuyển kết quả thành đáp án | Từ tập dòng sang kiểu đáp án; dùng lại `finalize`, `check_answer`, `invariants` | **xong** (`to_answer`) |
 | Ví dụ SQL | Rejection sampling trên **train**: giữ SQL khớp đáp án | chưa có |
 | Tái lập | `threads=1`, tiền là số nguyên, bắt buộc `ORDER BY` kèm mã | chưa có |
 
 ## 5. Thứ tự và cổng quyết định
 
+**Cập nhật 2026-11-06:** đã làm sớm so với bảng dưới: trạng thái lạ, bộ đột biến, W2 (kiểm định bằng giá trị, map cột bằng LLM), W3 gate, W5 frame parser. Số đo ở README "Status (2026-11-06, night)". Còn lại: G1, phân tích lỗi baseline, ví dụ SQL, W4 trên nhánh thắng.
+
 **Hạn nộp: 2026-11-15**, còn 10 ngày tính từ 2026-11-05. Toàn bộ kế hoạch cần khoảng 13–14 ngày cho một người, nên phải cắt. Docker đang hoãn nhưng vẫn là điều kiện để nộp, nên giữ 3 ngày cuối cho phần này.
 
 | ngày | nội dung | phụ thuộc |
 |---|---|---|
-| 06/11 | W6: thẻ schema, prompt SQL, nối vào pipeline | W1 (xong) |
-| 07/11 | W6: chuyển kết quả thành đáp án, ví dụ SQL; chạy baseline pandas và SQL trên Kaggle | |
+| 06/11 | W6 trên `text2sql`, chạy Kaggle; rồi baseline trên `codegen` | W1 (xong) |
+| 07/11 | Trạng thái lạ, bộ đột biến (dùng chung); ví dụ SQL; phân tích lỗi baseline | |
 | **08/11** | **G1: so SQL với pandas** và W3 rule registry | |
-| 09–10/11 | W4 đợt 1: khách, công nợ | W1 |
-| 11/11 | W5 nhánh nhanh, các đợt đầu | W3, W4 |
-| 12/11 | W2: kiểm định mapping và trạng thái `trusted`/`suspect`/`absent` | |
+| 09–10/11 | W4 đợt 1: khách, công nợ, trên nhánh thắng | W1 |
+| 11/11 | W5 nhánh nhanh, các đợt đầu. Frame xuất theo dạng IR để dùng lại | W3, W4 |
+| 12/11 | W2: kiểm định mapping, trạng thái `trusted`/`suspect`/`absent`, map cột bằng LLM | |
 | 13–15/11 | Docker, chạy thử, nộp | |
 
-**Tạm cắt:** W4 đợt 2–3, LLM mapping ở W2, thí nghiệm F3–F4. Làm lại nếu còn thời gian, theo thứ tự này. Nếu G1 cho thấy SQL không hơn pandas, thời gian W6 còn lại chuyển sang W4.
+**Tạm cắt:** W4 đợt 2–3, thí nghiệm F3–F4. Làm lại nếu còn thời gian, theo thứ tự này. Nếu G1 cho thấy SQL không hơn pandas, thời gian W6 còn lại chuyển sang W4.
 
-**G1.** Cùng model Qwen3.5-9B, cùng câu hỏi train, cùng views và cùng định nghĩa. So sánh PA theo cặp với bootstrap CI, tỉ lệ lỗi thực thi, số token và thời gian mỗi câu.
+**Hai nhánh song song (quyết định 2026-11-06).** `text2sql` và `codegen` cùng chạy trên Kaggle đến G1. Code dùng chung (ingest, canon, preprocess, postprocess, eval) đi qua `main` rồi merge xuống cả hai, nếu không G1 sẽ đo khác biệt dữ liệu chứ không phải phương pháp. Mỗi nhánh dùng dataset Kaggle riêng (`DM_DATASET`), và `BUILD.txt` trong kết quả ghi code đã chạy. Sau G1 chỉ một nhánh nhận tính năng mới, vì viết W4 cho cả `dm` lẫn macro là làm hai lần.
+
+**Chưa làm theo phản hồi semantic (2026-11-06), chờ số liệu:** Semantic Specification đầy đủ (rulebook train và public: 64/67 mệnh đề chung giống hệt, thay đổi chủ yếu là thêm mệnh đề, nên W3 là đủ); Query IR dùng chung (làm trước G1 sẽ làm bẩn phép so sánh); thời gian bằng LLM, embedding cho tên, phân loại dòng bằng LLM, verifier. Mở lại nếu phân tích lỗi sau G1 chỉ ra đó là nguồn mất điểm chính. Mọi bước semantic khi nộp chạy bằng model local ≤ 15B, greedy, có cache, nên phải đo trên Qwen.
+
+**G1.** Cùng model Qwen3.5-9B, đủ 3000 câu train (khoảng 3 giờ mỗi nhánh), cùng views và cùng định nghĩa. Ví dụ few-shot lấy từ shop khác ở cả hai nhánh. So sánh PA theo cặp với bootstrap CI, tỉ lệ lỗi thực thi, số token và thời gian mỗi câu.
 
 | kết quả G1 | hành động |
 |---|---|

@@ -58,13 +58,15 @@ def _role_cols(roles: dict[str, str]) -> dict[str, str]:
     return {r: c for c, r in roles.items()}
 
 
+# Roles that only say what a column is: it stays in the lines.
+_PLAIN_ROLES = (None, "order_goods", "ticket_amount", "order_total", "pay_method", "channel", "debt_note", "line_cost")
 _JUNK = re.compile(r"hinh anh|barcode|ma vach|vi tri|trong luong|mo ta|mau ghi chu|url|dinh muc|ton (lon|nho) nhat"
                    r"|lien quan|thuoc tinh|^stt$|^so thu tu$|id cua hang|ma chi nhanh|^tao luc$|ban truc tiep|bao hanh")
 
 
 def _extra_cols(df: pd.DataFrame, roles: dict[str, str], taken) -> list[str]:
     """Columns of df that carry no canonical role, are not already present and are not catalogue noise."""
-    return [c for c in df.columns if c not in roles and not str(c).endswith("__norm") and c not in taken
+    return [c for c in df.columns if roles.get(c) in _PLAIN_ROLES and not str(c).endswith("__norm") and c not in taken
             and not str(c).startswith("_") and not _JUNK.search(header_key(c))]
 
 
@@ -79,13 +81,14 @@ _BASE_UNIT = re.compile(r"^(don vi co ban|dv co ban|dv nho|dv goc|don vi goc)$")
 
 
 def unit_factors(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]], keys: dict[str, pd.Series],
-                 skip: str) -> tuple[dict, str, str] | None:
-    """(factors, key, description) from a unit-conversion table, or None; factors = {(folded product key, folded unit):
-    base units per unit}.
+                 skip: str) -> list[tuple[dict, str, str]]:
+    """(factors, key, description) of every unit-conversion table; factors = {(folded product key, folded unit): base
+    units per unit}. A shop can keep some conversions in a sheet and others in the README's prose.
 
     keys: the sales lines' product columns ({"product_id": ..., "product_name": ...}); the conversion table's key column is
     the one whose values match them best. A factor cell with its own unit ("15 vỉ") is resolved through the same
     product's row for that unit (hộp = 15 vỉ = 15 × 12 viên)."""
+    found = []
     for n, t in tables.items():
         if n == skip or "order_id" in roles_by_table.get(n, {}).values():
             continue
@@ -120,7 +123,103 @@ def unit_factors(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict
                 g, s = raw[(k, s)]
                 f *= g
             factors[(k, u)] = f
-        return factors, kname, f"T['{n}'] (`{fcol}` per `{ucol}`, keyed by {kname})"
+        found.append((factors, kname, f"T['{n}'] (`{fcol}` per `{ucol}`, keyed by {kname})"))
+    return found
+
+
+_LOOKUP_ROWS = 5000
+_ALIAS_HEAD = re.compile(r"ghi tat|viet tat|ten tat|ky hieu|alias")
+
+
+def _text_cols(t: pd.DataFrame) -> list[str]:
+    return [c for c in t.columns if not str(c).startswith("_") and not str(c).endswith(("__norm", "__unit"))
+            and t[c].map(lambda v: isinstance(v, str)).mean() > 0.5]
+
+
+def alias_map(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]], names: pd.Series,
+              skip: str) -> tuple[dict[str, str], str] | None:
+    """({folded written name: full name}, source) from a lookup sheet that spells out the names the sales lines abbreviate.
+
+    A sheet counts when it explains most names on the lines, some of them only through its short column, and the short
+    column says so by its header or the full column's names appear on the lines too (a description column never does)."""
+    seen = set(names.dropna().astype(str).map(fold))
+    for n, t in tables.items():
+        roles = roles_by_table.get(n, {})
+        if n == skip or "order_id" in roles.values() or len(t) > _LOOKUP_ROWS:
+            continue
+        cols = _text_cols(t)
+        for short in cols:
+            for full in cols:
+                pairs = t[[short, full]].dropna()
+                if short == full or pairs[short].nunique() < 0.9 * len(pairs) or len(pairs) < 3:
+                    continue
+                s, f = set(pairs[short].map(fold)), set(pairs[full].map(fold))
+                only_short = seen & (s - f)
+                if len(only_short) < max(2, 0.05 * len(seen)) or len(seen & (s | f)) < 0.8 * len(seen):
+                    continue
+                if not (_ALIAS_HEAD.search(header_key(short)) or len(seen & (f - s)) >= 2):
+                    continue
+                written = {fold(a): b for a, b in zip(pairs[short], pairs[full])}
+                return {**written, **{fold(b): b for b in pairs[full]}}, f"T['{n}'] (`{short}` -> `{full}`)"
+    return None
+
+
+_HONORIFIC = re.compile(r"^(a|anh|c|chi|em|e|tho|co|chu|bac)[. ]+")
+_PERSON_HEAD = re.compile(r"ho ten|ho va ten|ten day du|ten (nhan vien|tho|nv)|^tho$|^nhan vien$")
+
+
+def _given_name(v) -> str:
+    return _HONORIFIC.sub("", fold(v)).strip()
+
+
+def full_names(out: pd.DataFrame, tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]], skip: str) -> list[str]:
+    """Write staff columns with the full names of a staff list ("A.Đức" -> "Lê Văn Đức"); returns the columns changed.
+
+    A value is replaced only when one person on the list has that given name, so two staff named Đức stay as written."""
+    done = []
+    for n, t in tables.items():
+        if n == skip or len(t) > 200 or set(roles_by_table.get(n, {}).values()) & {"order_id", "customer_id", "customer_name", "product_name"}:
+            continue
+        for c in _text_cols(t):
+            names = t[c].dropna().astype(str)
+            if not _PERSON_HEAD.search(header_key(c)) or names.map(lambda v: len(v.split()) >= 2).mean() < 0.8:
+                continue
+            given: dict[str, list[str]] = {}
+            for v in names.unique():
+                given.setdefault(fold(v).split()[-1], []).append(v)
+            lookup = {g: v[0] for g, v in given.items() if len(v) == 1}
+            for col in _text_cols(out):
+                if col in CANON_ROLES or col in done:
+                    continue
+                vals = out[col].dropna().astype(str)
+                if vals.empty or vals.map(lambda v: _given_name(v) in lookup or fold(v) in {fold(x) for x in names}).mean() < 0.8:
+                    continue
+                out[col] = out[col].map(lambda v: lookup.get(_given_name(v), v) if isinstance(v, str) else v)
+                done.append(col)
+    return done
+
+
+_GROUP_HEAD = re.compile(r"^(nhom( khach( hang)?| kh)?|loai khach hang|hang khach|hang( kh| thanh vien)?)$")
+_ORDER_GOODS_HEAD = re.compile(r"^(gia tri hang|tien hang|tong tien hang)$")
+
+
+def _order_level(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]]) -> tuple[dict, dict, str] | None:
+    """A shop without line items: its order or ticket rows read as one line each (order's goods value, ticket's total).
+    Rows without an order id are one ticket each, so they get an id of their own."""
+    for n, r in roles_by_table.items():
+        if n not in tables or re.search(r"nhap|import|ncc", fold(n)) or not {"order_date", "order_ts"} & set(r.values()):
+            continue
+        t = tables[n]
+        role_of = {v: c for c, v in r.items()}
+        amount = role_of.get("order_goods") or role_of.get("ticket_amount")
+        amount = amount or next((c for c in t.columns if "order_id" in role_of and _ORDER_GOODS_HEAD.match(header_key(c))), None)
+        if amount is None:
+            continue
+        roles = {**r, amount: "line_amount"}
+        if "order_id" not in role_of:
+            t = t.assign(**{"Mã phiếu": [f"R{i + 1}" for i in range(len(t))]})
+            roles["Mã phiếu"] = "order_id"
+        return {**tables, n: t}, {**roles_by_table, n: roles}, n
     return None
 
 
@@ -128,6 +227,10 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     """Return (sales_lines frame or None, one-paragraph description for the prompt)."""
     cands = [n for n, r in roles_by_table.items()
              if "line_amount" in r.values() and n in tables and not re.search(r"nhap|import|ncc", fold(n))]
+    level = None if cands else _order_level(tables, roles_by_table)
+    if level:
+        tables, roles_by_table, name = level
+        cands = [name]
     if not cands:
         return None, ("sales_lines(): not built for this shop (no table with line amounts). Compute sales from the T tables directly; "
                       "this does not make sales questions unanswerable.")
@@ -181,6 +284,14 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
                 sources.append(f"T['{n}'] (product_name)")
                 break
 
+    if "product_name" in out.columns:
+        alias = alias_map(tables, roles_by_table, out["product_name"], line_t)
+        if alias:
+            written, how = alias
+            out["product_name_written"] = out["product_name"]
+            out["product_name"] = out["product_name"].map(lambda v: written.get(fold(v), v) if isinstance(v, str) else v)
+            sources.append(f"product_name spelled out from {how}")
+
     if "product_name" in out.columns and "product_id" not in out.columns:  # get codes, so masters keyed by code join
         for n, r in roles_by_table.items():
             rc = _role_cols(r)
@@ -216,8 +327,31 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         M = P[add].assign(__k=kcol.values).drop_duplicates("__k").set_index("__k")
         k = out[key].astype(str).map(fold) if key == "product_name" else out[key]
         for c in add:
-            out[c] = k.map(M[c]).values
+            v = k.map(M[c])
+            out[c] = (v.fillna(False).astype(bool) if M[c].dtype == bool else v).values  # a product missing from the list has no flag
         sources.append(f"T['{n}'] (product attributes: {', '.join(add)})")
+
+    for n, r in roles_by_table.items():  # the customer's group, so a share needs no join that would drop walk-in orders
+        rc = _role_cols(r)
+        key = next((k for k in ("customer_id", "customer_name") if k in rc and k in out.columns), None)
+        if n == line_t or n not in tables or key is None or "order_id" in rc or "customer_group" in out.columns:
+            continue
+        group = next((c for c in tables[n].columns if _GROUP_HEAD.match(header_key(c))), None)
+        if group is not None:
+            G = tables[n].dropna(subset=[rc[key]]).drop_duplicates(rc[key]).set_index(rc[key])[group]
+            out["customer_group"] = out[key].map(G)
+            sources.append(f"T['{n}'] (customer_group from `{group}`)")
+
+    if "customer_group" not in out.columns:  # the group can sit on the order itself
+        group = next((c for c in out.columns if _GROUP_HEAD.match(header_key(c))), None)
+        if group is not None:
+            out["customer_group"] = out[group]
+
+    people = full_names(out, tables, roles_by_table, line_t)
+    if people:
+        sources.append(f"full staff names in {', '.join(people)}")
+    if level:
+        sources.append("one row per order or ticket: no line items, so no product or quantity")
 
     if "order_date" not in out.columns and "order_ts" in out.columns:
         out["order_date"] = out["order_ts"]
@@ -244,13 +378,15 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     if "qty_base" not in out.columns and "qty" in out.columns:
         out["qty_base"] = out["qty"]
         keys = {k: out[k] for k in ("product_id", "product_name") if k in out.columns}
-        conv = unit_factors(tables, roles_by_table, keys, line_t) if "unit" in out.columns and keys else None
+        conv = unit_factors(tables, roles_by_table, keys, line_t) if "unit" in out.columns and keys else []
         if conv:  # rulebook: a unit without a conversion row is the base unit (factor 1)
-            factors, kname, how = conv
-            f = [factors.get((fold(k), fold(u)), 1.0) if pd.notna(k) and pd.notna(u) else 1.0
-                 for k, u in zip(out[kname], out["unit"])]
-            out["qty_base"] = pd.to_numeric(out["qty"], errors="coerce") * pd.Series(f, index=out.index)
-            sources.append(f"qty_base = qty × unit factor ({how})")
+            f = pd.Series(1.0, index=out.index)
+            for factors, kname, how in reversed(conv):  # the first table wins a product both name
+                found = [factors.get((fold(k), fold(u))) if pd.notna(k) and pd.notna(u) else None
+                         for k, u in zip(out[kname], out["unit"])]
+                f = pd.Series(found, index=out.index, dtype=float).fillna(f)
+                sources.append(f"qty_base = qty × unit factor ({how})")
+            out["qty_base"] = pd.to_numeric(out["qty"], errors="coerce") * f
     if "order_id" in out.columns:
         bad_orders = set(out.loc[bad | neg, "order_id"].dropna())
         out["order_ok"] = ~out["order_id"].isin(bad_orders) & ~bad
@@ -269,13 +405,21 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         out["customer_name"] = out["customer_name"].map(strip_phone)
         cust = out["customer_id"].fillna(out["customer_name"]) if "customer_id" in out.columns else out["customer_name"]
         out["customer"] = cust.where(~out["walkin"])  # walk-ins have no customer key, so groupby drops them
+        if "customer_group" in out.columns:  # rulebook: a walk-in order belongs to no group, not even `lẻ`
+            out["customer_group"] = out["customer_group"].where(~out["walkin"])
+    out, n_split = split_toppings(out)
+    if n_split:
+        sources.append(f"{n_split} toppings written in a drink's cell moved to their own lines")
     out = with_entity_keys(out)
     if "customer_key" in out.columns:
         out["customer"] = out["customer_key"]
+    fee = drop_fee_items(out)
+    if fee:
+        sources.append(f"{fee} service-fee lines kept in revenue but not as products")
 
     order = ["order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base",
              "unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key", "customer_id",
-             "customer_name", "walkin"]
+             "customer_name", "customer_group", "walkin"]
     canon = [c for c in order if c in out.columns]
     extra = [c for c in out.columns if c not in canon and c != "order_date"]
     out = out[canon + extra].reset_index(drop=True)
@@ -292,6 +436,76 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     if flagged:
         desc += f"\nCheck before ranking customers: {', '.join(flagged)} hold(s) over 5% of orders, unusual for one customer."
     return out, desc
+
+
+_TOPPING = re.compile(r"\s+\+\s+(?:(\d+)\s+)?([^+()]+?)\s*\(\s*(\d[\d.,]*\s*(?:đ|k|vnđ|vnd)?)\s*\)", re.I)
+_FEE_ITEM = re.compile(r"^(phi (phuc vu|dich vu)|service charge)$")
+
+
+def split_toppings(out: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """'Latte (M) + 2 Trân châu đen (14.000đ)' -> a Latte line and a topping line of 2 portions, 14 000 đ.
+
+    Rulebook: a drink and the topping written in its cell are two items; the topping's quantity and money go to the
+    topping item (the same item as a topping sold on its own line), not to the drink. The number before the topping is
+    its portions, the money in brackets is already in the line amount."""
+    if "product_name" not in out.columns or "amount" not in out.columns:
+        return out, 0
+    names = out["product_name"]
+    cells = names.map(lambda v: list(_TOPPING.finditer(v)) if isinstance(v, str) else [])
+    has = cells.map(bool)
+    if not has.any():
+        return out, 0
+    from datamate.ingest.parsers import parse_number
+
+    plain = names[~has].dropna()
+    spelled = {fold(n): n for n in plain.unique()}
+    code_of = out.loc[~has].dropna(subset=["product_name"]).drop_duplicates("product_name").set_index("product_name").get("product_id")
+    out = out.copy()
+    extra = []
+    for i in out.index[has]:
+        name, found = out.at[i, "product_name"], cells[i]
+        if name[found[-1].end():].strip():  # text after the last topping: not this layout
+            continue
+        tops = []
+        for m in found:
+            n, top, money = int(m.group(1) or 1), m.group(2).strip(), parse_number(m.group(3))
+            money = int(money) if money is not None and float(money).is_integer() else money
+            if money is None:
+                break
+            tops.append((n, spelled.get(fold(f"topping {top}")) or spelled.get(fold(top)) or top, money))
+        if len(tops) != len(found):
+            continue
+        for n, top, money in tops:
+            row = out.loc[i].copy()
+            row["product_name"], row["amount"] = top, money
+            for c, v in (("qty", n), ("qty_base", n), ("unit_price", money / n), ("unit", None)):
+                if c in out.columns:
+                    row[c] = v
+            if "product_id" in out.columns:
+                row["product_id"] = code_of.get(top) if code_of is not None else None
+            extra.append(row)
+        out.at[i, "product_name"] = name[:found[0].start()].strip()
+        out.at[i, "amount"] = out.at[i, "amount"] - sum(money for _, _, money in tops)
+    if not extra:
+        return out, 0
+    return pd.concat([out, pd.DataFrame(extra)], ignore_index=True), len(extra)
+
+
+def drop_fee_items(out: pd.DataFrame) -> int:
+    """Rulebook: a 'Phí phục vụ' line is not an item (never ranked or counted) but stays in revenue. Its product name and
+    quantity are emptied in place, so rankings and item counts skip it; amount and `counted` are kept."""
+    if "product_name" not in out.columns:
+        return 0
+    fee = out["product_name"].map(lambda v: bool(_FEE_ITEM.match(fold(v).strip())) if isinstance(v, str) else False)
+    if not fee.any():
+        return 0
+    for c in ("qty", "qty_base", "unit_price"):
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").astype(float).mask(fee)
+    for c in ("product_name", "product_key", "product_id", "unit"):
+        if c in out.columns:
+            out[c] = out[c].astype("object").mask(fee)
+    return int(fee.sum())
 
 
 def build_orders(sales: pd.DataFrame) -> pd.DataFrame:

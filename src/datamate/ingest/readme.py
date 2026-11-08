@@ -10,6 +10,7 @@ from datamate.text import fold
 _SECTION = re.compile(r"^##\s+Cột trong\s+`([^`]+)`(?:\s*,\s*sheet\s+`([^`]+)`)?", re.M)
 _COL = re.compile(r"^- \*\*(.+?)\*\*:\s*(.+)$", re.M)
 _END = re.compile(r"có đến hết\s+(\d{1,2}/\d{1,2}/\d{4})")
+_UNIT_RULE = re.compile(r"\b1 ([^\s=:;,.]+(?: [^\s=:;,.]+)?) ?= ?(\d+(?:[.,]\d+)?) ?([^\s;,.]+)")
 _ORDER_KEY = re.compile(r"(?:các|những) dòng (?:có )?cùng \*\*([^*]+)\*\* là (?:một|1) (?:đơn|hoá đơn|hóa đơn|bill|phiếu)", re.I)
 
 
@@ -30,6 +31,21 @@ class Readme:
             if _file_matches(f, file) and (sh is None or sh == sheet):
                 out.update(cols)
         return out
+
+
+def unit_rules(text: str) -> list[tuple[str, str, float, str]]:
+    """(product, unit, factor, base unit) for conversions written in prose: `- Coca: 1 thùng = 24 lon` or
+    `- **Hàng theo bó**: A, B bán theo bó, 1 bó = 10 cây`."""
+    out = []
+    for line in text.splitlines():
+        m = _UNIT_RULE.search(line)
+        if m is None:
+            continue
+        head = re.sub(r"^\s*-\s*(\*\*[^*]*\*\*:?)?\s*", "", line[:m.start()]).strip(" :,")
+        names = head.split(" bán theo ")[0].split(",") if " bán theo " in head else [head]
+        factor = float(m.group(2).replace(",", "."))
+        out += [(n.strip(), m.group(1), factor, m.group(3)) for n in names if n.strip()]
+    return out
 
 
 def _file_matches(spec: str, file: str) -> bool:

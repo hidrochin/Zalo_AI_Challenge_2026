@@ -31,6 +31,22 @@ def outcomes(run_dir: Path, per_question: dict[str, int]) -> dict:
     return dict(c)
 
 
+def cost(run_dir: Path, ids: list[str]) -> dict:
+    """Seconds and model calls per question, from the logs. The logs hold no token counts."""
+    secs, calls = [], []
+    for i in ids:
+        log = Path(run_dir) / "logs" / f"{i}.json"
+        if log.exists():
+            rec = json.loads(log.read_text(encoding="utf-8"))
+            secs.append(rec.get("elapsed", 0.0))
+            calls.append(sum(len(s.get("attempts", [])) for s in rec.get("samples", [])))
+    if not secs:
+        return {}
+    secs.sort()
+    return {"seconds_mean": round(sum(secs) / len(secs), 2), "seconds_p95": secs[int(0.95 * (len(secs) - 1))],
+            "calls_mean": round(sum(calls) / len(calls), 3), "repaired": round(sum(c > 1 for c in calls) / len(calls), 4)}
+
+
 def compare(a_dir: Path, b_dir: Path, n_boot: int = 2000, seed: int = 0) -> dict:
     """Paired comparison on the questions both runs scored: transitions and a bootstrap 95% CI of ΔPA (b - a)."""
     a = json.loads((Path(a_dir) / "report.json").read_text(encoding="utf-8"))["per_question"]
@@ -47,4 +63,5 @@ def compare(a_dir: Path, b_dir: Path, n_boot: int = 2000, seed: int = 0) -> dict
         "ci95": [round(boots[int(0.025 * len(boots))], 4), round(boots[int(0.975 * len(boots)) - 1], 4)],
         "transitions": dict(trans.most_common()),
         "outcomes_a": outcomes(a_dir, {i: a[i] for i in ids}), "outcomes_b": outcomes(b_dir, {i: b[i] for i in ids}),
+        "cost_a": cost(a_dir, ids), "cost_b": cost(b_dir, ids),
     }

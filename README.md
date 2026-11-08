@@ -149,6 +149,7 @@ uv run datamate semantic-check                       # contract tests of dm prim
 
 uv run datamate sql-build --split train              # one DuckDB database per business -> cache/duckdb/ (also public_test)
 uv run datamate sql-check                            # contract tests of the SQL macros against train gold (no LLM)
+uv run datamate run --engine sql ...                 # the model writes one DuckDB SELECT instead of a pandas program
 ```
 
 **Run directory contents:** `submission.jsonl`, `logs/<id>.json` (prompt examples, every
@@ -187,13 +188,227 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
+## Status (2026-11-08): start here
+
+The same section is in the README of all three branches. Each branch has its own worktree. Nothing is pushed to GitHub.
+
+| direction | branch | worktree | head | last Kaggle run | head, offline replay |
+|---|---|---|---|---|---|
+| pandas codegen | `codegen` | `zalo_ai` | `07f9e96` (+ this docs commit) | `28acb2a`: train 0.8333, public LB **0.554** | train 0.8753, public 0.565 |
+| text-to-SQL | `text2sql` | `../zalo_ai_text2sql` | `3903322` (+ this docs commit) | `249b031` (`datamate-sql-run` v4): train 0.8727, dev120 0.8583, public LB **0.567** | train 0.8820, public 0.590 |
+| **combined** (both arms) | `combined` | `../zalo_ai_combined` | `6a77439` (+ this docs commit) | running, see below | train **0.9147**, public **0.651** |
+
+**How the numbers were measured.**
+- *Offline replay:* the model replies logged in the last Kaggle run go through the head code without calling the model. A question that would need a new reply counts as an abstain.
+- Scripts: `debug/replay_sql.py` (in the `text2sql` and `combined` worktrees) and `debug/replay_pandas.py` (in `codegen` and `combined`). Both are gitignored.
+- Controls: the old code replayed the same way reproduced Kaggle on 4000/4000 questions for SQL and 3998/4000 for pandas.
+- Prompt changes cannot be measured this way.
+- *Public numbers other than LB* are scored with `ground_truth.json` from `origin/main`, analysis only. Read it with `git show origin/main:ground_truth.json` into a scratch directory; never merge it.
+  - It agrees with the leaderboard within 0.01.
+  - It has no aliases, so names with phone numbers score as wrong when they are not.
+
+**Branch `combined`** (from `3903322`):
+- `272ca20` the codegen pandas fixes (dm `Period`, `rank_top`, mask lines, `mask_advice`, prompt example).
+- `04e4733` `datamate run --engine both`:
+  - one shared preprocess, then a SQL arm and a pandas arm per question;
+  - `vote.combine` returns the shared answer when the arms agree, the only answer when the other abstains, and abstains when they disagree. Tables are compared by rows only;
+  - each arm's samples and final are logged under `arms`.
+- `48a956c` `status__norm` on a view:
+  - the prompt line said every status has `<col>__norm`; the views call it `status`;
+  - the lint did not see `status__norm`;
+  - `status__norm` is now renamed to `status`.
+- `124709f` canon (`STORE_VERSION` 8):
+  - toppings written in a drink's cell become topping lines (`split_toppings`);
+  - `Phí phục vụ` lines keep their amount and `counted` but lose product name and quantity (`drop_fee_items`). Rulebook: still revenue, not an item.
+- `6a77439` `kaggle/fetch_output.py`: downloads every output file of a kernel, paged and in parallel.
+- Checks: 328 tests; `sql-check` and `semantic-check` 139/139; `facts-check` no misses.
+- Offline per arm on this branch: SQL train 0.8847 / public 0.598; pandas 0.8773 / 0.575; combined 0.9147 / 0.651.
+  - Combined minus SQL: train +0.030, CI [0.021, 0.039]; public +0.053, CI [0.027, 0.080].
+  - Public known industries 0.762, new industries 0.233.
+
+**Kaggle runs in flight.**
+- Pushed 2026-11-08 with `DM_ENGINE=both`.
+- Code = `124709f`: the `src` hash in `out/BUILD.txt` is `daa2a42`, and line 2 shows `3903322` plus the then-uncommitted files.
+
+| account | kernel | stage | dataset | expected on 2× T4 |
+|---|---|---|---|---|
+| `hydrochii` | `datamate-combined-public` | public | `datamate-bundle-combined` | about 3 h |
+| `hydrochiii` | `datamate-combined-train` | train | `datamate-bundle-combined` | about 5.5 h |
+
+```bash
+cd ../zalo_ai_combined
+uvx --with six kaggle kernels status hydrochii/datamate-combined-public
+uvx --with six --with requests --from kaggle python -I kaggle/fetch_output.py hydrochii/datamate-combined-public ../zalo_ai/outputs/kaggle/result_combined_public
+# second account: set the token for that command only, never print it
+KAGGLE_API_TOKEN="$(grep '^KAGGLE_API_TOKEN_2=' ../zalo_ai/.env | cut -d= -f2-)" uvx --with six --with requests --from kaggle python -I kaggle/fetch_output.py hydrochiii/datamate-combined-train ../zalo_ai/outputs/kaggle/result_combined_train
+```
+
+**Read this session.**
+- SQL v4 is saved in `outputs/kaggle/result_sql_v4`.
+- `dev120_oracle` scored 0.8083, which is −0.05 against dev120, so table selection is dropped (the team's rule).
+
+**Analysis for the mentor.**
+- `docs/PROPOSAL_V4.md` is in the `codegen` worktree, uncommitted; the user edits it. It covers both flows, 9 layers each, with input/output and table-level error examples.
+- `debug/analyze_v4.py` (gitignored) writes `outputs/analysis_v4/`.
+
+**Errors verified on the data, not fixed yet** (layer numbers as in the proposal):
+- **L3, grain:**
+  - The `orders` view keeps line attributes (`Loại`, `Nhóm hàng hóa`) from the order's first line only. dev_001: 82 instead of 229.
+  - Order-level money (`Khách trả`, `Tổng thanh toán`) sits on every line and gets summed per line. dev_011: ×2.
+- **L3, price changes:** no way to find the date of a price change. The model passes today to `price_effect` (−95% instead of −3.6). The date is in the price-history table.
+- **L3, new industries:** no definitions for installments, warranty tickets, mechanic commission, repair-shop revenue. New industries score 0.19.
+- **L3, `has_name`:** it matches substrings ('trà' catches 'trà sữa') and misses variants ('vá ruột' vs 'vá', 'vá xe').
+- **L2, debt in free text:** debt written only in a notes column (dev_008 `Note`: "nợ 79k, khách ck đủ rồi").
+- **L4, generic names:** a generic name resolves to one variant ("iPhone 13" → 'iPhone 13 128GB Trắng'). The pandas `find()[0]` does the same.
+- **L5, rulebook:** given in full, so definitions are missed ("thợ chăm chỉ nhất" = most working days, not most tickets).
+- **L6:** the model reads `raw_*` instead of the normalized view (mechanic nicknames in `raw_sosuaxe`), and does not recognize unanswerable questions (train 55 points lost).
+- **L8, checks:**
+  - The invariant "đồng implausibly small" fires on counts whose question mentions an amount.
+  - The contract fallback replaced a right order count (846) with monthly revenue, because the question said "doanh thu".
+
+**Next.**
+1. When the kernels end: download, check `BUILD.txt`, score.
+   - Compare each arm with the offline figures (SQL 0.885 / 0.598, pandas 0.877 / 0.575, combined 0.915 / 0.651). The arm answers are in the logs under `arms`.
+   - `datamate compare` against `result_sql_v4` and `result_codegen_v3`.
+2. The public submission is the user's call. Label scorings are limited.
+3. Fix the open errors above in that order: grain first, then price-change date, rulebook clause per question, and the two check rules. Measure each fix on train and public with the replays before a Kaggle run.
+4. Time: both arms take about 9.5 s per question on 2× T4 (SQL 4.3 + pandas 5.2). Measure on 2× 5090 against the 6-hour limit. Docker is still deferred. Deadline 2026-11-15.
+
+## Status (2026-11-07)
+
+**Results of the 2026-11-06 runs (code `4abdef9`, ingest 12).** Public SQL **0.356**. Train SQL 0.687 (2385 / 323 / 292), train pandas 0.669 (2299 / 291 / 410),
+ΔPA +0.018, CI [−0.006, 0.044], so G1 has no clear winner: the arms fail in different places. Team decision: keep both arms for now.
+Per-question train errors: `outputs/train_errors_sql_pandas.csv`.
+
+**Decisions.** Only train feeds the solution. Public structure read from READMEs and rulebooks may guide generic code, tested on train; public labels are for
+analysis and never enter the code or the image. The goal is generalization to private. Directions 2 (answer on agreement) and 10 (fine-tune) are pending.
+
+**Built on 2026-11-07.** Committed on both branches, shared code identical, `INGEST_VERSION` 18, `SEMANTIC_VERSION` 2026-11-07.2, `STORE_VERSION` 7.
+
+| item | where |
+|---|---|
+| Fact tables and helpers: debt, payments, trips, imports, profit, slow products, price effect, stock, lots | `facts.py`, `dm.py`, macros in `sql/store.py` |
+| Replay of the helpers on train gold | `datamate facts-check`, `eval/factcheck.py` |
+| Unit conversions written in README prose | `ingest/readme.py`, table `README.QuyDoi` |
+| Lookup sheets for abbreviated names, staff nicknames, customer group on the lines | `canon.py` |
+| Shops without line items: one row per order or ticket | `canon._order_level` |
+| Query lint: ×100 on rates, `count(*)` on lines, walk-ins in customer groups, `avg()` of prices | `sql/agent.lint` (`text2sql`) |
+| Pandas lint: a program that skips a helper or works at the wrong grain gets one rewrite, never a block | `agent/lint.py` (both branches) |
+| Model places fact columns of a shop the rules cannot read; the table's shape must fit the fact | `agent/columns.py` |
+| Table selection experiment: stage `dev120_oracle`, `--keep-tables assets/oracle_tables.json` | `text2sql` |
+| Contract answer used when the repair still disagrees; "% đơn bị huỷ" now matches the contract | `pipeline.py`, `eval/semantic.py` |
+
+**Measured.**
+
+| check | result |
+|---|---|
+| `facts-check` on train | 398 exact, 20 unanswerable right, 0 wrong, 26 not parsed, of 444 |
+| Macros vs helpers, 30 shops | no difference |
+| `semantic-check`, `sql-check` | 0 misses; `cancel_rate` 139/139 |
+| `fast-check` | 759/759, coverage 25.3% (public 7.4%) |
+| `eval-checks` | 0 false alarms on 2930 gold answers |
+| Tests | 279 on `codegen`, 312 on `text2sql` |
+| Local model, 32 train questions wrong before, SQL arm | before 0 / 23 / 9, after 19 / 8 / 5 |
+| Same 32 questions, pandas arm | before 7 / 12 / 13, after 22 / 4 / 6 |
+| Fact columns, 6 shops with no README and headers `Cột N`, 30 facts | rules alone 0, model 5 (1 of them with a wrong total) |
+| Same model call on 5 ordinary shops | 0 roles added |
+
+**Known gaps.** With all headers renamed most facts stay off even with `agent/columns.py`, so those questions fall back to the model. A question with no date ("từ hồi X lên giá") needs the price table. Debt in shops with only a `Còn nợ` snapshot has no helper. The
+full pipeline has not been run on all of train or on public yet.
+
+**Table selection.** JEV is TypeSafe AI's hosted decision model, not JEPA; no open weights, so it cannot go in the offline image. Rule set by the team: if `dev120_oracle` beats
+`dev120` by under 0.01 PA, drop table selection; if by much more, a small embedder of about 0.6B is enough.
+
+**Kaggle runs pushed on 2026-11-07.** SQL v3 mounted a stale dataset and ran old code `4abdef9` (train 0.6857), so it does not count for G1. `datamate-sql-run` v4 runs `249b031` and was `RUNNING` at handoff; save it to `outputs/kaggle/result_sql_v4` and check `out/BUILD.txt` first. Pandas v3 scored train 0.8333, public 0.554; the `dm` fixes made after that are on `codegen` only (see its README "Status (2026-11-07, evening)"). Two accounts, work split evenly, one arm each; each run takes 4.5 to 5 hours.
+
+| account | token in `.env` | arm | commit | kernel | dataset | stages |
+|---|---|---|---|---|---|---|
+| `hydrochii` | `KAGGLE_API_TOKEN` | SQL | `249b031` | `datamate-sql-run` v3 | `datamate-bundle-sql` | dev120, dev120_oracle, train, public |
+| `hydrochiii` | `KAGGLE_API_TOKEN_2` | pandas | `28acb2a` | `datamate-codegen-run` v1 | `datamate-bundle-pandas` | dev120, train, public |
+
+Output is available only once a kernel ends. Under zsh, run commands with several arguments in a variable from a bash script. For the second account, set the token for that command only and never print it:
+
+```bash
+uvx --with six kaggle kernels status hydrochii/datamate-sql-run
+KAGGLE_API_TOKEN="$(grep '^KAGGLE_API_TOKEN_2=' .env | cut -d= -f2-)" uvx --with six kaggle kernels status hydrochiii/datamate-codegen-run
+```
+
+To download: `kaggle kernels output --file-pattern` filters only inside the first page of files, so it misses per-question logs. Page through
+`list_kernel_session_output` instead (`ApiListKernelSessionOutputRequest` from `kagglesdk`, `page_size=200`, `user_name` set to the account, run with `uvx --with six --from kaggle python`) and fetch each file's `url`.
+Save to `outputs/kaggle/result_sql_v3` and `outputs/kaggle/result_codegen_v3`. First check that `out/BUILD.txt` names the commit above, since the push does not prove the kernel mounted the new dataset version.
+
+**Next:**
+1. Score `dev120`, `dev120_oracle`, `train` and `public`, and compare with the 2026-11-06 runs (train SQL 0.687, pandas 0.669, public 0.356).
+2. Apply the table selection rule above.
+3. Leave the public submission to the user: label scorings are limited to about 3 or 4 before the deadline, 2 used so far.
+4. Decide directions 2 and 10.
+
+**Open items.** `orders` on `biz_109` still takes a wrong total in the renamed-column test. Debt in shops with only a `Còn nợ` snapshot and "3 tháng liền" are not handled. `dev_010` debt_top is not investigated. `fast-check` and `mutate-check` exist only in the `codegen` CLI; the fast branch itself runs on both. `ground_truth.json` stays on `origin/main` until the user starts the Docker image, and must not be merged into a working branch.
+
+## Status (2026-11-06, night)
+
+**Branches.** Shared code (ingest, eval, rules, fast branch) is the same on both. Nothing here is pushed to GitHub.
+
+| branch | folder | head | holds |
+|---|---|---|---|
+| `codegen` | `zalo_ai/` | `6514434` | pandas arm and shared work |
+| `text2sql` | `../zalo_ai_text2sql/` (worktree) | `1d23b0f` | SQL arm, shared work, SQL extras |
+
+Everything is committed, at `INGEST_VERSION` 16 (`semantic-check` 766/824, 0 misses). The worktree has no `data/`; link it and
+run with `PYTHONPATH=src`. Do not commit `assets/BUILD.txt` on `codegen`. `pipeline.py` and `cli.py` differ between branches.
+
+**Kaggle runs.** All three use code `4abdef9` (hash `f0d7688`, ingest 12), older than the work below.
+
+| kernel | run | use |
+|---|---|---|
+| `datamate-sql-run` v2 | 3000 train, SQL | G1 |
+| `datamate-codegen-run` v2 | 3000 train, pandas | G1 |
+| `datamate-public-sql` v1 (second Kaggle account) | 1000 public, SQL | test submission, sent by hand |
+
+G1: download both train runs, then `datamate compare <pandas run> <sql run>`. Logs hold no token counts, so `compare` reports seconds and model calls.
+
+**SQL on dev120, Qwen3.5-9B:** PA **0.650** (95 / 17 / 8). No missing-fence errors; misses are meaning errors (×100 on `cancel_rate`,
+stock, debt). Logs: `outputs/kaggle/result_sql_dev120`.
+
+**Built today.** None of it has run end to end on questions with Qwen yet.
+
+| item | where | measured |
+|---|---|---|
+| Mutation set | `datamate mutate-check`, `eval/mutate.py` | table below |
+| Role checks by value | `ingest/trust.py` | 44 shops: 0 false `suspect` |
+| Column mapping by the model | `agent/columns.py`, saved as `<biz>.roles.json`; asked only when a needed role or the status is missing | 30 train shops, no mutation: 766/824, 551/551 roles |
+| Totals found by value | `_block_totals` in `ingest/business.py` | table below |
+| Rule gate | `rules.py` | Qwen: 8/8 changes caught, 2/2 rewordings kept (10 variants); train and public rulebooks need no model call |
+| Fast branch | `fast.py`, `--fast` (off by default), `datamate fast-check` | train 703/703 at 23.4% coverage; public coverage **7.0%**, target 30% not met; added clauses 7030/7030 sent to the model; gates 703/703 |
+| SQL extras (`text2sql` only) | `examples_sql.jsonl` read when present, LIMIT needs ORDER BY, store named by saved labels | `sql-check` 766/824, 0 misses (ingest 15; not rerun on 16) |
+
+Contracts kept (no mutation: 766/824 on 30 shops, 192/200 on 8 family shops):
+
+| mutation | rules, 30 shops | rules, 8 shops | Qwen, 8 shops | roles, Qwen |
+|---|---|---|---|---|
+| shuffle, formats, name spellings | 766 | | | |
+| no README | 565 | 148 | **192** | 152/163 |
+| new headers, README kept | 719 | 157 | **185** | 116/163 |
+| new headers, no README | 0 | 0 | **185** | 100/163 |
+| unknown status words | 44 | 6 | **192** | 163/163 |
+| subtotal rows, unknown label | **766** (526 before the fix) | | | |
+
+Contracts cover five simple metrics, so 100/163 roles matters more than 185/200 for product and unit questions. The rules and the fast-branch
+words were written on these shops, so these numbers can be optimistic.
+
+**Left out on purpose:** industry detection (READMEs rarely name the industry), deterministic unanswerable for `absent`, a generic transaction
+table, leave-family-out for the fast branch, W4 (needs the G1 winner).
+
+**Next:** G1 when both train runs finish; validate and submit the public file; rerun `sql-check` on ingest 16; run the new code on dev120 with Qwen;
+open the PRs; W4 on the winner.
+
 ## Status (2026-11-05, evening): direction change
 
 **Decisions after the mentor review**
 - Try text-to-SQL on DuckDB, plus a no-LLM fast branch, per-business rules, entity variants and more primitives.
   Plan: [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md). Started: [src/datamate/sql/](src/datamate/sql/) has entity
   dimensions and one DuckDB database per business, not yet wired into the pipeline. All 44 databases build, and the
-  macros match train gold on 766/766 computed contract questions. 182 tests pass.
+  macros match train gold on 766/766 computed contract questions. 212 tests pass.
 - 2026-11-06 (`INGEST_VERSION` 12, `SEMANTIC_VERSION` 2026-11-06.1): subtotal rows with a blank date cell are dropped (589
   rows: dev_008, biz_105); ingest warns about rows left without an order id; unknown walk-in labels are found by order
   share (`busy_customers`).
@@ -265,13 +480,14 @@ new primitive all added at once, so E1–E3 still have to separate them.
    E1, E5. Run each at full-train size on Kaggle. The repeat run for run-to-run variability isn't done yet.
 5. Decide with the mentor whether to fine-tune, and on Python or SQL (PROPOSAL_V3 §8). The proposal still says
    E0 is running.
-6. `kaggle/push.sh` has the `DM_KERNEL` change uncommitted.
 
 **Kaggle notes**
 - Fetch: `uvx --with six kaggle kernels output hydrochii/<kernel> -p <dir>`. It fetches one file at a time and
   can hang without an error (a socket in `CLOSE_WAIT`). If the file count stops growing, stop it and run several
   downloads in parallel with `--file-pattern 'logs/q_[0-3]'` etc. and `--page-size 200`.
 - `DM_KERNEL=<name> kaggle/push.sh update` pushes to another kernel, so a running one isn't replaced.
+- `DM_ENGINE=sql` runs the text-to-SQL engine. `DM_DATASET=<name>` gives a branch its own bundle (omit `update` the first
+  time, to create it). `BUILD.txt` in the outputs records the branch, commit and source hash of the run.
 - `DM_STAGES=public|dev120|train` picks the stages; the default is `public`.
 
 ## Status (2026-11-03, evening)

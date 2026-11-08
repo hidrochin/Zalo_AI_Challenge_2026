@@ -7,6 +7,7 @@ Everything lands in /kaggle/working/out (download with `kaggle kernels output`).
 """
 
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -23,7 +24,9 @@ MODELS = [  # first one that starts and answers sanely is used
     ("Qwen/Qwen3.5-9B", ["--dtype", "half", "--limit-mm-per-prompt", '{"image":0,"video":0}']),
     ("Qwen/Qwen3-14B-AWQ", ["--dtype", "half", "--quantization", "awq"]),
 ]
-STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | train (all 3000, scored); push.sh sets it
+STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | dev120_oracle | train (all 3000, scored); push.sh sets it
+ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql | both; push.sh sets it
+BUILD = os.environ.get("DM_BUILD", "")  # sha1 of assets/BUILD.txt at push time; push.sh sets it
 
 
 def sh(cmd, **kw):
@@ -46,6 +49,12 @@ def setup():
     else:  # Kaggle unpacks archives in datasets
         root = os.path.dirname(min(glob.glob("/kaggle/input/**/pyproject.toml", recursive=True), key=len))
         sh(f"cp -r {root} {PROJ} && find {PROJ} -name '._*' -delete")
+    sh(f"cp {PROJ}/assets/BUILD.txt {OUT}/ || true")
+    if BUILD:  # a stale dataset version mounts old code: stop before hours of GPU time
+        got = hashlib.sha1(open(f"{PROJ}/assets/BUILD.txt", "rb").read()).hexdigest()
+        if got != BUILD:
+            log(f"mounted build {got} is not the pushed build {BUILD}; stopping")
+            sys.exit(1)
     sh("pip install -q uv")
     sh(f"cd {PROJ} && uv sync --frozen --no-dev -q")
     sh(f"uv venv -q --python 3.12 {ENV} && uv pip install -q --python {ENV}/bin/python vllm")
@@ -121,7 +130,7 @@ def run_stage(name, args, n_expected, model, proc, max_restarts=3):
         log(f"stage {name}: start (attempt {attempt + 1})")
         t0 = time.time()
         p = subprocess.run(f"cd {PROJ} && uv run --no-sync datamate run --base-url http://localhost:{PORT}/v1 --model qwen "
-                           f"--thinking off --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} 2>&1 "
+                           f"--engine {ENGINE} --thinking off --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} 2>&1 "
                            f"| grep -v -e sitecustomize -e \"No module named 'wrapt'\" | tail -60",
                            shell=True, capture_output=True, text=True)
         print(p.stdout, flush=True)
@@ -161,6 +170,9 @@ def main():
     if "dev120" in STAGES:
         n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
         proc = run_stage("dev120", "--split train --ids-file assets/dev120.txt", n, model, proc)
+    if "dev120_oracle" in STAGES:  # table-selection experiment: only the tables a right answer used
+        n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
+        proc = run_stage("dev120_oracle", "--split train --ids-file assets/dev120.txt --keep-tables assets/oracle_tables.json", n, model, proc)
     if "train" in STAGES:
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -20")
         sales_lines_report("train")
