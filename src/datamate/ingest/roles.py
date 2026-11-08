@@ -130,7 +130,8 @@ def normalize_status(value) -> str | None:
     # word boundaries: "chuyen" (Đang vận chuyển, chuyển khoản) and "Huỳnh" contain "huy"
     if re.search(r"\bhuy\b|cancel|khong giao duoc|giao (that bai|khong thanh cong)|failed", s):
         return "huỷ"
-    if re.search(r"\btra (hang|lai|ve)\b|hoan (hang|tra)|return|doi tra|khach (mang )?tra|mang tra", s):
+    # 'kiểm tra lại tuần sau' is a check-up, not a return
+    if re.search(r"(?<!kiem )\btra (hang|lai|ve)\b|hoan (hang|tra)|return|doi tra|khach (mang )?tra|mang tra", s):
         return "trả hàng"
     if re.search(r"dang (giao|van chuyen|ship|gui)|chua giao|cho giao|shipping|delivering", s):
         return "đang giao"
