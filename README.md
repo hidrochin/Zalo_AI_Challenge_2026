@@ -188,7 +188,55 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
-## Status (2026-11-08, evening): start here
+## Status (2026-11-08, night): start here
+
+**Where to work.** Branch `text2sql`, in the worktree `../zalo_ai_text2sql`. Commit there and open pull requests to `main`;
+do not commit to `main` directly. `main` already has PR #4 (the evening merge). The `combined` worktree is removed;
+`codegen` and `combined` exist only as branches (local and on `origin`), as history.
+
+**Error analysis of the SQL arm on train** (combined run above, 219 questions not right). The reports are in `debug/`,
+which is gitignored, so they exist only in this worktree:
+- `debug/sql_train_errors_code.txt`: 49 questions (11 wrong, 38 abstain) caused by code. C1–C11 are listed with mechanism, proof and fix; C12–C13 are minor.
+- `debug/sql_train_errors_model.txt`: 139 questions (94 wrong, 45 abstain) caused by model behaviour, in 21 groups (M1–M21), each with possible directions. **The user decides these.**
+- `debug/sql_train_unanswerable.txt`: the 70 gold-unanswerable questions by reason, and what each layer did on the 42 that fail.
+  The reasons: 47 missing data, 16 period before the data, 6 subjective, 1 external knowledge.
+- Scripts and data: `debug/sql_err/`. `extract.py` and `groups.py` hold the classification and `write_files.py` writes the reports; `q.py` queries a train store.
+  `replay.py` replays the logged SQL replies through the current code. A question that would need a new reply counts as an abstain.
+
+**Code errors fixed** (commit on `text2sql`; `STORE_VERSION` 9). None is keyed on a question or a business (rule 4); each
+reads content (columns, headers, rulebook, wording):
+- C1 "tháng nào": a month answered as 'YYYY-MM-01' becomes 'YYYY-MM' (`postprocess.fit_month`). A 'YYYY-MM' cell stays a month.
+  Check messages name SQL types (`sql_terms`) instead of `answer_month()`.
+- C2 the pandas "helper" guard no longer refuses SQL unanswerables. It matched the word `sales_lines` and blocked 8 right ones.
+- C3 the "empty" guard accepts an unanswerable when a resolved period lies outside the sales data (`periods_outside`, as `revenue()` tests it).
+- C4 a type only the LLM rewrite expects no longer sends a right answer back (train net −11 before).
+- C5 0 from a bare `price_effect` / `count(*) from slow_products` call is an answer, not a filter bug.
+- C6 "Tết năm nay / năm trước" → `tet(year)` / `tet(year-1)`. Before, it gave next year's Tết plus `ytd()`.
+- C7 `facts._lots`: a lot list in base units wins over a hand-kept import book in import units, which only lends its price (biz_124 family).
+- C8 no `gross_profit()` advice for per-product margin in SQL. The macro is shop-wide.
+- C9 `fold_text` treats `_` as a space. `same_text` also ignores punctuation ('zalo_oa' = 'Zalo OA'). `has_name` keeps punctuation ('(M)').
+- C10 grouping `sales_lines` by product adds `product_name is not null`. A service-fee line is no item.
+- C11 the prompt's product-group example uses `same_text` (rulebook: exactly that group).
+- C12 no `not walkin` rewrite or lint in a shop without customers. C13 the 'hoạt chất' lint needs a non-empty name.
+- Checks: 334 tests pass; `sql-check` and `facts-check` have no misses.
+- Replay on train: 0.8893 → **0.9037**. Changes: 28 abstain→right, 8 wrong→right, 1 abstain→wrong (q_1a79715010d5, which the removed soft check used to stop).
+  C6, C11 and part of C1 need new replies, so a real run gains more or less than the replay.
+
+**Next**:
+1. The user picks directions from `debug/sql_train_errors_model.txt` and the unanswerable report. Candidates already
+   checked on gold:
+   - `base_unit` column (units sold);
+   - size from the name;
+   - `stock_split` macro (pandas has it, SQL not);
+   - `stock_value` macro;
+   - price-increase day from the price list;
+   - lint for `revenue()` with FROM/WHERE;
+   - gate on missing facts and on periods outside the data.
+2. Replay public with the labels (analysis only), then a Kaggle run of the SQL arm alone (`DM_ENGINE=sql`) for the real score and the time per question.
+3. Make `sql` the default engine. Docker is still deferred; deadline 2026-11-15.
+4. Still open from the evening list: count guard on the contract fallback, "mí đơn" normalization, new-industry definitions.
+
+## Status (2026-11-08, evening)
 
 **Decision (the user, 2026-11-08):** text-to-SQL only. The `codegen` (pandas) and `combined` (both arms) directions are
 dropped: the combination scored highest, but it doubles the pipeline, and SQL is ahead of pandas on train.
