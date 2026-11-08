@@ -20,6 +20,9 @@ _DATE = re.compile(r"(?<![\d/])(\d{1,2})[/.-](\d{1,2})[/.-]" + _Y + r"(?![\d/])"
 _DATE_NOYEAR = re.compile(r"(?:ngay|hom|bua|sang|chieu|toi)\s*(\d{1,2})[/.-](\d{1,2})(?![/.-]?\d)")
 _MONTH_Y = re.compile(r"\b(?:thang|th|t)\s*(\d{1,2})\s*(?:[/.-]|\s+nam\s+|\s+)" + _Y + r"\b")
 _MONTH_BARE_Y = re.compile(r"(?<![\d/.-])(\d{1,2})[/-](\d{4})\b")
+# 'N tháng liền nhau kết thúc ở tháng X': the N months up to and including X
+_RUN_ENDING = re.compile(r"\b(\d{1,2}) thang (?:lien nhau|lien tiep|lien ke|lien) (?:ket thuc|tinh (?:toi|den)) (?:o |vao |tai )?(?:thang|th|t)\s*(\d{1,2})"
+                         r"\s*(?:[/.-]|\s+nam\s+|\s+)" + _Y + r"\b")
 _MONTH = re.compile(r"\b(?:thang|th)\s*(\d{1,2})\b(?!\s*(?:[/.-]|nam)\s*\d)")
 _QUARTER = re.compile(r"\b(?:quy|q)\s*([1-4])\b(?:\s*(?:[/.-]|nam|\s)\s*(\d{4}))?")
 _YEAR = re.compile(r"\bnam\s+(\d{4})\b")
@@ -100,6 +103,13 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
             yy = int(m.group(2)) if m.group(2) else dm.quarter_auto(q).start.year
             add(m, f"quarter({yy}, {q})")
             anchor = anchor or f"quarter({yy}, {q})"
+        for m in _RUN_ENDING.finditer(f):
+            n, mm, yy = int(m.group(1)), int(m.group(2)), _year(m.group(3))
+            if free(m) and 1 <= n <= 12 and 1 <= mm <= 12 and 2000 < yy < 2100:
+                months = [((yy * 12 + mm - 1 - k) // 12, (yy * 12 + mm - 1 - k) % 12 + 1) for k in range(n - 1, -1, -1)]
+                add(m, f"month({months[0][0]}, {months[0][1]})")
+                for i, (y2, m2) in enumerate(months[1:], 1):
+                    out.append((m.start() + i, f"{m.group(0).strip()} (month {i + 1} of {n})", f"month({y2}, {m2})"))
         for rx in (_MONTH_Y, _MONTH_BARE_Y):
             for m in rx.finditer(f):
                 mm, yy = int(m.group(1)), _year(m.group(2))
