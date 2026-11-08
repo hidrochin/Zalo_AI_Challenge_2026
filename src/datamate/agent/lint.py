@@ -21,7 +21,7 @@ TERMS = {
     "delivery_trips": (("delivery_trips",), ("delivery_trips",), ("deliveries",)),
     "avg_import_price": (("avg_import_price",), ("avg_import_price",), ("imports",)),
     "gross_profit": (("gross_profit",), ("gross_profit",), ("cost_col",)),
-    "best_margin": (("gross_profit",), ("gross_profit",), ("cost_col",)),
+    "best_margin": (("gross_profit",), (), ("cost_col",)),  # SQL gross_profit() is one shop-wide number: it cannot rank items
     "net_profit": (("net_profit",), ("net_profit",), ("cost_col", "expenses")),
     "slow_products": (("slow_products",), ("slow_products",), ()),
     "price_effect": (("price_effect",), ("price_effect",), ()),
@@ -47,7 +47,7 @@ def term_advice(text: str, code: str, terms: frozenset[str], engine: str) -> str
     if group not in terms:
         return None
     names = TERMS[group][0 if engine == "pandas" else 1]
-    if any(re.search(rf"\b{n}\s*\(", code) for n in names):
+    if not names or any(re.search(rf"\b{n}\s*\(", code) for n in names):
         return None
     return (f"This question looks like the rulebook term behind {' / '.join(names)}, a tested definition. Call it instead of rebuilding the "
             "logic from raw tables, unless the question really asks for something else.")

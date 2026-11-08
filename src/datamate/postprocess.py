@@ -82,11 +82,22 @@ def expect_answer(rules_text: str, llm: dict | None = None) -> Expect:
     return e
 
 
+def fit_month(result: dict, e: Expect) -> dict:
+    """A month asked ('tháng nào') and answered by its first day ('2025-10-01', what date_trunc gives): that month."""
+    a = result.get("answer")
+    if e.month and result.get("type") == "date" and isinstance(a, str) and _DAY.match(a) and a.endswith("-01"):
+        return {**result, "answer": a[:7]}
+    return result
+
+
 def check_answer(result: dict, e: Expect) -> tuple[str | None, bool]:
     """(message for one re-check round, hard) when the executed answer contradicts the expectation, else (None, False).
-    A hard contradiction that survives the re-check makes the question abstain."""
+    A hard contradiction that survives the re-check makes the question abstain. A type that only the LLM rewrite expects
+    is no contradiction."""
     t, a = result.get("type"), result.get("answer")
     if t == "unanswerable":
+        return None, False
+    if e.type and t != e.type and not e.hard:  # only the rewrite's guess: asking again turned right answers wrong (train: net -11)
         return None, False
     if e.type and t != e.type:
         want = {"date": "answer_month(...) ('YYYY-MM')" if e.month else "answer_date(...) ('YYYY-MM-DD')"}.get(

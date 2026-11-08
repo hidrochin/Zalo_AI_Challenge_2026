@@ -127,8 +127,8 @@ select count(*) from (select customer from orders
 ```
 ```sql
 -- type: percent
--- tỉ trọng doanh thu nhóm: filter sales_lines on the source column listed in the schema card
-select round_half_up(100.0 * sum(amount) filter (has_name("Nhóm hàng", 'hải sản')) / sum(amount), 2)
+-- tỉ trọng doanh thu nhóm: filter sales_lines on the source column listed in the schema card; exactly that group ('trà' is not 'trà sữa')
+select round_half_up(100.0 * sum(amount) filter (same_text("Nhóm hàng", 'hải sản')) / sum(amount), 2)
 from sales_lines where counted and "date" between date '2025-03-01' and date '2025-03-31'
 ```
 ```sql
@@ -167,8 +167,8 @@ MACROS = {
     "round_half_up": "round_half_up(x, n): rounds half away from zero",
     "pct_change": "pct_change(new, old): percent change, NULL when old is 0",
     "has_name": "has_name(col, 'text'): col contains text, ignoring case and diacritics",
-    "same_text": "same_text(col, 'text'): col equals text, ignoring case and diacritics; use it for 'hoạt chất X' (a combination drug is another active ingredient), has_name would count it",
-    "fold_text": "fold_text(x): lowercase without diacritics",
+    "same_text": "same_text(col, 'text'): col equals text, ignoring case, diacritics and punctuation; use it for 'hoạt chất X' (a combination drug is another active ingredient) and 'nhóm X' (exactly that group), has_name would count more",
+    "fold_text": "fold_text(x): lowercase without diacritics, underscores as spaces",
     "shift_of": "shift_of(ts): 'sáng' for 06:00-13:59, 'chiều' for 14:00-21:59, else NULL",
     "as_of": "as_of(): today",
 }
@@ -179,6 +179,7 @@ _BLOCK = re.compile(r"```(?:sql|duckdb)?\s*\n(.*?)```", re.S | re.I)
 _OPEN_BLOCK = re.compile(r"```(?:sql|duckdb)?\s*\n(.*)$", re.S | re.I)
 _BARE_QUERY = re.compile(r"^\s*--\s*type\s*:.*?(?=```|\Z)", re.S | re.M)  # the model left out the opening fence
 _HINT = re.compile(r'^- "(.*)" -> .*? = (.+?)\.\.(\d{4}-\d{2}-\d{2})(.*)$')
+_MONTH_TEXT = re.compile(r"^\d{4}-\d{2}$")
 _SCALARS = {"money", "count", "number", "percent", "boolean"}
 _ROW_VALUES = {"string", "date", "month"}
 
@@ -252,6 +253,19 @@ def sql_question_part(question: str, as_of: str, examples: list[dict], hints: li
     return out
 
 
+def hint_periods(hints: list[str]) -> list[tuple[str | None, str]]:
+    """(start, end) of every resolved period; start None = from the start of the data."""
+    return [(None if m.group(2).startswith("start") else m.group(2), m.group(3)) for h in hints for m in [_HINT.match(h)] if m]
+
+
+def periods_outside(periods: list[tuple[str | None, str]], span: tuple[str, str] | None, as_of: str) -> bool:
+    """Some period the question names lies entirely outside the data: the rulebook's unanswerable, tested as revenue() does."""
+    if not span:
+        return False
+    lo, hi = span
+    return any(b < lo or (a is not None and (a > hi or a > as_of)) for a, b in periods)
+
+
 def sql_shadow(text: str, hints: list[str]) -> tuple[str, str, str] | None:
     """(question, start, end) when the question names exactly one dated period, for the macro cross-check."""
     spans = [m.groups() for h in hints for m in [_HINT.match(h)] if m]
@@ -304,6 +318,8 @@ def to_answer(kind: str, columns: list[str], rows: list[tuple]) -> dict:
             return dm.answer_bool(v)
         if kind == "string":
             return dm.answer_string(v)
+        if isinstance(v, str) and _MONTH_TEXT.match(v.strip()):  # 'YYYY-MM' stays a month whatever the type line says
+            v, kind = v.strip() + "-01", "month"
         return dm.answer_date(pd.Timestamp(v)) if kind == "date" else dm.answer_month(pd.Timestamp(v))
     if kind == "list":
         if len(columns) == 1:
@@ -343,7 +359,8 @@ _LINTS = [
                                                                          "Count orders in the `orders` view, or use count(distinct order_id)."),
     (re.compile(r"\b(having|order\s+by)\s+count\(\s*\*\s*\)", re.I), None),
     (re.compile(r"\bavg\(\s*\"?(gi[aá] nh[aậ]p|dongianhap|đơn giá|don gia)", re.I), "A mean of prices is not 'giá nhập bình quân': use avg_import_price(), weighted by quantity."),
-    (re.compile(r"has_name\(\s*\"?(ho[aạ]t ch[aấ]t|thanhphanchinh|th[aà]nh ph[aầ]n)", re.I), "'Hoạt chất X' means exactly X: use same_text(), has_name also counts combination drugs."),
+    (re.compile(r"has_name\(\s*\"?(ho[aạ]t ch[aấ]t|thanhphanchinh|th[aà]nh ph[aầ]n)\"?\s*,\s*'[^']+'", re.I),
+     "'Hoạt chất X' means exactly X: use same_text(), has_name also counts combination drugs."),
 ]
 _FROM_LINES = re.compile(r"\bfrom\s+sales_lines\b", re.I)
 _FROM_ORDERS = re.compile(r"\bcount\(\s*\*\s*\)\s+from\s+orders\b", re.I)
@@ -352,8 +369,8 @@ _BY_CUSTOMER = re.compile(r"\bgroup\s+by\s+\"?customer(_key|_name)?\b", re.I)
 _NO_WALKIN = re.compile(r"\bwalkin\b|\bcustomer(_key)?\"?\s+is\s+not\s+null\b", re.I)
 
 
-def lint(code: str) -> str | None:
-    """Why this query shape is wrong, or None."""
+def lint(code: str, walkin: bool = True) -> str | None:
+    """Why this query shape is wrong, or None. walkin: the views have the `walkin` column (the shop records customers)."""
     for rx, message in _LINTS:
         if rx.search(code):
             if message:
@@ -361,7 +378,7 @@ def lint(code: str) -> str | None:
             if _FROM_LINES.search(code):
                 return ("sales_lines has one row per product line, so count(*) in HAVING or ORDER BY counts lines, not orders. "
                         "Use count(distinct order_id), or group the `orders` view.")
-    if _BY_CUSTOMER.search(code) and not _NO_WALKIN.search(code):
+    if walkin and _BY_CUSTOMER.search(code) and not _NO_WALKIN.search(code):
         return "Walk-in orders share an empty customer and are not a customer: add `not walkin` before grouping by customer."
     if _FROM_ORDERS.search(code) and not _STATUS_WORDS.search(code):
         return "orders holds every status. Add `counted` to count orders that are not cancelled or returned, as the rulebook's Số đơn says."
@@ -386,14 +403,32 @@ def _depths(code: str) -> list[int]:
 
 _WORD = re.compile(r"\b(select|from|where|join)\b", re.I)
 _WALKIN_SOURCE = re.compile(r"from\s+(sales_lines|orders|debt_by_order\s*\([^()]*\))(\s+(as\s+)?\w+)?(\s+where\b|\s*$)", re.I)
+_LINES_SOURCE = re.compile(r"from\s+sales_lines(\s+(as\s+)?\w+)?(\s+where\b|\s*$)", re.I)
+_BY_PRODUCT = re.compile(r"\bgroup\s+by\s+\"?product(_key|_name|_id)?\b", re.I)
+_NAMED_PRODUCT = re.compile(r"\"?\bproduct_name\"?\s+is\s+not\s+null\b", re.I)
 
 
-def add_not_walkin(code: str) -> str:
+def add_not_walkin(code: str, walkin: bool = True) -> str:
     """`not walkin` added to the SELECT that groups by customer, when its one source has the column; else the code unchanged
-    and lint() asks the model. Walk-ins are no customer (rulebook), so the rewrite cannot change a right answer."""
+    and lint() asks the model. Walk-ins are no customer (rulebook), so the rewrite cannot change a right answer.
+    walkin=False: the views have no such column (the shop records no customer), so nothing is added."""
     m = _BY_CUSTOMER.search(code)
-    if m is None or _NO_WALKIN.search(code):
+    if not walkin or m is None or _NO_WALKIN.search(code):
         return code
+    return _add_where(code, m, "not walkin", _WALKIN_SOURCE)
+
+
+def add_named_products(code: str) -> str:
+    """`product_name is not null` added to the SELECT that groups sales_lines by product. Lines without a product (a service
+    fee kept in revenue) are no item and are never ranked or counted (rulebook), so the rewrite cannot change a right answer."""
+    m = _BY_PRODUCT.search(code)
+    if m is None or _NAMED_PRODUCT.search(code):
+        return code
+    return _add_where(code, m, "product_name is not null", _LINES_SOURCE)
+
+
+def _add_where(code: str, m: re.Match, cond: str, source: re.Pattern) -> str:
+    """`cond` added to the WHERE of the SELECT whose GROUP BY `m` matched, when that SELECT reads one source matching `source`."""
     depth = _depths(code)
     d = depth[m.start()]
     words = [w for w in _WORD.finditer(code, 0, m.start()) if depth[w.start()] == d]
@@ -407,13 +442,13 @@ def add_not_walkin(code: str) -> str:
     frm = scope[kinds.index("from")]
     if "where" in kinds:
         where = scope[kinds.index("where")]
-        if not _WALKIN_SOURCE.match(code[frm.start():where.end()]):
+        if not source.match(code[frm.start():where.end()]):
             return code
-        cond = code[where.end():m.start()].strip()
-        return f"{code[:where.end()]} ({cond}) and not walkin\n{code[m.start():]}"
-    if not _WALKIN_SOURCE.match(code[frm.start():m.start()].rstrip()):
+        old = code[where.end():m.start()].strip()
+        return f"{code[:where.end()]} ({old}) and {cond}\n{code[m.start():]}"
+    if not source.match(code[frm.start():m.start()].rstrip()):
         return code
-    return f"{code[:m.start()].rstrip()} where not walkin\n{code[m.start():]}"
+    return f"{code[:m.start()].rstrip()} where {cond}\n{code[m.start():]}"
 
 
 # The model names an entity key (or the normalized status) the way other tables do; the view calls it otherwise. Rebound only to a column DuckDB offers.
@@ -443,8 +478,20 @@ def _body(code: str) -> str:
     return "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("--"))
 
 
-def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, timeout: float = 30.0) -> dict:
-    """Same record as sandbox._execute, for a reply taken by extract_sql."""
+_MACRO_ONLY = [re.compile(r"select\s+(round_half_up\(\s*)?price_effect\([^()]*\)(\s*,\s*\d+\s*\))?", re.I),
+               re.compile(r"select\s+count\(\s*\*\s*\)\s+from\s+slow_products\([^()]*\)", re.I)]
+
+
+def macro_only(code: str) -> bool:
+    """The query only reads a macro whose 0 is a real answer (no change in quantity, no slow mover): tested on gold answers."""
+    body = re.sub(r"'[^']*'", "''", _body(code)).strip().rstrip(";").strip()
+    return any(rx.fullmatch(body) for rx in _MACRO_ONLY)
+
+
+def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, timeout: float = 30.0,
+            periods: list[tuple[str | None, str]] = (), span: tuple[str, str] | None = None, walkin: bool = True) -> dict:
+    """Same record as sandbox._execute, for a reply taken by extract_sql.
+    periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`."""
     m = _UNANSWERABLE.match(code)
     preview, written = "", code
     if m:
@@ -456,8 +503,8 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         try:
             if _LIMIT.search(code) and not _ORDER_BY.search(code) and not _RANKED_SOURCE.match(_body(code)):
                 raise AnswerShape("LIMIT without ORDER BY picks rows at random: order by the criterion, then by code.")
-            code = add_not_walkin(code)
-            why = lint(code)
+            code = add_named_products(add_not_walkin(code, walkin))
+            why = lint(code, walkin)
             if why:
                 raise AnswerShape(why)
             set_as_of(con, as_of)
@@ -474,7 +521,8 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
             result = to_answer(declared.group(1).lower(), columns, rows)
         except (duckdb.Error, ValueError, TypeError) as e:  # ValueError covers SqlRejected and AnswerShape
             return {"result": None, "error": str(e)[:1500], "stdout": preview, **_ran(written, code)}
-    error, warning = check_result(result, names)
+    error, warning = check_result(result, names, helper_guard=False, outside=periods_outside(list(periods), span, as_of),
+                                  zero_ok=macro_only(code))
     contract = None
     if error is None and warning is None:
         warning, contract = _shadow_warning(con, result, shadow, timeout)
@@ -496,14 +544,18 @@ class SqlPool:
         self._free: queue.Queue = queue.Queue()
         for _ in range(max(1, n)):
             self._free.put(self.base.cursor())
+        cols = {r[0] for r in self.base.execute("select column_name from duckdb_columns() where table_name = 'sales_all'").fetchall()}
+        self.walkin = "walkin" in cols
+        lo, hi = self.base.execute('select min("date"), max("date") from sales_all').fetchone() if cols else (None, None)
+        self.span = (lo.isoformat(), hi.isoformat()) if lo is not None else None
 
     def macros(self) -> list[str]:
         return [r[0] for r in self.base.execute("select distinct function_name from duckdb_functions() where not internal").fetchall()]
 
-    def run(self, code: str, as_of: str, shadow=None) -> dict:
+    def run(self, code: str, as_of: str, shadow=None, periods: list[tuple[str | None, str]] = ()) -> dict:
         con = self._free.get()
         try:
-            return execute(con, code, str(as_of), self.names, shadow, self.timeout)
+            return execute(con, code, str(as_of), self.names, shadow, self.timeout, periods, self.span, self.walkin)
         finally:
             self._free.put(con)
 
@@ -511,13 +563,30 @@ class SqlPool:
         self.base.close()
 
 
+_PANDAS_CALL = re.compile(r"\b(answer_(\w+)|unanswerable|in_period)\((?:[^()]|\([^()]*\))*\)( -> )?")
+_SQL_TERM = {"number": "money/count/number", "percent": "percent", "string": "string", "date": "date", "month": "month",
+             "bool": "boolean", "list": "list", "table": "table"}
+
+
+def sql_terms(msg: str) -> str:
+    """The shared answer checks name the pandas helpers (answer_month(...), unanswerable(...)): say it the SQL way, since a
+    model told to 'answer with answer_month()' calls a function DuckDB does not have."""
+    def one(m: re.Match) -> str:
+        if m.group(1) == "unanswerable":
+            return "an `UNANSWERABLE: <reason>` line"
+        if m.group(1) == "in_period":
+            return 'a "date" filter'
+        return f"`-- type: {_SQL_TERM.get(m.group(2), m.group(2))}`" + (" with the value " if m.group(3) else "")
+    return _PANDAS_CALL.sub(one, msg)
+
+
 def sql_repair_message(exec_out: dict) -> str:
-    msg = f"Your query failed:\n{exec_out.get('error')}"
+    msg = f"Your query failed:\n{sql_terms(str(exec_out.get('error')))}"
     if exec_out.get("stdout"):
         msg += f"\n\nfirst rows: {exec_out['stdout'][-500:]}"
     return msg + "\n\nFix it and return the full corrected query in one ```sql block, with its `-- type:` line."
 
 
 def sql_check_message(warning: str) -> str:
-    return (f"Your query ran, but a sanity check flagged the answer:\n{warning}\n\n"
+    return (f"Your query ran, but a sanity check flagged the answer:\n{sql_terms(warning)}\n\n"
             "Return the full query again in one ```sql block (corrected, or unchanged if the answer is right).")

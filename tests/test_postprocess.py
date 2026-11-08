@@ -1,6 +1,6 @@
 import pytest
 
-from datamate.postprocess import check_answer, date_window, expect_answer, finalize, validate_submission
+from datamate.postprocess import check_answer, date_window, expect_answer, finalize, fit_month, validate_submission
 
 
 @pytest.mark.parametrize("q,typ,month,k", [
@@ -34,7 +34,20 @@ def test_check_answer():
     assert check_answer({"type": "list", "answer": ["a", "b"]}, e) == (None, False)
     assert check_answer({"type": "unanswerable", "reason": "x"}, e) == (None, False)
     e = expect_answer("Doanh thu tháng 5/2026 có tăng không?", {"answer_type": "boolean"})
-    assert check_answer({"type": "number", "answer": 3}, e)[1] is False  # the rewrite's guess is soft
+    assert check_answer({"type": "number", "answer": 3}, e) == (None, False)  # the rewrite's guess alone asks nothing
+
+
+def test_rewrite_type_guess_does_not_send_a_right_answer_back():
+    e = expect_answer("Cho tôi 3 khách mua nhiều tiền nhất tháng 9/2025.", {"answer_type": "table", "top_k": 3})
+    assert check_answer({"type": "list", "answer": ["An", "Bình", "Chi"]}, e) == (None, False)
+
+
+def test_a_month_answered_by_its_first_day_is_that_month():
+    e = expect_answer("Từ tháng 8/2025 tới tháng 10/2025, tháng nào cửa hàng bán được nhiều tiền nhất?")
+    assert fit_month({"type": "date", "answer": "2025-10-01"}, e) == {"type": "date", "answer": "2025-10"}
+    assert fit_month({"type": "date", "answer": "2025-12-02"}, e)["answer"] == "2025-12-02"  # a day is no month: the check asks again
+    day = expect_answer("Tháng 10/2025 ngày nào doanh thu cao nhất?")
+    assert fit_month({"type": "date", "answer": "2025-10-01"}, day)["answer"] == "2025-10-01"
 
 
 def test_date_window():

@@ -22,14 +22,18 @@ from datamate.ingest.business import INGEST_VERSION, roles_path, status_path
 from datamate.sql.dims import entity_dims
 from datamate.text import fold
 
-STORE_VERSION = 8
+STORE_VERSION = 9
 
 BASE_MACROS = [
     "create macro round_half_up(x, n) as cast(round(cast(x as decimal(38, 10)), n) as double)",
     "create macro as_of() as getvariable('as_of')",
-    "create macro fold_text(x) as replace(strip_accents(lower(cast(x as varchar))), 'đ', 'd')",
+    # lowercase, no diacritics, '_' a space ('zalo_oa' = 'Zalo OA'); punctuation stays, it can be the point of a search ('(M)')
+    """create macro fold_text(x) as trim(regexp_replace(strip_accents(replace(lower(cast(x as varchar)), 'đ', 'd')),
+       '[_\\s]+', ' ', 'g'))""",
     "create macro has_name(col, text) as contains(fold_text(col), fold_text(text))",
-    "create macro same_text(col, text) as fold_text(col) = fold_text(text)",
+    # equality also ignores punctuation, as the scorer compares names ('Thu hộ (COD)' = 'thu ho cod')
+    """create macro same_text(col, text) as trim(regexp_replace(fold_text(col), '[^a-z0-9]+', ' ', 'g'))
+       = trim(regexp_replace(fold_text(text), '[^a-z0-9]+', ' ', 'g'))""",
     "create macro pct_change(new, old) as (new - old) * 100.0 / nullif(old, 0)",
     """create macro shift_of(ts) as case when hour(ts) between 6 and 13 then 'sáng'
        when hour(ts) between 14 and 21 then 'chiều' end""",

@@ -29,12 +29,12 @@ from datamate.fast import fast_answer
 from datamate.ingest import load_business, load_calendar
 from datamate.ingest.trust import assess
 from datamate.ingest.schema_card import schema_card
-from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, invariants
+from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, fit_month, invariants
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
 from datamate.rules import rule_gate, rule_note
-from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, sql_card, sql_check_message, sql_question_part,
-                                sql_repair_message, sql_shadow)
+from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, hint_periods, sql_card, sql_check_message,
+                                sql_question_part, sql_repair_message, sql_shadow)
 from datamate.sql.store import STORE_VERSION, ensure_store
 
 
@@ -228,6 +228,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
     hints = time_hints(text, q["as_of_date"], cal)
     expect.window = date_window(text, hints)
     shadow = None if is_gated(text, off) else engine.shadow(text, hints)
+    extra = {"periods": hint_periods(hints)} if cfg.engine == "sql" else {}  # a period outside the data makes 'no rows' a reason
     user_parts = [biz_part, engine.question_part(q["question"], q["as_of_date"], examples, hints, norm)]
     samples = []
     for s in range(cfg.samples):
@@ -254,8 +255,9 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
             elif advice:  # one rewrite, never a block: the second attempt runs as written
                 out = {"result": None, "error": advice, "stdout": ""}
             else:
-                out = pool.run(code, q["as_of_date"], shadow)
+                out = pool.run(code, q["as_of_date"], shadow, **extra)
             if out["error"] is None and out["result"] is not None:
+                out["result"] = fit_month(out["result"], expect)
                 why, hard = check_answer(out["result"], expect)
                 broken = invariants(out["result"], text, expect.window)  # never fire on train gold: hard
                 if broken:

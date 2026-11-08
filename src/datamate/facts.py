@@ -223,8 +223,14 @@ def _stock(biz: Business, lookup: tuple[dict, dict]) -> tuple[pd.DataFrame | Non
     return card, report
 
 
+_BASE_QTY = re.compile(r"co ban|quy doi|quy ra le")
+
+
 def _lots(biz: Business, lookup: tuple[dict, dict]) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
-    lots = sold = None
+    """Lot sales count base units, so the lot list must too: a list kept in base units wins over one in import units
+    (a hand-kept import book with lot and expiry), which then only lends its price, brought to the base unit."""
+    sold = None
+    found: list[tuple[pd.DataFrame, bool]] = []  # (lots, quantity in base units)
     for name, t in biz.tables.items():
         ti = biz.info[name]
         lot = pick(t, ti, "lot_id", r"^so lo", r"^(lo|ma lo|so lo)$")
@@ -245,7 +251,19 @@ def _lots(biz: Business, lookup: tuple[dict, dict]) -> tuple[pd.DataFrame | None
                 code = next((c for c in t.columns if re.search(r"^ma (mon|hang|hh|sp|mat hang)", header_key(c))), None)
                 names = t[code].map(lambda v: lookup[0].get(str(v).strip())) if code else None
             if q and names is not None:
-                lots = pd.DataFrame({"lot": t[lot], "product_name": names, "expiry": _day(t[expiry]), "qty": _money(t[q]), "price": _money(t[price]) if price else None})
+                found.append((pd.DataFrame({"lot": t[lot], "product_name": names, "expiry": _day(t[expiry]), "qty": _money(t[q]),
+                                            "price": _money(t[price]) if price else None}), bool(_BASE_QTY.search(header_key(q)))))
+    if not found:
+        return None, sold
+    base = [f for f, b in found if b]
+    if not base:
+        return found[-1][0], sold
+    lots = base[0]
+    if lots["price"].isna().all():
+        other = next((f for f, b in found if not b and f["price"].notna().any()), None)
+        if other is not None:  # import-unit price × import-unit qty = the lot's cost, per base unit
+            cost = (other["qty"] * other["price"]).groupby(other["lot"].astype(str)).sum()
+            lots = lots.assign(price=lots["lot"].astype(str).map(cost) / lots["qty"].where(lots["qty"] > 0))
     return lots, sold
 
 

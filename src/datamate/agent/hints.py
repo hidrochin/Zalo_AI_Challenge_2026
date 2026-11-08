@@ -27,6 +27,7 @@ _LAST_N = re.compile(r"\b(\d{1,3})\s*ngay\s*(?:gan (?:day|nhat)|qua|vua qua|vua 
 _FROM_D = re.compile(r"\b(\d{1,3})\s*ngay\s*(?:ke tu|tinh tu|bat dau tu|tu)\s*(?:ngay\s*)?(?:tang gia\s*)?")
 _BEFORE_D = re.compile(r"\b(\d{1,3})\s*ngay\s*(?:ngay\s*)?(?:truoc do|lien truoc|ngay truoc|truoc|ngay lien truoc)\b")
 _TET = re.compile(r"\btet\b(?:\s*(?:nam|am lich|nguyen dan)?\s*(\d{4}))?")
+_TET_REL = re.compile(r"\btet\s+(?:nam\s+)?(nay|truoc|ngoai|roi|trc|vua roi|vua qua)\b")  # Tết of this year / of last year
 
 RELATIVE = [
     (re.compile(r"\b(hom nay|bua nay|ngay hom nay|hnay)\b"), "today()"),
@@ -116,6 +117,9 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
         for m in _LAST_N.finditer(f):
             if free(m):
                 add(m, f"last_n_days({int(m.group(1))})")
+        for m in _TET_REL.finditer(f):  # before 'năm nay' -> ytd(): "Tết năm nay" is one Tết, not the year so far
+            if free(m):
+                add(m, f"tet({t.year if m.group(1) == 'nay' else t.year - 1})")
         for m in _TET.finditer(f):
             if free(m):
                 yy = int(m.group(1)) if m.group(1) else (t.year if t.month <= 3 else t.year + 1)
