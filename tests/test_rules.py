@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from datamate.eval.semantic import is_gated
-from datamate.rules import DEPENDS, TESTED, parse_clauses, rule_gate, rule_note, unchanged
+from datamate.rules import DEPENDS, TESTED, params_off, parse_clauses, rule_gate, rule_note, rule_params, unchanged
 
 BOOK = "".join(f"| {k} | {v[0]} |\n" for k, v in TESTED.items())
 
@@ -25,11 +25,34 @@ def test_formatting_is_not_a_change(tmp_path):
     assert rule_gate(book, tmp_path / "r.json", boom) == frozenset()
 
 
-@pytest.mark.parametrize("file", ["data/train/rulebook.md", "data/public_test/rulebook.md"])
-def test_shipped_rulebooks_keep_every_definition(file, tmp_path):
-    if not Path(file).exists():
+def test_train_rulebook_keeps_every_definition(tmp_path):
+    file = Path("data/train/rulebook.md")
+    if not file.exists():
         pytest.skip("no data")
-    assert rule_gate(Path(file).read_text(encoding="utf-8"), tmp_path / "r.json", boom) == frozenset()
+    assert rule_gate(file.read_text(encoding="utf-8"), tmp_path / "r.json", boom) == frozenset()
+
+
+def test_public_rulebook_drops_the_macros_of_its_removed_rules(tmp_path):
+    file = Path("data/public_test/rulebook.md")
+    if not file.exists():
+        pytest.skip("no data")
+    asked = []
+
+    def gen(system, parts):
+        asked.append(parts[0])
+        return '{"changed": false}'
+
+    off = rule_gate(file.read_text(encoding="utf-8"), tmp_path / "r.json", gen)
+    assert off == {"price_on", "avg_import_price", "stock_split"}  # 'Giá bán X ngày D', 'Giá nhập bình quân…', 'Tồn theo đơn vị lớn'
+    assert asked == ["Rule: Giao nhiều đợt"]  # reworded: asked once whether a number can differ
+
+
+def test_rule_params_read_the_shift_hours():
+    book = "| Ca sáng, ca chiều | theo giờ tạo đơn: ca sáng 06:00–13:59, ca chiều 14:00–21:59 |"
+    assert rule_params(book) == {"shift_morning_from": 6, "shift_morning_to": 13, "shift_afternoon_from": 14, "shift_afternoon_to": 21}
+    assert rule_params(book.replace("06:00–13:59", "7h–12h"))["shift_morning_to"] == 11  # ends before 12:00
+    assert params_off(rule_params(book)) == frozenset()
+    assert params_off(rule_params("| Ca sáng, ca chiều | buổi sáng và buổi chiều |")) == {"shift_revenue", "shift_orders"}
 
 
 def test_changed_clause_turns_off_what_depends_on_it(tmp_path):

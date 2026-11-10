@@ -103,6 +103,24 @@ duoc trong mot cac nhung may ha nhi a the vay nhe nha oi ta e em anh chi xem giu
 tinh hom nay qua nao gi ai con het den tu khong bi o sao lam roi luon di voi tai ve mat san pham""".split())
 
 
+# Normalization fixes how a question is written, never what it asks: words that carry the business logic (which shift,
+# every item or each item, whole or loose units, bounds, status, size) must survive the rewrite, or it is dropped.
+_MARKERS = [re.compile(p) for p in (
+    r"\bca (sang|chieu|toi|trua|dem)\b", r"\b(chan|nguyen)\b", r"\ble\b", r"\bsize [sml]\b", r"\btro (len|xuong)\b",
+    r"\b(tren|duoi|it nhat|toi thieu|toi da|vuot)\b", r"\b(huy|tra hang|tra lai|doi tra)\b", r"\b(khong tinh|ngoai tru|tru)\b",
+    r"\b(rieng|tung|moi loai|moi mon)\b", r"\b(gop|cong|tong)\b", r"\b(truoc|sau)\b", r"\b(dau|cuoi)\b",
+)]
+_ACCENTED = ("mọi", "mỗi")  # the same word without diacritics, opposite meanings: 'mọi món' sums, 'mỗi món' splits
+
+
+def lost_markers(rules_text: str, normalized: str) -> list[str]:
+    """Business markers of the rule-cleaned text that the rewrite dropped or changed."""
+    a, b = fold(rules_text), fold(normalized)
+    lost = [m.group(0) for rx in _MARKERS for m in [rx.search(a)] if m and not re.search(rf"\b{re.escape(m.group(0))}\b", b)]
+    low_a, low_b = rules_text.lower(), normalized.lower()
+    return lost + [w for w in _ACCENTED if re.search(rf"\b{w}\b", low_a) and not re.search(rf"\b{w}\b", low_b)]
+
+
 def _words(s: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", fold(s))
 
@@ -142,6 +160,9 @@ def parse(reply: str, rules: RulesResult, vocab: frozenset[str] = frozenset()) -
         dropped = sorted({w for w in _words(rules.text) if w in vocab and len(w) > 1 and w not in kept} - _COMMON)
         if dropped:
             problems.append(f"dropped name words {dropped}")
+        changed = lost_markers(rules.text, out["normalized"])
+        if changed:
+            problems.append(f"changed business words {changed}")
         if len(out["normalized"]) > 3 * len(rules.text) + 40:
             problems.append("too long")
         if problems:

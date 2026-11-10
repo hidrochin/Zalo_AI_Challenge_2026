@@ -22,7 +22,8 @@ from datamate.text import fold
 
 _QUALIFIED = re.compile(r"\b(nhom|khach|ca (sang|chieu|toi)|kenh|mat hang|san pham|thuoc|zalo|tang|giam|so voi|ti le|ty le|"
                         r"trung binh|binh quan|moi|nao|cao nhat|top|tien mat|chuyen khoan|cod|size|ly|hon|tet|lai|"
-                        r"loi nhuan|tro len|tu \d|duoi|tren|hang|mon|loai|nhan vien|tho|giao|tra|vi|the|tai quay|so don|so ngay)\b"
+                        r"loi nhuan|tro len|tu \d+|duoi|tren|hang|mon|loai|nhan vien|tho|giao|tra|vi|the|tai quay|so don|so ngay|"
+                        r"(bao nhieu|may|dem) (don|hoa don|ngay|bua))\b"
                         r"|%|phan tram|[≥≤<>]")
 
 

@@ -16,7 +16,7 @@ from datamate.ingest.roles import assign_roles, is_known_status, normalize_statu
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 19
+INGEST_VERSION = 20
 META_COLS = ("_file", "_sheet")
 README_UNITS = "README.QuyDoi"
 

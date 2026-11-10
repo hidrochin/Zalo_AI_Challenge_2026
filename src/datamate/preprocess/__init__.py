@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 from datamate.preprocess.amounts import normalize_amounts, normalize_dates
 from datamate.preprocess.entities import EntityIndex, Mention
-from datamate.preprocess.lexicon import PHRASES, WORDS, contextual
+from datamate.preprocess.lexicon import PHRASES, PHRASES3, WORDS, contextual
 from datamate.preprocess.telex import decode
 from datamate.text import norm_key
 
@@ -57,7 +57,10 @@ def _rewrite_words(text: str, changes: list[str]) -> str:
         m, w = words[i], low[i]
         nxt = low[i + 1] if i + 1 < len(words) else None
         rep, span = None, 1
-        if nxt is not None and (w, nxt) in PHRASES:
+        nxt2 = low[i + 2] if i + 2 < len(words) else None
+        if nxt2 is not None and (w, nxt, nxt2) in PHRASES3:
+            rep, span = PHRASES3[(w, nxt, nxt2)], 3
+        elif nxt is not None and (w, nxt) in PHRASES:
             rep, span = PHRASES[(w, nxt)], 2
         elif w in WORDS:
             rep = WORDS[w]

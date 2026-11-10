@@ -33,6 +33,19 @@ def test_time_hints(q, as_of, expected):
     assert calls(q, as_of) == expected
 
 
+@pytest.mark.parametrize("q,expected", [
+    # "Tết năm nay" is the Tết of this year, not the next one, and not the year so far
+    ("doanh thu tet nam nay so vs tet nam truoc thay doi may phan tram ha", ["tet(2026)", "tet(2025)"]),
+    ("Doanh thu dịp Tết năm nay thay đổi bao nhiêu % so với dịp Tết năm ngoái?", ["tet(2026)", "tet(2025)"]),
+    ("doanh thu tết 2025 là bao nhiêu", ["tet(2025)"]),
+])
+def test_tet_of_this_year(q, expected):
+    lunar = {"2025-01-21": (2024, 12, 23), "2025-02-07": (2025, 1, 10), "2026-02-09": (2025, 12, 23), "2026-02-26": (2026, 1, 10)}
+    cal = pd.DataFrame([{"date": pd.Timestamp(d), "lunar_year": y, "lunar_month": m, "lunar_day": dd, "lunar_leap": False}
+                        for d, (y, m, dd) in lunar.items()])
+    assert [h.split(" -> ")[1].split(" = ")[0] for h in time_hints(q, "2026-06-28", cal)] == expected
+
+
 def test_periods():
     dm.set_context("2026-06-16", None)
     assert dm.prev_period(dm.month(2026, 3)) == dm.month(2026, 2)
@@ -71,6 +84,12 @@ def test_check_result():
     for reason in ["sales_lines() is not available for this shop; use T directly", "Không có helper orders() cho shop này"]:
         assert check_result({"type": "unanswerable", "reason": reason, "_src": "model"}, names)[0]
     assert check_result({"type": "unanswerable", "reason": "Dữ liệu không có cột ghi lý do huỷ đơn.", "_src": "model"}, names) == (None, None)
+    # SQL: a reason names the views as a matter of course; a period outside the data makes 'no data' a valid reason
+    no_gender = {"type": "unanswerable", "reason": "no gender column in sales_lines or orders", "_src": "model"}
+    assert check_result(no_gender, names)[0] and check_result(no_gender, names, helper_guard=False) == (None, None)
+    before = {"type": "unanswerable", "reason": "The data starts on 2025-04-01, so there is no sales data for March 2025.", "_src": "model"}
+    assert check_result(before, names)[0] and check_result(before, names, outside=True) == (None, None)
+    assert check_result({"type": "percent", "answer": 0.0}, names, zero_ok=True) == (None, None)
 
 
 def test_llm_retry_then_stop(monkeypatch):

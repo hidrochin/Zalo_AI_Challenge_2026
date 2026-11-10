@@ -26,6 +26,9 @@ HARD_RULES: list[tuple[str, bool | None, re.Pattern]] = [
     ("table", None, re.compile(r"\bkem (theo )?so (tien|no)\b|\bmoi (nguoi|khach) (con )?no\b|\bso no cua tung\b")),
     ("list", None, re.compile(r"\btop \d+\b|\blan luot\b|\btheo thu tu\b|\btuoi no\b")),
 ]
+# 'mấy hộp chẵn, mấy viên lẻ': rulebook 'Tồn theo đơn vị lớn' is a list of exactly 2 (train: 17 lists of 2, 3 unanswerable)
+_SPLIT = re.compile(r"\b(chan|nguyen)\b.*\b(le|cai le|vien le)\b|\ble\b.*\b(chan|nguyen)\b")
+HARD_RULES.append(("list", None, _SPLIT))
 _K = re.compile(r"\btop (\d+)\b|\b(\d+) (?:mat hang|mon|san pham|khach hang|khach|loai|nguoi|nhan vien|thuoc|nha cung cap|"
                 r"hang|ma|sp|tho|nhom)\b(?! (?:tro|tu|tro len))")
 
@@ -37,6 +40,7 @@ class Expect:
     k: int | None = None       # top-k: a list/table answer has at most k items
     hard: bool = False         # type/month expectation from a ≥ 99%-precise rule
     k_hard: bool = False       # k read off the question by rule (train: 120/120), not guessed by the rewrite
+    size: int | None = None    # a list of exactly this many items
     source: str = ""
     window: tuple[str, str] | None = None  # a date answer lies in [start, end] of the periods the question names
 
@@ -61,6 +65,8 @@ def expect_answer(rules_text: str, llm: dict | None = None) -> Expect:
         if rx.search(f):
             e.type, e.month, e.hard, e.source = t, month, True, f"rule: {rx.pattern[:40]}"
             break
+    if _SPLIT.search(f):
+        e.size = 2
     m = _K.search(f)
     if m and e.type in (None, "list", "table"):
         k = int(m.group(1) or m.group(2))
@@ -82,11 +88,39 @@ def expect_answer(rules_text: str, llm: dict | None = None) -> Expect:
     return e
 
 
+def fit_month(result: dict, e: Expect) -> dict:
+    """A month asked ('tháng nào') and answered by its first day ('2025-10-01', what date_trunc gives): that month."""
+    a = result.get("answer")
+    if e.month and result.get("type") == "date" and isinstance(a, str) and _DAY.match(a) and a.endswith("-01"):
+        return {**result, "answer": a[:7]}
+    return result
+
+
+_MONEY_WORD = re.compile(r"\b(tien|doanh thu|doanh so|gia tri|gia von|tien von|lai|loi nhuan|no|chi phi|dong|vnd|von)\b")
+_NOT_MONEY = re.compile(r"\b(bao nhieu|may|so|dem)\s+(don|khach|lan|ngay|mat hang|mon|san pham|hoa don|phieu|nguoi|ky|chuyen|"
+                        r"dot|luot|xe|ly|goi|lon|chai|cai|hop|vien|bich|may|chiec)\b|\bluot\b|\bphan tram\b|%")
+
+
+def fit_money(result: dict, rules_text: str) -> dict:
+    """Rulebook: money is whole đồng, an average of money too, half up. A fractional number asked about money is rounded
+    (never a non-integer gold among 1427 money-like train and public questions)."""
+    a = result.get("answer")
+    if result.get("type") != "number" or isinstance(a, bool) or not isinstance(a, float) or a == int(a):
+        return result
+    f = fold(rules_text)
+    if not _MONEY_WORD.search(f) or _NOT_MONEY.search(f):
+        return result
+    return {**result, "answer": int(math.floor(a + 0.5))}
+
+
 def check_answer(result: dict, e: Expect) -> tuple[str | None, bool]:
     """(message for one re-check round, hard) when the executed answer contradicts the expectation, else (None, False).
-    A hard contradiction that survives the re-check makes the question abstain."""
+    A hard contradiction that survives the re-check makes the question abstain. A type that only the LLM rewrite expects
+    is no contradiction."""
     t, a = result.get("type"), result.get("answer")
     if t == "unanswerable":
+        return None, False
+    if e.type and t != e.type and not e.hard:  # only the rewrite's guess: asking again turned right answers wrong (train: net -11)
         return None, False
     if e.type and t != e.type:
         want = {"date": "answer_month(...) ('YYYY-MM')" if e.month else "answer_date(...) ('YYYY-MM-DD')"}.get(
@@ -103,6 +137,10 @@ def check_answer(result: dict, e: Expect) -> tuple[str | None, bool]:
         if hi < e.window[0] or lo > e.window[1]:
             return (f"The answer {a} lies outside the period the question asks about ({e.window[0]}..{e.window[1]}). "
                     "Filter the rows with in_period(...) on that period before ranking."), True
+    if e.size and t == "list" and isinstance(a, list) and len(a) != e.size:
+        return (f"The question asks for exactly {e.size} numbers [whole big units, loose base units], but the answer has "
+                f"{len(a)}. Use stock_split(product, big unit, day) if it is listed, else divide the base-unit stock by the "
+                "big unit's factor."), True
     if e.k and t in ("list", "table"):
         n = len(a) if t == "list" else len(a.get("rows", []))
         if n > e.k:
@@ -200,6 +238,7 @@ _RATE = re.compile(r"\bti le\b|\bty le\b|\bchiem\b|\bti trong\b|\bty trong\b|\bd
 _CHANGE = re.compile(r"\btang\b|\bgiam\b|\bthay doi\b|\bso (voi|vs)\b|\bchenh\b|\bhon\b|\bkem\b|\blen\b|\bxuong\b")
 _COUNT = re.compile(r"\b(bao nhieu|may|so|dem)\s+(don|khach|lan|ngay|mat hang|mon|san pham|hoa don|phieu|nguoi|ky|chuyen|dot)\b")
 _MONEY = re.compile(r"\bdoanh thu\b|\bdoanh so\b|\bbao nhieu tien\b|\bso tien\b|\btien hang\b")
+_AMOUNT = re.compile(r"\d[\d.,]*\s*(d|dong|k|nghin|trieu|tr|cu)\b|\b\d{1,3}(\.\d{3})+\b|\b\d{5,}\b")  # 'từ 760.000đ': money is the filter
 _SIGNED = re.compile(r"\blai\b|\bloi nhuan\b|\bchenh\b|\blo\b|\bam\b|\btru\b|\bhieu\b")
 _WALKIN_NAME = re.compile(r"^(khach le|khach vang lai|vang lai|le|khach)$")
 
@@ -222,7 +261,7 @@ def invariants(result: dict, rules_text: str, window: tuple[str, str] | None = N
                 out.append(("days_le_period", f"{a} days is more than the {days} days of the period asked."))
     if t == "number" and num and a < 0 and not _SIGNED.search(f):
         out.append(("negative", f"{a} is negative, but the question asks for an amount or count that cannot be."))
-    if t == "number" and num and _MONEY.search(f) and not _COUNT.search(f) and 0 < abs(a) < 1000:
+    if t == "number" and num and _MONEY.search(f) and not _COUNT.search(f) and not _AMOUNT.search(f) and 0 < abs(a) < 1000:
         out.append(("money_unit", f"{a} đồng is implausibly small for a VND amount; check units (VND, not thousands)."))
     names = [a] if t == "string" else a if t == "list" else [r[0] for r in (a or {}).get("rows", []) if r] if t == "table" else []
     if any(isinstance(v, str) and _WALKIN_NAME.match(fold(v)) for v in names):

@@ -22,18 +22,28 @@ from datamate.ingest.business import INGEST_VERSION, roles_path, status_path
 from datamate.sql.dims import entity_dims
 from datamate.text import fold
 
-STORE_VERSION = 8
+STORE_VERSION = 13
 
 BASE_MACROS = [
     "create macro round_half_up(x, n) as cast(round(cast(x as decimal(38, 10)), n) as double)",
     "create macro as_of() as getvariable('as_of')",
-    "create macro fold_text(x) as replace(strip_accents(lower(cast(x as varchar))), 'đ', 'd')",
+    # lowercase, no diacritics, '_' a space ('zalo_oa' = 'Zalo OA'); punctuation stays, it can be the point of a search ('(M)')
+    """create macro fold_text(x) as trim(regexp_replace(strip_accents(replace(lower(cast(x as varchar)), 'đ', 'd')),
+       '[_\\s]+', ' ', 'g'))""",
     "create macro has_name(col, text) as contains(fold_text(col), fold_text(text))",
-    "create macro same_text(col, text) as fold_text(col) = fold_text(text)",
+    # equality also ignores punctuation, as the scorer compares names ('Thu hộ (COD)' = 'thu ho cod')
+    """create macro same_text(col, text) as trim(regexp_replace(fold_text(col), '[^a-z0-9]+', ' ', 'g'))
+       = trim(regexp_replace(fold_text(text), '[^a-z0-9]+', ' ', 'g'))""",
     "create macro pct_change(new, old) as (new - old) * 100.0 / nullif(old, 0)",
-    """create macro shift_of(ts) as case when hour(ts) between 6 and 13 then 'sáng'
-       when hour(ts) between 14 and 21 then 'chiều' end""",
+    # shift hours are read from the split's rulebook at session start (rules.rule_params): NULL hours, no shift
+    """create macro shift_of(ts) as case
+       when hour(ts) between getvariable('shift_morning_from') and getvariable('shift_morning_to') then 'sáng'
+       when hour(ts) between getvariable('shift_afternoon_from') and getvariable('shift_afternoon_to') then 'chiều' end""",
+    # a yes/no cell however the shop writes it: true, 1, 'x', 'có', 'yes'
+    """create macro flag(x) as coalesce(try_cast(x as boolean),
+       fold_text(x) in ('x', 'co', 'yes', 'y', 'true', '1', 'v'), false)""",
 ]
+SHIFT_DEFAULTS = {"shift_morning_from": 6, "shift_morning_to": 13, "shift_afternoon_from": 14, "shift_afternoon_to": 21}
 SALES_VIEW = "create view sales_lines as select * from sales_all where \"date\" <= getvariable('as_of')"
 ORDERS_VIEW = "create view orders as select * from orders_all where \"date\" <= getvariable('as_of')"
 SALES_MACROS = [
@@ -55,6 +65,92 @@ ORDER_MACROS = [
 ]
 
 
+# The rulebook's rankings and counts as tables of one row per customer / item / day / month: the model picks a column
+# and a sort instead of rebuilding the grain (orders, days, base units) each time. Ties go to the smaller key (code).
+CUSTOMER_STATS = """create macro customer_stats(a, b) as table select customer, any_value(customer_name) as customer_name,
+       count(distinct order_id) filter (counted) as orders, count(distinct "date") filter (counted) as days,
+       coalesce(sum(amount) filter (counted), 0) as revenue,
+       round_half_up(sum(amount) filter (counted) / nullif(count(distinct order_id) filter (counted), 0), 0) as avg_order,
+       count(distinct order_id) filter (status = 'huỷ') as cancels
+       from sales_lines where customer is not null and "date" between a and b group by customer order by revenue desc, customer"""
+ITEM_STATS = """create macro item_stats(a, b) as table select product_name, min(product_key) as product_key,
+       coalesce(sum(qty_base) filter (counted), 0) as qty, coalesce(sum(amount) filter (counted), 0) as revenue,
+       count(distinct order_id) filter (counted) as orders{profit}
+       from sales_lines where is_goods and product_name is not null and "date" between a and b
+       group by product_name order by qty desc, product_key"""
+DAY_STATS = """create macro day_stats(a, b) as table select "date", coalesce(sum(amount) filter (counted), 0) as revenue,
+       count(distinct order_id) filter (counted) as orders from sales_lines where "date" between a and least(b, as_of())
+       group by "date" order by 1"""
+MONTH_STATS = """create macro month_stats(a, b) as table select strftime("date", '%Y-%m') as month,
+       coalesce(sum(amount) filter (counted), 0) as revenue, count(distinct order_id) filter (counted) as orders
+       from sales_lines where "date" between a and least(b, as_of()) group by month order by month"""
+# 'doanh thu có tăng liên tục qua các tháng': every month of [a, b] above the month before it (months with no sale count 0)
+REVENUE_RISING = """create macro revenue_rising(a, b) as (select bool_and(r > p) from (select r, lag(r) over (order by m) as p
+       from (select m, coalesce((select sum(amount) from sales_lines where counted and "date" >= m
+         and "date" < m + interval 1 month and "date" <= b), 0) as r
+         from (select unnest(generate_series(date_trunc('month', a), date_trunc('month', b), interval 1 month)) as m)))
+       where p is not null)"""
+# Part of the sales picked by the value of one column (channel, payment method, product or customer group, staff, a yes/no
+# flag): the rulebook's default revenue and order rules, the column matched exactly (same_text) as 'Nhóm hàng' says.
+PART_MACROS = [
+    """create macro revenue_of(col, v, a, b) as (select coalesce(sum(amount), 0) from sales_lines
+       where counted and same_text(col, v) and "date" between a and b)""",
+    # rulebook: a share divides by the revenue of the whole shop in the period, walk-ins and fee lines included
+    """create macro share_of(col, v, a, b) as (select round_half_up(100.0 * coalesce(sum(amount) filter (same_text(col, v)), 0)
+       / nullif(sum(amount), 0), 2) from sales_lines where counted and "date" between a and b)""",
+    """create macro orders_of(col, v, a, b) as (select count(distinct order_id) from sales_lines
+       where counted and same_text(col, v) and "date" between a and b)""",
+    """create macro qty_of(col, v, a, b) as (select coalesce(sum(qty_base), 0) from sales_lines
+       where counted and is_goods and same_text(col, v) and "date" between a and b)""",
+    # one row per value of a column (staff, channel, group...): rank or compare them; NULL values are no group
+    """create macro group_stats(col, a, b) as table select cast(col as varchar) as "value",
+       coalesce(sum(amount) filter (counted), 0) as revenue, count(distinct order_id) filter (counted) as orders,
+       coalesce(sum(qty_base) filter (counted and is_goods), 0) as qty, count(distinct "date") filter (counted) as days
+       from sales_lines where col is not null and "date" between a and b group by 1 order by revenue desc, 1""",
+]
+# rulebook 'Bán được bao nhiêu <đơn vị>': base-unit quantity of the items whose base unit is that unit
+QTY_UNIT = """create macro qty_unit(u, a, b) as (select coalesce(sum(qty_base), 0) from sales_lines
+       where counted and is_goods and same_text(base_unit, u) and "date" between a and b)"""
+SHIFT_MACROS = [
+    """create macro shift_revenue(s, a, b) as (select coalesce(sum(amount) filter (counted), 0) from sales_lines
+       where same_text(shift_of(order_ts), s) and "date" between a and b)""",
+    """create macro shift_orders(s, a, b) as (select count(distinct order_id) filter (counted) from sales_lines
+       where same_text(shift_of(order_ts), s) and "date" between a and b)""",
+    """create macro hour_stats(a, b) as table select hour(order_ts) as hour, count(distinct order_id) filter (counted) as orders
+       from sales_lines where order_ts is not null and "date" between a and b group by hour order by orders desc, hour""",
+]
+COUNT_MACROS = [
+    """create macro customers_min_orders(n, a, b) as (select count(*) from customer_stats(a, b) where orders >= n)""",
+    """create macro share_customers_min_orders(n, a, b) as (select round_half_up(100.0 * count(*) filter (orders >= n)
+       / nullif(count(*) filter (orders >= 1), 0), 2) from customer_stats(a, b))""",
+]
+ITEM_COUNT_MACRO = """create macro items_in_min_orders(n, a, b) as (select count(*) from item_stats(a, b) where orders >= n)"""
+GROUP_AOV = """create macro avg_order_value_group(g, a, b) as (select round_half_up(sum(amount) filter (counted)
+       / nullif(count(distinct order_id) filter (counted), 0), 0) from sales_lines
+       where same_text(customer_group, g) and "date" between a and b)"""
+SIZE_QTY = """create macro size_qty(sz, a, b) as (select coalesce(sum(qty_base), 0) from sales_lines where counted and is_goods
+       and regexp_matches(lower(product_name), '\\(' || lower(sz) || '\\)\\s*$') and "date" between a and b)"""
+# phone shops (rulebook): the model line is the name before its capacity '…GB'; the brand is the first word, iPhone is Apple
+PHONE_MACROS = [
+    r"""create macro model_line(x) as trim(regexp_replace(x, '\s*\d+\s*(GB|TB)\b.*$', '', 'i'))""",
+    """create macro brand_of(x) as case when lower(split_part(trim(x), ' ', 1)) = 'iphone' then 'Apple'
+       else split_part(trim(x), ' ', 1) end""",
+]
+# money lines that are not goods (voucher, points used, shipping fee): by the invoice's day, orders not cancelled/returned
+EXTRA_LINES = """create macro extra_lines(text, a, b) as (select abs(coalesce(sum(amount), 0)) from sales_lines
+       where not is_goods and order_ok and has_name(product_name, text) and "date" between a and b)"""
+PRICE_LIST_FROM_SALES = """create table price_list_all as select product_name, "date", price from (
+       select product_name, "date", {price} as price, count(*) as n from sales_all
+       where order_ok and is_goods and product_name is not null and qty_base > 0 group by all)
+       where price is not null qualify row_number() over (partition by product_name, "date" order by n desc, price) = 1"""
+PRICE_MACROS = [
+    # rulebook: an increase is a day whose new price is above the one before; to the same price several times, the first
+    """create macro price_increase_day(p_name, new_price) as (select min("date") from (select "date", price,
+       lag(price) over (order by "date") as prev from price_list_all where product_name = p_name)
+       where price = new_price and price > prev)""",
+    """create macro price_effect_at(p_name, new_price, n) as (price_effect(p_name, price_increase_day(p_name, new_price), n))""",
+]
+
 # Rulebook definitions that take several steps: each one exists only where the shop has the fact (facts.py).
 DEBT_MACROS = [
     """create view payments as select * from payments_all where "date" <= getvariable('as_of')""",
@@ -64,8 +160,12 @@ DEBT_MACROS = [
          where "date" <= least(x, as_of()) group by order_id) p using (order_id)
        where o.can_owe and o."date" <= least(x, as_of()) and o.total - coalesce(p.paid, 0) > 0.5""",
     """create macro debt_total(x) as (select coalesce(sum(debt), 0) from debt_by_order(x))""",
+    # age buckets come from the question: debt_age_sum(x, 0, 7), (x, 8, 15), (x, 16, null) for '0–7, 8–15, trên 15'
+    """create macro debt_age_sum(x, lo, hi) as (select coalesce(sum(debt), 0) from debt_by_order(x)
+       where age >= lo and (hi is null or age <= hi))""",
     """create macro debt_by_customer(x) as table select customer, customer_name, sum(debt) as debt from debt_by_order(x)
        where not walkin group by customer, customer_name order by debt desc, customer""",
+    """create macro debt_customers(x) as (select count(*) from debt_by_customer(x))""",
     """create macro debt_repaid(a, b) as (select coalesce(sum(p.amount), 0) from payments_all p join debt_orders_all o using (order_id)
        where o.on_credit and p."date" between a and least(b, as_of()) and p."date" > o."date")""",
     """create macro debt_repaid_of(name, a, b) as (select coalesce(sum(p.amount), 0) from payments_all p join debt_orders_all o using (order_id)
@@ -88,7 +188,16 @@ IMPORT_MACROS = [
     """create view imports as select * from imports_all where "date" <= getvariable('as_of')""",
     """create macro avg_import_price(p, a, b) as (select round_half_up(sum(amount) / nullif(sum(qty), 0), 0) from imports
        where product_name = p and "date" between a and b)""",
+    # rulebook 'Tiền nhập hàng trong kỳ': receipts dated in the period, cancelled ones dropped (imports_all has none)
+    """create macro import_total(a, b) as (select coalesce(sum(amount), 0) from imports where "date" between a and b)""",
+    # rulebook 'nhập trừ bán': the sold part is the quantity of orders counted in revenue, in the same (base) unit
+    """create macro import_minus_sales(p, a, b) as ((select coalesce(sum(qty_base), 0) from imports
+       where product_name = p and "date" between a and b) - (select coalesce(sum(qty_base), 0) from sales_lines
+       where counted and product_name = p and "date" between a and b))""",
 ]
+SUPPLIER_STATS = """create macro supplier_stats(a, b) as table select supplier, coalesce(sum(amount), 0) as amount,
+       count(distinct doc) as receipts from imports where supplier is not null and "date" between a and b
+       group by supplier order by amount desc, supplier"""
 SALES_FACT_MACROS = [
     """create macro slow_products(a, b) as table select distinct product_name from sales_lines s
        where counted and is_goods and "date" < a and product_name not in (select product_name from sales_lines
@@ -103,6 +212,22 @@ STOCK_LOTS = """create macro stock_at(p, d) as (select sum("left") from lots_lef
 STOCK_REPORT = """create macro stock_at(p, d) as ((select sum(qty) from stock_report_all where product_name = p)
        + coalesce((select sum(qty_base) from sales_all where order_ok and is_goods and product_name = p and "date" > least(d, as_of())), 0)
        - {imports})"""
+# rulebook 'Tồn theo đơn vị lớn': [whole big units, loose base units]; 'Giá trị hàng tồn kho': stock left x catalogue cost
+STOCK_SPLIT = """create macro stock_split(p, u, d) as table select cast(floor(s / f) as bigint) as whole,
+       cast(round(s - f * floor(s / f)) as bigint) as loose from (select stock_at(p, d) as s,
+       (select factor from product_units where product_name = p and same_text(unit, u) limit 1) as f)"""
+STOCK_VALUE = """create macro stock_value(d) as (select round_half_up(sum(s * cost), 0) from
+       (select cost, stock_at(product_name, d) as s from catalog_cost_all) where s > 0)"""
+# rulebook 'Mặt hàng hết hàng cuối ngày': goods bought to resell (the ones the stock records track, not drinks made on
+# the spot) whose stock at the END of day d is 0; one sold out at noon and restocked before night is not
+# the outer name is `item`: stock_at(product_name, d) in a WHERE would bind product_name to stock_at's own table
+OUT_OF_STOCK = """create macro out_of_stock(d) as table select item as product_name from (select distinct product_name as item
+       from {items}) where item is not null and coalesce(stock_at(item, d), 0) <= 0 order by item"""
+# the goods each stock source tracks, by the end of day d
+STOCK_ITEMS = {"card": "stock_card_all where cast(ts as date) <= least(d, as_of())", "report": "stock_report_all",
+               "lots": "lots_all"}
+EXPIRING_LOTS = """create macro expiring_lots(d, n) as table select lot, product_name, expiry, "left", "left" * price as capital
+       from lots_left(d) where expiry between d and d + cast(n as integer) order by expiry, product_name"""
 LOT_MACRO = """create macro lots_left(d) as table select l.lot, l.product_name, l.expiry, l.qty - coalesce(m.moved, 0) as "left", l.price
        from lots_all l left join (select s.lot, sum(s.qty - s.returned) as moved from lot_sales_all s join orders_all o using (order_id)
          where o."date" <= least(d, as_of()) and o.status <> 'huỷ' group by s.lot) m using (lot)
@@ -142,7 +267,7 @@ def _write_facts(con, f: Facts, sales: pd.DataFrame) -> None:
     for name, df, date_col in (("debt_orders_all", f.orders, "date"), ("payments_all", f.payments, "date"), ("deliveries_all", f.deliveries, "date"),
                                ("imports_all", f.imports, "date"), ("expenses_all", f.expenses, "date"), ("stock_card_all", f.stock_card, None),
                                ("stock_report_all", f.stock_report, None), ("lots_all", f.lots, "expiry"), ("lot_sales_all", f.lot_sales, None),
-                               ("product_units", f.units, None)):
+                               ("product_units", f.units, None), ("catalog_cost_all", f.catalog_cost, None)):
         if df is not None:
             _write(con, name, df, date_col)
     if f.orders is not None and f.payments is not None:
@@ -154,6 +279,8 @@ def _write_facts(con, f: Facts, sales: pd.DataFrame) -> None:
     if f.imports is not None:
         for macro in IMPORT_MACROS:
             con.execute(macro)
+        if "supplier" in f.imports.columns and f.imports["supplier"].notna().any():
+            con.execute(SUPPLIER_STATS)
     if "product_name" in sales.columns:
         for macro in SALES_FACT_MACROS:
             con.execute(macro)
@@ -166,13 +293,32 @@ def _write_facts(con, f: Facts, sales: pd.DataFrame) -> None:
                 where "date" between a and least(b, as_of())))""")
     if f.lots is not None and f.lot_sales is not None:
         con.execute(LOT_MACRO)
+        con.execute(EXPIRING_LOTS)
+    if "product_name" in sales.columns and "qty_base" in sales.columns:
+        if f.price_list is not None:
+            _write(con, "price_list_all", f.price_list, "date")
+        else:
+            con.execute(PRICE_LIST_FROM_SALES.format(price=_unit_price(sales)))
+        for macro in PRICE_MACROS:
+            con.execute(macro)
+    source = None
     if f.stock_card is not None:
         con.execute(STOCK_CARD)
+        source = "card"
     elif f.stock_report is not None:
         came = """coalesce((select sum(qty_base) from imports_all where product_name = p and "date" > least(d, as_of())), 0)""" if f.imports is not None else "0"
         con.execute(STOCK_REPORT.format(imports=came))
+        source = "report"
     elif f.lots is not None and f.lot_sales is not None:
         con.execute(STOCK_LOTS)
+        source = "lots"
+    has_stock = source is not None
+    if has_stock:
+        con.execute(OUT_OF_STOCK.format(items=STOCK_ITEMS[source]))
+    if has_stock and f.units is not None:
+        con.execute(STOCK_SPLIT)
+    if has_stock and f.catalog_cost is not None:
+        con.execute(STOCK_VALUE)
 
 
 def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, dict[str, str]],
@@ -202,6 +348,36 @@ def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, di
             con.execute(ORDERS_VIEW)
             for macro in ORDER_MACROS:
                 con.execute(macro)
+            con.execute(DAY_STATS)
+            con.execute(MONTH_STATS)
+            con.execute(REVENUE_RISING)
+            if "qty_base" in sales.columns:
+                for macro in PART_MACROS:
+                    con.execute(macro)
+            if "base_unit" in sales.columns and "qty_base" in sales.columns:
+                con.execute(QTY_UNIT)
+            if "customer" in sales.columns:
+                con.execute(CUSTOMER_STATS)
+                for macro in COUNT_MACROS:
+                    con.execute(macro)
+            if "product_name" in sales.columns and "qty_base" in sales.columns:
+                cost = facts.cost_col if facts is not None else None
+                profit = (f""", sum(amount) filter (counted) - sum(try_cast("{cost}" as double) * qty) filter (counted) as profit"""
+                          if cost else "")
+                con.execute(ITEM_STATS.format(profit=profit))
+                con.execute(ITEM_COUNT_MACRO)
+                if sales["product_name"].astype(str).str.contains(r"\d\s*(?:GB|TB)\b", case=False).any():
+                    for macro in PHONE_MACROS:
+                        con.execute(macro)
+                if (~sales["is_goods"] & sales["product_name"].notna()).any():
+                    con.execute(EXTRA_LINES)
+                if sales["product_name"].astype(str).str.contains(r"\((?:S|M|L)\)\s*$", case=False).any():
+                    con.execute(SIZE_QTY)  # drink sizes written in the name: 'Trà vải (L)'; not diaper sizes
+            if "order_ts" in sales.columns:
+                for macro in SHIFT_MACROS:
+                    con.execute(macro)
+            if "customer_group" in sales.columns:
+                con.execute(GROUP_AOV)
         if facts is not None:
             _write_facts(con, facts, sales)
     con.close()
@@ -233,10 +409,18 @@ def set_as_of(con, as_of) -> None:
     con.execute(f"set variable as_of = date '{pd.Timestamp(as_of).date().isoformat()}'")
 
 
-def connect(path: Path, as_of) -> duckdb.DuckDBPyConnection:
+def set_params(con, params: dict | None = None) -> None:
+    """Rulebook parameters of the macros (shift hours), per session: each cursor has its own variables.
+    None keeps the train rulebook's values; a None value (the rule could not be read) makes the macros return NULL."""
+    for k, v in {**SHIFT_DEFAULTS, **(params or {})}.items():
+        con.execute(f"set variable {k} = {'null' if v is None else int(v)}")
+
+
+def connect(path: Path, as_of, params: dict | None = None) -> duckdb.DuckDBPyConnection:
     """Read-only session cut at as_of. One thread keeps float sums and row order the same between runs."""
     con = duckdb.connect(str(path), read_only=True, config={"threads": 1})
     set_as_of(con, as_of)
+    set_params(con, params)
     con.execute("set enable_external_access = false")
     con.execute("set lock_configuration = true")
     return con

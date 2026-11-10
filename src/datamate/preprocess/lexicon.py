@@ -28,6 +28,9 @@ WORDS: dict[str, str] = {
     "ròi": "rồi", "rùi": "rồi", "roài": "rồi", "gồi": "rồi", "mần": "làm", "dề": "về", "nớ": "đó",
     "gium": "giùm", "giup": "giúp", "duoc": "được",
     "chừ": "giờ", "sốp": "shop", "bná": "bán", "đươcj": "được", "zìa": "về", "dìa": "về", "dúp": "giúp",
+    # dropped or swapped letters (public questions): 'mí đơn tổg cộg', 'mấy nượt xe', 'kó mí ngừi'
+    "mí": "mấy", "tổg": "tổng", "cộg": "cộng", "đơng": "đơn", "nượt": "lượt", "xửa": "sửa", "kòn": "còn", "kó": "có",
+    "ngừi": "người",
     # English business words
     "revenue": "doanh thu", "total": "tổng", "bill": "đơn", "bills": "đơn", "order": "đơn", "orders": "đơn",
     "check": "xem", "hot": "bán chạy", "ship": "giao hàng", "shipping": "giao hàng", "customer": "khách hàng",
@@ -41,7 +44,11 @@ PHRASES: dict[tuple[str, str], str] = {
     ("best", "seller"): "bán chạy nhất", ("last", "week"): "tuần trước", ("this", "month"): "tháng này",
     ("last", "month"): "tháng trước", ("this", "week"): "tuần này", ("bao", "nhiu"): "bao nhiêu",
     ("bi", "nhiêu"): "bao nhiêu", ("bi", "nhiu"): "bao nhiêu", ("bây", "chừ"): "bây giờ",
+    ("cháy", "hàng"): "hết hàng",  # sold out, not burnt
 }
+# three-word phrases: COD spelled out ('trả xi ô đi')
+PHRASES3: dict[tuple[str, str, str], str] = {("xi", "ô", "đi"): "COD", ("xi", "o", "di"): "COD",
+                                            ("dang", "chay", "hang"): "đang hết hàng"}  # 'chay hang' alone may be chạy hàng
 # frequent business phrases typed without diacritics (a 9B rewrite turned 'xem gium' into 'xem giảm' and
 # 'cua hang' into 'của hàng'); restored here, outside name spans, so the rewrite starts from the right words
 _ASCII_PHRASES = {

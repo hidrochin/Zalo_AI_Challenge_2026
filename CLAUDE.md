@@ -224,9 +224,23 @@ profit uses the **cost recorded on the sale line**.
   an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
 - **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
   pandas code generation is paused; Docker and vLLM work is deferred.
-- **Status (2026-11-08, evening):** read the README "Status (2026-11-08, evening): start here" section first.
-  Text-to-SQL only: `text2sql` is merged into `main` and work continues there. `codegen` (pandas) and `combined`
-  (both arms) are dropped and kept on `origin` as history. Default engine is still `pandas`: pass `--engine sql`.
+- **Status (2026-11-11):** read the README "Status (2026-11-11): start here" section first. Public v5 leaderboard 0.759.
+  - Committed on `text2sql` (`b89d4dd`..`5de216b`, not pushed):
+    - train rules as macros, gated on their clauses;
+    - shift hours read from the rulebook;
+    - query rewrites and lints;
+    - value hints (`sql/values.py`).
+  - Replay: public 0.792, train 0.9077. A live run is still needed.
+- **Status (2026-11-08, end of day):** README "Status (2026-11-08, end of day)".
+  - All fixes committed on `text2sql` (8 commits to `fd767ea`, not pushed). Replay train 0.9037, public 0.655.
+  - Kaggle public-test SQL run in flight: `hydrochii/datamate-sql-public`.
+  - Design rule from the user: question normalization keeps the content (wording only). Intent/semantic extraction is a separate
+    step, and normalization never decides business logic.
+  - Text-to-SQL only. One folder, no worktrees: develop on `text2sql`, `main` = final code, merge by pull request.
+  - `codegen` (pandas) and `combined` (both arms) are dropped and kept as branches only.
+  - Train error analysis and fixes: `debug/sql_train_*.txt` (gitignored, local). Replay PA is 0.9037.
+  - Model-behaviour groups M1–M21 await the user's choice.
+  - Default engine is still `pandas`: pass `--engine sql`.
 - **Earlier status (2026-11-05):** README "Status (2026-11-05, evening)". E0 ran code older than
   `98d4c7b`, so its 0.473 is not comparable with the public 0.288.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).

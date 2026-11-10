@@ -57,6 +57,8 @@ class Facts:
     lot_sales: pd.DataFrame | None = None  # lot, order_id, qty, returned
     units: pd.DataFrame | None = None  # product_name, unit, factor
     cost_col: str | None = None  # column of sales_lines with the cost of one unit sold
+    price_list: pd.DataFrame | None = None  # product_name, date, price (the shop's price list: each row a price from that day)
+    catalog_cost: pd.DataFrame | None = None  # product_name, cost (cost of one base unit in the product list)
 
 
 def _order_fields(biz: Business) -> dict[str, pd.Series]:
@@ -96,6 +98,53 @@ def _orders(biz: Business, sales: pd.DataFrame) -> pd.DataFrame | None:
     o["on_credit"] = (method.map(lambda v: bool(_DEBT_WORD.search(v))) | note.map(lambda v: bool(_DEBT_WORD.search(v)))) & ~cod & (o["status"] != "huỷ")
     o["can_owe"] = ~cod & ~market & (o["status"] != "huỷ")  # rulebook: COD and marketplace orders are never debt
     return o
+
+
+_OWED = re.compile(r"(?:\bno\b|thieu(?: lai)?|ghi so|ghi no|con lai)\s*:?\s*(\d[\d.,]*\s*(?:k|nghin|ngan|tr|trieu|d|dong|vnd)?)")
+_OWED_ALL = re.compile(r"no ca don|chua tra|no het|ghi no ca|no toan bo")
+_GAVE = re.compile(r"(?:dua(?: truoc)?|tra(?: truoc)?|\bck\b|chuyen khoan)\s*:?\s*(\d[\d.,]*\s*(?:k|nghin|ngan|tr|trieu|d|dong|vnd)?)")
+_PAID_UP = re.compile(r"(da )?tra (du|het)|ck du|chuyen khoan du|tra xong|da thanh toan|het no")
+
+
+def _note_amount(text: str, pattern: re.Pattern = _OWED) -> float | None:
+    from datamate.ingest.parsers import parse_number
+
+    m = pattern.search(text)
+    if not m:
+        return None
+    raw = m.group(1).replace(" ", "").replace("nghin", "k").replace("ngan", "k").replace("trieu", "tr").replace("dong", "")
+    v = parse_number(raw.rstrip("d"))
+    return float(v) if v is not None else None
+
+
+def note_payments(orders: pd.DataFrame, notes: pd.Series, data_end) -> pd.DataFrame | None:
+    """Payments read from the order notes when a shop keeps no payment book (README: the note says what the customer gave
+    or still owes, as of the end of the data). An order not on credit is paid on its day. Per order on credit: what was
+    not left owing is paid on the order day; a
+    note that says the debt was paid up later puts the rest on the last day of the data, the only date it is known by."""
+    rows = []
+    for oid, day, total, credit in orders[["order_id", "date", "total", "on_credit"]].itertuples(index=False):
+        text = notes.get(oid)
+        if not credit:  # paid in full when bought
+            rows.append((oid, day, total))
+            continue
+        if not isinstance(text, str) or not text.strip():
+            continue
+        t = fold(text)
+        owed = 0.0 if _PAID_UP.search(t) else (total if _OWED_ALL.search(t) else _note_amount(t))
+        if owed is None and _note_amount(t, _GAVE) is not None:  # 'đưa trước 236k, còn lại ghi sổ'
+            owed = max(total - _note_amount(t, _GAVE), 0.0)
+        if owed is None:
+            continue
+        first = _note_amount(t) if _PAID_UP.search(t) else owed  # 'nợ 69 nghìn, khách ck đủ rồi': 69k was owed at first
+        first = total if first is None else min(first, total)
+        if total - first > 0.5:
+            rows.append((oid, day, total - first))
+        if first - owed > 0.5 and data_end is not None:
+            rows.append((oid, pd.Timestamp(data_end).normalize(), first - owed))
+    if not rows:
+        return None
+    return pd.DataFrame(rows, columns=["order_id", "date", "amount"])
 
 
 def _payments(biz: Business, order_ids: set) -> pd.DataFrame | None:
@@ -157,6 +206,21 @@ def _product_names(t: pd.DataFrame, ti: TableInfo, lookup: tuple[dict, dict]) ->
     return None
 
 
+_SUPPLIER_HEAD = r"^(nha cung cap|ncc|ten ncc|ma ncc|ma nha cung cap|nha cc)$"
+_NAME_HEAD = re.compile(r"^(ten( goi| ncc| nha cung cap)?|nha cung cap|ho ten)$")
+
+
+def _supplier_names(biz: Business, col: str, codes: pd.Series) -> pd.Series:
+    """Supplier codes written out with the name of a supplier list that keys them (MaNhaCungCap -> TenGoi); names stay."""
+    for name, t in biz.tables.items():
+        if col not in t.columns or t[col].duplicated().any() or len(t) > 5000:
+            continue
+        full = next((c for c in t.columns if c != col and _NAME_HEAD.match(header_key(c))), None)
+        if full is not None and codes.dropna().isin(t[col]).mean() > 0.8:
+            return codes.map(dict(zip(t[col], t[full]))).fillna(codes)
+    return codes
+
+
 def _imports(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
     for name, t in biz.tables.items():
         ti = biz.info[name]
@@ -173,6 +237,8 @@ def _imports(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
         f["product_name"] = _product_names(t, ti, lookup)
         when = pick(t, ti, "import_date", r"^ngay nhap", r"^(ngay nhap|ngay|thoi gian)$")
         f["date"], f["cancelled"] = (_day(t[when]) if when else pd.NaT), False
+        sup = pick(t, ti, "supplier", r"^nha cung cap", _SUPPLIER_HEAD)
+        f["supplier"] = t[sup].values if sup else None
         status = next((c for c in t.columns if str(c).endswith("__norm")), None)
         if status:
             f["cancelled"] = t[status] == "huỷ"
@@ -183,11 +249,17 @@ def _imports(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
                     continue
                 hd = pick(h, hi, "import_date", r"^ngay nhap", r"^(ngay nhap|ngay|thoi gian)( kho)?$")
                 hs = next((c for c in h.columns if str(c).endswith("__norm")), None)
+                hsup = None if sup else pick(h, hi, "supplier", r"^nha cung cap", _SUPPLIER_HEAD)
                 head = h.set_index(doc)
                 if hd:
                     f["date"] = f["date"].fillna(f["doc"].map(_day(head[hd])))
                 if hs:
                     f["cancelled"] = f["cancelled"] | (f["doc"].map(head[hs]) == "huỷ")
+                if hsup:
+                    f["supplier"] = f["doc"].map(head[hsup])
+                    sup = hsup
+        if sup:
+            f["supplier"] = _supplier_names(biz, sup, f["supplier"])
         f = f[~f["cancelled"]].dropna(subset=["date", "qty", "price"]).drop(columns="cancelled")
         return f.assign(amount=f["qty"] * f["price"]).reset_index(drop=True)
     return None
@@ -198,8 +270,8 @@ def _expenses(biz: Business) -> pd.DataFrame | None:
         ti = biz.info[name]
         if not (re.search(r"chi ?phi|expense", fold(name)) or "expense_amount" in ti.roles.values()):
             continue
-        amount = pick(t, ti, "expense_amount", r"^so tien", r"^(so tien|thanh tien|tien|gia tri)$")
-        when = pick(t, ti, "expense_date", r"^ngay", r"^(ngay( chi)?|thoi gian)$")
+        amount = pick(t, ti, "expense_amount", r"^so tien", r"^(so tien( chi)?|thanh tien|tien( chi)?|gia tri|chi phi)$")
+        when = pick(t, ti, "expense_date", r"^ngay", r"^(ngay( chi| mua| phat sinh)?|thoi gian)$")
         if amount and when:
             return pd.DataFrame({"date": _day(t[when]), "amount": _money(t[amount])}).dropna(subset=["date"])
     return None
@@ -223,8 +295,14 @@ def _stock(biz: Business, lookup: tuple[dict, dict]) -> tuple[pd.DataFrame | Non
     return card, report
 
 
+_BASE_QTY = re.compile(r"co ban|quy doi|quy ra le")
+
+
 def _lots(biz: Business, lookup: tuple[dict, dict]) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
-    lots = sold = None
+    """Lot sales count base units, so the lot list must too: a list kept in base units wins over one in import units
+    (a hand-kept import book with lot and expiry), which then only lends its price, brought to the base unit."""
+    sold = None
+    found: list[tuple[pd.DataFrame, bool]] = []  # (lots, quantity in base units)
     for name, t in biz.tables.items():
         ti = biz.info[name]
         lot = pick(t, ti, "lot_id", r"^so lo", r"^(lo|ma lo|so lo)$")
@@ -245,8 +323,44 @@ def _lots(biz: Business, lookup: tuple[dict, dict]) -> tuple[pd.DataFrame | None
                 code = next((c for c in t.columns if re.search(r"^ma (mon|hang|hh|sp|mat hang)", header_key(c))), None)
                 names = t[code].map(lambda v: lookup[0].get(str(v).strip())) if code else None
             if q and names is not None:
-                lots = pd.DataFrame({"lot": t[lot], "product_name": names, "expiry": _day(t[expiry]), "qty": _money(t[q]), "price": _money(t[price]) if price else None})
+                found.append((pd.DataFrame({"lot": t[lot], "product_name": names, "expiry": _day(t[expiry]), "qty": _money(t[q]),
+                                            "price": _money(t[price]) if price else None}), bool(_BASE_QTY.search(header_key(q)))))
+    if not found:
+        return None, sold
+    base = [f for f, b in found if b]
+    if not base:
+        return found[-1][0], sold
+    lots = base[0]
+    if lots["price"].isna().all():
+        other = next((f for f, b in found if not b and f["price"].notna().any()), None)
+        if other is not None:  # import-unit price × import-unit qty = the lot's cost, per base unit
+            cost = (other["qty"] * other["price"]).groupby(other["lot"].astype(str)).sum()
+            lots = lots.assign(price=lots["lot"].astype(str).map(cost) / lots["qty"].where(lots["qty"] > 0))
     return lots, sold
+
+
+_PRICE_TABLE = re.compile(r"gia|price")
+_PRICE_HEAD = r"^(gia moi|gia ban( le| moi)?|gia ap dung|gia|don gia( ban)?)$"
+_PRICE_DATE = r"^(ngay( ap dung| doi( gia)?| thay doi| hieu luc| bat dau)?|tu ngay|ap dung tu|thoi gian)$"
+
+
+def _price_list(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
+    """The shop's price list (bảng giá, lịch sử giá): a table, not a sale or import, with a product, a start day and a
+    price, several rows per product. Rulebook: a price increase is a day whose new price is above the one before it."""
+    for name, t in biz.tables.items():
+        ti = biz.info[name]
+        if not _PRICE_TABLE.search(fold(name)) or re.search(r"nhap|import|ncc", fold(name)) or {"order_id", "line_amount"} & set(ti.roles.values()):
+            continue
+        price = pick(t, ti, "list_price", r"^gia (ban|moi|ap dung)", _PRICE_HEAD)
+        when = pick(t, ti, "price_date", r"^ngay (ap dung|doi|hieu luc)", _PRICE_DATE)
+        names = _product_names(t, ti, lookup)
+        if price is None or when is None or names is None:
+            continue
+        f = pd.DataFrame({"product_name": names, "date": _day(t[when]), "price": pd.to_numeric(t[price], errors="coerce")})
+        f = f.dropna()
+        if len(f) and f["product_name"].duplicated().any():
+            return f.sort_values(["product_name", "date"]).reset_index(drop=True)
+    return None
 
 
 def _cost_col(biz: Business, sales: pd.DataFrame) -> str | None:
@@ -258,6 +372,23 @@ def _cost_col(biz: Business, sales: pd.DataFrame) -> str | None:
         c = pick(t, ti, "line_cost", r"^gia von", r"^gia von( luc ban)?$")
         if c in sales.columns:
             return c
+    return None
+
+
+def _catalog_cost(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
+    """Cost of one base unit as the product list records it (rulebook: Giá trị hàng tồn kho): a table that is no sale,
+    import or lot list, one row per product, with a cost column. The cost on a sale line is another figure."""
+    for name, t in biz.tables.items():
+        ti = biz.info[name]
+        if re.search(r"nhap|import|ncc|lo hang", fold(name)) or {"order_id", "line_amount", "lot_id"} & set(ti.roles.values()):
+            continue
+        cost = pick(t, ti, "catalog_cost", r"^gia von", r"^(gia von( hien tai| hang| co ban)?|giavonhang|von)$")
+        names = _product_names(t, ti, lookup)
+        if cost is None or names is None:
+            continue
+        f = pd.DataFrame({"product_name": names, "cost": _money(t[cost])}).dropna()
+        if len(f) and not f["product_name"].duplicated().any():
+            return f.reset_index(drop=True)
     return None
 
 
@@ -292,6 +423,9 @@ def _read_facts(biz: Business, sales: pd.DataFrame | None) -> Facts:
     f.orders = _orders(biz, sales)
     if f.orders is not None:
         f.payments = _payments(biz, set(f.orders["order_id"]))
+        notes = _order_fields(biz).get("note")
+        if f.payments is None and notes is not None and f.orders["on_credit"].any():
+            f.payments = note_payments(f.orders, notes, biz.readme.data_end)
         if f.payments is not None and not f.orders["on_credit"].any():  # no payment method recorded: what the day of purchase left unpaid
             paid = f.payments.merge(f.orders[["order_id", "date"]].rename(columns={"date": "ordered"}), on="order_id")
             same_day = paid[paid["date"] <= paid["ordered"]].groupby("order_id")["amount"].sum()
@@ -306,6 +440,8 @@ def _read_facts(biz: Business, sales: pd.DataFrame | None) -> Facts:
     f.stock_card, f.stock_report = _stock(biz, lookup)
     f.lots, f.lot_sales = _lots(biz, lookup)
     f.cost_col = _cost_col(biz, sales)
+    f.price_list = _price_list(biz, lookup)
+    f.catalog_cost = _catalog_cost(biz, lookup)
     return f
 
 

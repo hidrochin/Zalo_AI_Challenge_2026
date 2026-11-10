@@ -60,8 +60,12 @@ def name_index(tables, sales=None) -> set[str]:
     return out
 
 
-def check_result(result: dict, names: set[str] | None) -> tuple[str | None, str | None]:
-    """(hard error, soft warning) for an executed answer; hard errors mean the answer is not usable."""
+def check_result(result: dict, names: set[str] | None, helper_guard: bool = True, outside: bool = False,
+                 zero_ok: bool = False) -> tuple[str | None, str | None]:
+    """(hard error, soft warning) for an executed answer; hard errors mean the answer is not usable.
+    helper_guard: refuse an unanswerable blamed on a missing helper (pandas; in SQL the reason names views as a matter of course).
+    outside: every period the question names lies outside the data, so 'no rows' is a valid reason (rulebook).
+    zero_ok: the answer comes straight from a macro tested on gold answers, so 0 is not a filter bug."""
     from datamate.text import fold, norm_key
 
     t, a = result.get("type"), result.get("answer")
@@ -88,16 +92,16 @@ def check_result(result: dict, names: set[str] | None) -> tuple[str | None, str 
             why = bad_name(r[0]) if r and isinstance(r[0], (str, bool)) else None
             if why:
                 return f"answer_table first column: {why}.", None
-    if t == "unanswerable" and result.get("_src") == "model" and _HELPER_REASON.search(fold(result.get("reason", ""))):
+    if helper_guard and t == "unanswerable" and result.get("_src") == "model" and _HELPER_REASON.search(fold(result.get("reason", ""))):
         return ("You called unanswerable() because a helper (sales_lines()/orders()) is not available. That is not a reason: "
                 "the data is still in T. Compute the answer from the T tables listed in the schema card. "
                 "Only call unanswerable() when a needed table/column does not exist or the period is outside the data."), None
-    if t == "unanswerable" and result.get("_src") == "model" and _EMPTY_REASON.search(fold(result.get("reason", ""))):
+    if not outside and t == "unanswerable" and result.get("_src") == "model" and _EMPTY_REASON.search(fold(result.get("reason", ""))):
         return ("You called unanswerable() because your filter found no rows. An empty result here almost always means a bug "
                 "(wrong year, wrong column, exact string match instead of find(), date comparison). Print the data you filter on and fix it. "
                 "Only call unanswerable() when a needed table/column does not exist or the period is outside the data."), None
     if t in ("number", "percent") and isinstance(a, (int, float)) and not isinstance(a, bool):
-        if a == 0:
+        if a == 0 and not zero_ok:
             return None, ("The answer is 0. If the shop has data in this period, 0 usually means a filter bug "
                           "(wrong column, wrong year, case-sensitive match, a shift/flag that never matches). Double-check; keep 0 only if it is really 0.")
         if t == "percent" and abs(a) > 1000:

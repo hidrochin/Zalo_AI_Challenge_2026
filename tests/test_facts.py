@@ -62,6 +62,20 @@ def test_a_fact_the_helper_cannot_see_is_not_a_verdict_of_unanswerable():
         raise AssertionError("expected NoFact")
 
 
+def test_lots_count_base_units_and_take_the_price_of_the_import_book():
+    """A lot list in base units wins over a hand-kept import book (lot, expiry, quantity in boxes), whatever the table order:
+    lot sales count base units. The book only lends its price, per base unit."""
+    sales, _ = _shop()
+    base = pd.DataFrame({"Lô": ["L1"], "HSD": pd.to_datetime(["2026-09-03"]), "Tên hàng": ["Sơn"], "SL nhập (ĐVT cơ bản)": [120]})
+    book = pd.DataFrame({"Lô": ["L1"], "HSD": pd.to_datetime(["2026-09-03"]), "Tên hàng": ["Sơn"], "SL nhập": [4], "Giá nhập": [300]})
+    for order in (["base", "book"], ["book", "base"]):
+        tables = {n: {"base": base, "book": book}[n] for n in order}
+        roles = {n: {"Tên hàng": "product_name"} for n in order}
+        biz = Business("x", "train", parse_readme(""), tables, {n: TableInfo(n, [], {}, r) for n, r in roles.items()}, [])
+        lots = build_facts(biz, sales).lots
+        assert lots["qty"].tolist() == [120] and lots["price"].tolist() == [10]
+
+
 def test_unit_rules_read_both_prose_forms():
     text = "- **Hàng theo bó**: Ống D32, Ống D50 bán theo bó, 1 bó = 10 cây; ghi số bó.\n  - Đá 1x2: 1 xe 4m3 = 4 m3\n- Dữ liệu có đến hết 01/01/2026."
     assert unit_rules(text) == [("Ống D32", "bó", 10.0, "cây"), ("Ống D50", "bó", 10.0, "cây"), ("Đá 1x2", "xe 4m3", 4.0, "m3")]

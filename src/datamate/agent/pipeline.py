@@ -29,13 +29,14 @@ from datamate.fast import fast_answer
 from datamate.ingest import load_business, load_calendar
 from datamate.ingest.trust import assess
 from datamate.ingest.schema_card import schema_card
-from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, invariants
+from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, fit_money, fit_month, invariants
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
-from datamate.rules import rule_gate, rule_note
-from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, sql_card, sql_check_message, sql_question_part,
-                                sql_repair_message, sql_shadow)
+from datamate.rules import params_off, rule_gate, rule_note, rule_params
+from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, hint_periods, sql_card, sql_check_message,
+                                sql_question_part, sql_repair_message, sql_shadow)
 from datamate.sql.store import STORE_VERSION, ensure_store
+from datamate.sql.values import subjective_note
 
 
 @dataclass
@@ -218,16 +219,22 @@ def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], ind
 
 
 def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
-                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset()) -> dict:
+                   cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset(),
+                   macros=(), rulebook: str = "") -> dict:
     t0 = time.time()
     engine = ENGINES[cfg.engine]
     text, rw, pre = preprocess(q, llm, cfg, index)
     expect = expect_answer(text, rw)
     norm = {**pre.get("norm", {}), "expect": _expect_text(expect) if expect.hard else None}
+    if cfg.engine == "sql":  # values and qualities the question names, found without a model call (sql/values.py)
+        named = tuple(m["name"] for m in pre.get("mentions", []) if m.get("full"))
+        norm["values"] = pool.values.hints(text, named)
+        norm["subjective"] = subjective_note(text, rulebook, named)
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
     hints = time_hints(text, q["as_of_date"], cal)
     expect.window = date_window(text, hints)
     shadow = None if is_gated(text, off) else engine.shadow(text, hints)
+    extra = {"periods": hint_periods(hints)} if cfg.engine == "sql" else {}  # a period outside the data makes 'no rows' a reason
     user_parts = [biz_part, engine.question_part(q["question"], q["as_of_date"], examples, hints, norm)]
     samples = []
     for s in range(cfg.samples):
@@ -248,14 +255,15 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
             code = engine.extract(text_reply)
             advice = None
             if code and attempt == 0 and cfg.repair:
-                advice = term_advice(text, code, terms, cfg.engine) or (grain_advice(text, code) if cfg.engine == "pandas" else None)
+                advice = term_advice(text, code, terms, cfg.engine, macros) or (grain_advice(text, code) if cfg.engine == "pandas" else None)
             if code is None:
                 out = {"result": None, "error": engine.no_code, "stdout": ""}
             elif advice:  # one rewrite, never a block: the second attempt runs as written
                 out = {"result": None, "error": advice, "stdout": ""}
             else:
-                out = pool.run(code, q["as_of_date"], shadow)
+                out = pool.run(code, q["as_of_date"], shadow, **extra)
             if out["error"] is None and out["result"] is not None:
+                out["result"] = fit_money(fit_month(out["result"], expect), text)
                 why, hard = check_answer(out["result"], expect)
                 broken = invariants(out["result"], text, expect.window)  # never fire on train gold: hard
                 if broken:
@@ -307,7 +315,8 @@ def run(cfg: RunConfig) -> dict:
     def ask(system, parts):
         return _generate(llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
 
-    off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask)
+    params = rule_params(rulebook)  # numbers the macros take from this rulebook; unreadable ones turn their macros off
+    off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask) | params_off(params)
     system = ENGINES[cfg.engine].build_system(rulebook) + rule_note(off)
     examples_path = cfg.examples_path.with_name("examples_sql.jsonl") if cfg.engine == "sql" and cfg.examples_path else cfg.examples_path
     bank = ExampleBank.from_train(Path(cfg.data_root) / "train", examples_path,
@@ -346,9 +355,10 @@ def run(cfg: RunConfig) -> dict:
             terms = ready_terms(build_facts(biz, sales))
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
             left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
+            macros = []
             if cfg.engine == "sql":
                 store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
-                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout)
+                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout, params=params)
                 macros = [m for m in pool.macros() if m not in shop_off]
                 biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros))
                 part_of = (lambda q: business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, kept.get(q["id"])))) if kept else None
@@ -358,7 +368,7 @@ def run(cfg: RunConfig) -> dict:
                 part_of = None
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms)
+                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook)
                             for q in left]
                     for f in as_completed(futs):
                         try:

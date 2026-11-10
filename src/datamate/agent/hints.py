@@ -20,6 +20,9 @@ _DATE = re.compile(r"(?<![\d/])(\d{1,2})[/.-](\d{1,2})[/.-]" + _Y + r"(?![\d/])"
 _DATE_NOYEAR = re.compile(r"(?:ngay|hom|bua|sang|chieu|toi)\s*(\d{1,2})[/.-](\d{1,2})(?![/.-]?\d)")
 _MONTH_Y = re.compile(r"\b(?:thang|th|t)\s*(\d{1,2})\s*(?:[/.-]|\s+nam\s+|\s+)" + _Y + r"\b")
 _MONTH_BARE_Y = re.compile(r"(?<![\d/.-])(\d{1,2})[/-](\d{4})\b")
+# 'N tháng liền nhau kết thúc ở tháng X': the N months up to and including X
+_RUN_ENDING = re.compile(r"\b(\d{1,2}) thang (?:lien nhau|lien tiep|lien ke|lien) (?:ket thuc|tinh (?:toi|den)) (?:o |vao |tai )?(?:thang|th|t)\s*(\d{1,2})"
+                         r"\s*(?:[/.-]|\s+nam\s+|\s+)" + _Y + r"\b")
 _MONTH = re.compile(r"\b(?:thang|th)\s*(\d{1,2})\b(?!\s*(?:[/.-]|nam)\s*\d)")
 _QUARTER = re.compile(r"\b(?:quy|q)\s*([1-4])\b(?:\s*(?:[/.-]|nam|\s)\s*(\d{4}))?")
 _YEAR = re.compile(r"\bnam\s+(\d{4})\b")
@@ -27,6 +30,7 @@ _LAST_N = re.compile(r"\b(\d{1,3})\s*ngay\s*(?:gan (?:day|nhat)|qua|vua qua|vua 
 _FROM_D = re.compile(r"\b(\d{1,3})\s*ngay\s*(?:ke tu|tinh tu|bat dau tu|tu)\s*(?:ngay\s*)?(?:tang gia\s*)?")
 _BEFORE_D = re.compile(r"\b(\d{1,3})\s*ngay\s*(?:ngay\s*)?(?:truoc do|lien truoc|ngay truoc|truoc|ngay lien truoc)\b")
 _TET = re.compile(r"\btet\b(?:\s*(?:nam|am lich|nguyen dan)?\s*(\d{4}))?")
+_TET_REL = re.compile(r"\btet\s+(?:nam\s+)?(nay|truoc|ngoai|roi|trc|vua roi|vua qua)\b")  # Tết of this year / of last year
 
 RELATIVE = [
     (re.compile(r"\b(hom nay|bua nay|ngay hom nay|hnay)\b"), "today()"),
@@ -37,7 +41,9 @@ RELATIVE = [
     (re.compile(r"\bnam (ngoai|truoc|roi|vua roi|qua|trc)\b"), "year({py})"),
 ]
 _SAME_LAST_YEAR = re.compile(r"\bcung ky (nam|nam ngoai|nam truoc|nam trc|nam roi|nam ngoai)\b|\bcung thang (nam|nam ngoai|nam truoc|nam trc)\b")
-_THIS_MONTH = re.compile(r"\bthang (nay|hien tai)\b|\btu dau thang\b")
+_THIS_MONTH = re.compile(r"\bthang (nay|hien tai)\b|\btu dau thang\b|\btu (?:ngay )?mung (?:1|mot)\b")
+# between a bare month and a later month with a year, only more months of one list: 'tháng 3, tháng 4, tháng 5 năm 2025'
+_MONTH_LIST_GAP = re.compile(r"^(?:\s*(?:,|va|den|toi|het|-|thang|th|t|\d{1,2})\s*)*$")
 _PREV_MONTH = re.compile(r"\b(?:thang|th) (truoc|roi|vua roi|vua qua|lien truoc|lien trc|trc|qua)\b|\bky truoc\b")
 _UNTIL = re.compile(r"\b(den|toi|tinh den|tinh toi|cuoi|het)\s*(het\s*)?(ngay\s*)?(hom nay|nay|bay gio|gio)\b|\bhet hom nay\b|\bcuoi ngay hom nay\b")
 _UNTIL_D = re.compile(r"\b(?:den|toi|tinh den|tinh toi|cuoi)\s*(?:het\s*)?(?:ngay\s*)?(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})")
@@ -97,18 +103,27 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
             yy = int(m.group(2)) if m.group(2) else dm.quarter_auto(q).start.year
             add(m, f"quarter({yy}, {q})")
             anchor = anchor or f"quarter({yy}, {q})"
+        for m in _RUN_ENDING.finditer(f):
+            n, mm, yy = int(m.group(1)), int(m.group(2)), _year(m.group(3))
+            if free(m) and 1 <= n <= 12 and 1 <= mm <= 12 and 2000 < yy < 2100:
+                months = [((yy * 12 + mm - 1 - k) // 12, (yy * 12 + mm - 1 - k) % 12 + 1) for k in range(n - 1, -1, -1)]
+                add(m, f"month({months[0][0]}, {months[0][1]})")
+                for i, (y2, m2) in enumerate(months[1:], 1):
+                    out.append((m.start() + i, f"{m.group(0).strip()} (month {i + 1} of {n})", f"month({y2}, {m2})"))
         for rx in (_MONTH_Y, _MONTH_BARE_Y):
             for m in rx.finditer(f):
                 mm, yy = int(m.group(1)), _year(m.group(2))
                 if free(m) and 1 <= mm <= 12 and 2000 < yy < 2100:
                     add(m, f"month({yy}, {mm})")
                     anchor = anchor or f"month({yy}, {mm})"
+        dated = [(m.start(), _year(m.group(2))) for rx in (_MONTH_Y, _MONTH_BARE_Y) for m in rx.finditer(f)]
         for m in _MONTH.finditer(f):
             mm = int(m.group(1))
             if free(m) and 1 <= mm <= 12:
-                p = dm.month_auto(mm)
-                add(m, f"month({p.start.year}, {mm})")
-                anchor = anchor or f"month({p.start.year}, {mm})"
+                listed = next((yy for a, yy in sorted(dated) if a >= m.end() and _MONTH_LIST_GAP.match(f[m.end():a])), None)
+                yy = listed if listed and 2000 < listed < 2100 else dm.month_auto(mm).start.year
+                add(m, f"month({yy}, {mm})")
+                anchor = anchor or f"month({yy}, {mm})"
         for m in _YEAR.finditer(f):
             if free(m):
                 add(m, f"year({m.group(1)})")
@@ -116,6 +131,9 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
         for m in _LAST_N.finditer(f):
             if free(m):
                 add(m, f"last_n_days({int(m.group(1))})")
+        for m in _TET_REL.finditer(f):  # before 'năm nay' -> ytd(): "Tết năm nay" is one Tết, not the year so far
+            if free(m):
+                add(m, f"tet({t.year if m.group(1) == 'nay' else t.year - 1})")
         for m in _TET.finditer(f):
             if free(m):
                 yy = int(m.group(1)) if m.group(1) else (t.year if t.month <= 3 else t.year + 1)
@@ -130,7 +148,7 @@ def time_hints(question: str, as_of: str, cal: pd.DataFrame | None = None) -> li
             for m in _BEFORE_D.finditer(f):
                 if free(m):
                     add(m, f"days_before({d0}, {int(m.group(1))})")
-        range_end = re.search(r"\btu dau\b|\btu ngay\b|\bthang nay\b|\btuan nay\b|\bdau (?:nam|thang|tuan)\b|\btu \d{1,2}/\d{1,2}\b", f)
+        range_end = re.search(r"\btu dau\b|\btu ngay\b|\btu mung\b|\bthang nay\b|\btuan nay\b|\bdau (?:nam|thang|tuan)\b|\btu \d{1,2}/\d{1,2}\b", f)
         for m in _UNTIL.finditer(f):
             if free(m) and not range_end:
                 add(m, "until()  # point-in-time: everything from the start of the data to the end of today")
