@@ -224,7 +224,14 @@ profit uses the **cost recorded on the sale line**.
   an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
 - **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
   pandas code generation is paused; Docker and vLLM work is deferred.
-- **Status (2026-11-08, end of day):** read the README "Status (2026-11-08, end of day): start here" section first.
+- **Status (2026-11-11):** read the README "Status (2026-11-11): start here" section first. Public v5 leaderboard 0.759.
+  - Committed on `text2sql` (`b89d4dd`..`5de216b`, not pushed):
+    - train rules as macros, gated on their clauses;
+    - shift hours read from the rulebook;
+    - query rewrites and lints;
+    - value hints (`sql/values.py`).
+  - Replay: public 0.792, train 0.9077. A live run is still needed.
+- **Status (2026-11-08, end of day):** README "Status (2026-11-08, end of day)".
   - All fixes committed on `text2sql` (8 commits to `fd767ea`, not pushed). Replay train 0.9037, public 0.655.
   - Kaggle public-test SQL run in flight: `hydrochii/datamate-sql-public`.
   - Design rule from the user: question normalization keeps the content (wording only). Intent/semantic extraction is a separate

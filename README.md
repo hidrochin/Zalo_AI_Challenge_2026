@@ -188,7 +188,57 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
-## Status (2026-11-08, end of day): start here
+## Status (2026-11-11): start here
+
+**Public v5** (`hydrochii/datamate-sql-public`, code `fd767ea`), output in `outputs/kaggle/result_sql_public_v5`:
+- leaderboard **0.759**; by labels 0.751 (836 right / 85 wrong / 79 abstain);
+- error groups in `debug/sql_err_public_v5/REPORT.md` (gitignored).
+
+**Committed on `text2sql`** (`b89d4dd`..`5de216b`, not pushed): train rules as macros, fixes the code can make, value hints.
+`STORE_VERSION` 13, 367 tests pass. Old stores (`i19_s8`, `i19_s9`, `i20_s11`) were deleted.
+A fake-LLM smoke run had written `{}` roles for public dev_002/003/008 and a rule verdict; both were removed.
+
+New macros, each gated on its train-rulebook clause (`rules.DEPENDS`/`TESTED`):
+- money: `revenue_of`, `share_of`, `orders_of`, `qty_of`, `group_stats`, `flag`;
+- months and units: `revenue_rising`, `qty_unit`;
+- imports and stock: `import_total`, `supplier_stats`, `out_of_stock`;
+- debt: `debt_age_sum(x, lo, hi)` replaces `debt_aging`.
+
+Rulebook parameters:
+- the shift hours are read from the rulebook text (`rules.rule_params`) and set per session; if they cannot be read, the shift macros are off.
+- a clause that is missing from the rulebook turns its macro off. On public this switches off `price_on`, `avg_import_price` and `stock_split`.
+- the reworded 'Giao nhiều đợt' clause is asked once to the model.
+
+Code fixes:
+- `rewrite_macros`: a table macro read as `m(...).col`, a percent macro scaled ×100 or divided by a count, `price_effect` given a price;
+- `free_text_lint`: `=` on a free-text note column;
+- `unit_shadow`: 'bao nhiêu <đơn vị>' is checked against `qty_unit` after the query runs;
+- `_written_rules`: a conversion written in the cell ('thùng = 4 bịch');
+- a supplier column in the imports fact;
+- `out_of_stock` uses an alias, so `stock_at(product_name, …)` in a WHERE does not bind to its own table.
+
+`sql/values.py`: deterministic value hints, no model call:
+- the column and the exact value behind a question phrase (with synonyms such as tiền mặt → cash, tại quầy → store);
+- 'nhóm X' that no column holds;
+- a subjective superlative the rulebook does not define.
+
+**Measured:**
+- `sql-check` and `facts-check`: no misses;
+- new macros against train gold: rising 21/21, supplier 7/7, import_total 22/22, out_of_stock 1/1, kê đơn 38/38, unit counts without an item 9/9, channel / payment / group 215 right;
+- replay of logged replies (`debug/replay_v6.py`):
+  - train without catalog advice: 0.9037 → **0.9077** (+6, 0 lost);
+  - public v5: 0.751 → **0.792** (+34 questions, 0 lost).
+- caveats:
+  - the public gain comes from fixes made after reading public errors;
+  - the new macros and value hints only act through new model replies, so they need a live run.
+
+**Still wrong after replay:**
+- public: 140 questions, 208 points lost (groups in `debug/sql_err_public_v5/labels_v5.txt`).
+- train: 177 questions, 277 points lost. Its logs predate the formula catalog, so most of these groups now have a
+  macro that the logs never saw.
+- next step: a live run, on dev120 or public.
+
+## Status (2026-11-08, end of day)
 
 **Where to work.** One folder, `zalo_ai`, on branch `text2sql`. `main` is the final code and takes pull requests from `text2sql`.
 Everything below is **committed** on `text2sql` (`4dd9655`..`fd767ea`, 8 commits). Nothing is pushed to GitHub; opening the PR is the user's call.
