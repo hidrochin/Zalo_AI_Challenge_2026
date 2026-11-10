@@ -36,6 +36,7 @@ from datamate.rules import params_off, rule_gate, rule_note, rule_params
 from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, hint_periods, sql_card, sql_check_message,
                                 sql_question_part, sql_repair_message, sql_shadow)
 from datamate.sql.store import STORE_VERSION, ensure_store
+from datamate.sql.values import subjective_note
 
 
 @dataclass
@@ -219,12 +220,16 @@ def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], ind
 
 def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
                    cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset(),
-                   macros=()) -> dict:
+                   macros=(), rulebook: str = "") -> dict:
     t0 = time.time()
     engine = ENGINES[cfg.engine]
     text, rw, pre = preprocess(q, llm, cfg, index)
     expect = expect_answer(text, rw)
     norm = {**pre.get("norm", {}), "expect": _expect_text(expect) if expect.hard else None}
+    if cfg.engine == "sql":  # values and qualities the question names, found without a model call (sql/values.py)
+        named = tuple(m["name"] for m in pre.get("mentions", []) if m.get("full"))
+        norm["values"] = pool.values.hints(text, named)
+        norm["subjective"] = subjective_note(text, rulebook, named)
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
     hints = time_hints(text, q["as_of_date"], cal)
     expect.window = date_window(text, hints)
@@ -363,7 +368,7 @@ def run(cfg: RunConfig) -> dict:
                 part_of = None
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros)
+                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook)
                             for q in left]
                     for f in as_completed(futs):
                         try:

@@ -21,6 +21,7 @@ from datamate.eval.semantic import find_check
 from datamate.ingest.business import META_COLS, Business
 from datamate.ingest.schema_card import _column_line
 from datamate.sql.store import _slug, _writable, connect, run_select, set_as_of, set_params
+from datamate.sql.values import ValueIndex
 
 SYSTEM_TEMPLATE = """You are DataMate, an expert data analyst for Vietnamese small businesses. You answer ONE question about ONE shop's data by writing ONE DuckDB SQL SELECT on a read-only database.
 
@@ -285,6 +286,12 @@ def sql_hints(hints: list[str]) -> list[str]:
 def sql_question_part(question: str, as_of: str, examples: list[dict], hints: list[str] | None = None,
                       norm: dict | None = None) -> str:
     out = question_part(question, as_of, examples, None, norm, fence="sql")
+    if (norm or {}).get("values"):
+        out += ("\n\nValues in this shop's data whose words the question uses (column = exact value). Use one only if the "
+                "question means that value; filter with same_text(col, 'value') or the macros' col, value arguments:\n"
+                + "\n".join(norm["values"]))
+    if (norm or {}).get("subjective"):
+        out += "\n\nNote: " + norm["subjective"]
     lines = sql_hints(hints or [])
     if lines:
         out += "\n\nTime expressions, already resolved by the rulebook (use exactly these dates):\n" + "\n".join(lines)
@@ -634,6 +641,7 @@ class SqlPool:
         lo, hi = self.base.execute('select min("date"), max("date") from sales_all').fetchone() if cols else (None, None)
         self.span = (lo.isoformat(), hi.isoformat()) if lo is not None else None
         self.order_cols = order_money_cols(self.base)
+        self.values = ValueIndex.from_store(self.base) if cols else ValueIndex({})
 
     def macros(self) -> list[str]:
         return [r[0] for r in self.base.execute("select distinct function_name from duckdb_functions() where not internal").fetchall()]
