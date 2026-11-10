@@ -22,6 +22,7 @@ from datamate.ingest.business import META_COLS, Business
 from datamate.ingest.schema_card import _column_line
 from datamate.sql.store import _slug, _writable, connect, run_select, set_as_of, set_params
 from datamate.sql.values import ValueIndex
+from datamate.text import fold
 
 SYSTEM_TEMPLATE = """You are DataMate, an expert data analyst for Vietnamese small businesses. You answer ONE question about ONE shop's data by writing ONE DuckDB SQL SELECT on a read-only database.
 
@@ -397,6 +398,58 @@ def _shadow_warning(con, result: dict, shadow: tuple[str, str, str] | None, time
     return warning, {"type": result["type"], "answer": float(value)}
 
 
+# 'bán được bao nhiêu <đơn vị>' with no item, group or other filter: the rulebook's qty_unit, checked after the query runs
+_UNIT_ASK = r"\b(bao nhieu|may|bn)\s+({units})\b(?!\s+(nhieu|tram|tr\b))"
+_PLAIN_FILTER = re.compile(r'"?\bdate"?\s+between\s+date\s+\'[\d-]+\'\s+and\s+date\s+\'[\d-]+\'|'
+                           r'(same_text\(\s*)?"?\b(unit|base_unit)"?\s*(=|,)\s*\'[^\']*\'\s*\)?|\b(counted|is_goods|and)\b|[();]', re.I)
+
+
+def unit_asked(text: str, units) -> str | None:
+    """The base unit the question counts in ('bán được mấy ly'), matched with its diacritics when the question has them."""
+    from datamate.sql.values import _tokens
+
+    f = fold(text)
+    by_fold = {}
+    for u in units:
+        if u and len(fold(u)) > 1:
+            by_fold.setdefault(re.sub(r"[^a-z0-9]+", " ", fold(u)).strip(), []).append(u)
+    alts = "|".join(sorted(map(re.escape, by_fold), key=len, reverse=True))
+    m = re.search(_UNIT_ASK.format(units=alts), f) if alts else None
+    if m is None:
+        return None
+    said = _tokens(text)
+    idx = len(_tokens(f[:m.start(2)]))
+    word = said[idx] if idx < len(said) else ""
+    plain = word == fold(word)
+    return next((u for u in by_fold[m.group(2)] if plain or _tokens(u) == [word]), None)
+
+
+def unit_shadow(code: str, text: str, units) -> str | None:
+    """The unit to check the answer against: the query reads sales_lines with no filter but the period, the default rule
+    and the unit itself, so the question names no item, group or channel."""
+    unit = unit_asked(text, units) if units else None
+    if unit is None or not re.search(r"\bsum\s*\(\s*\"?qty_base\"?\s*\)\s+from\s+sales_lines\b", code, re.I):
+        return None
+    where = re.split(r"\bwhere\b", _body(code), 1, flags=re.I)
+    rest = _PLAIN_FILTER.sub(" ", where[1]) if len(where) == 2 else ""
+    return unit if not re.search(r"[a-z_\"]", rest, re.I) else None
+
+
+def _unit_warning(con, result: dict, unit: str, span: tuple[str, str], timeout: float) -> tuple[str | None, dict | None]:
+    if result.get("type") != "number":
+        return None, None
+    call = f"qty_unit('{unit}', date '{span[0]}', date '{span[1]}')"
+    try:
+        value = run_select(con, f"select {call}", timeout)[1][0][0]
+    except duckdb.Error:
+        return None, None
+    if value is None or abs(float(value) - float(result["answer"])) <= 1e-6:
+        return None, None
+    return (f"Your answer disagrees with the rulebook's 'Bán được bao nhiêu <đơn vị>': the items whose base unit is "
+            f"'{unit}', in base units, also when sold in a bigger unit. Use {call} unless the question asks for something else."), \
+        {"type": "number", "answer": float(value)}
+
+
 # Query shapes that are wrong whatever the shop: they never reach the database, and the message says what to do instead.
 _SCALAR_MACRO = r"\b(revenue|order_count|cancel_count|cancel_rate|avg_order_value|gross_profit|net_profit|debt_total)\s*\((?:[^()]|\([^()]*\))*\)"
 _LINTS = [
@@ -436,10 +489,25 @@ def order_money_lint(code: str, order_cols: tuple[str, ...]) -> str | None:
     return None
 
 
+_EQUALS_TEXT = re.compile(r'"([^"]+)"\s*=\s*\'[^\']*\'')
+_FREE_TEXT = re.compile(r"^(ghi chu|note|notes|dien giai|mo ta|noi dung|lam gi|cong viec|chi tiet|ghi chu don|tinh trang xe)$")
+
+
+def free_text_lint(code: str) -> str | None:
+    """`=` on a column written by hand ('Ghi chú' = 'bảo hành') misses the cells that say more ('bảo hành, phiếu d/m')."""
+    from datamate.ingest.roles import header_key
+
+    for m in _EQUALS_TEXT.finditer(code):
+        if _FREE_TEXT.match(header_key(m.group(1))):
+            return (f'"{m.group(1)}" is free text written by hand, so a cell can say more than the word you look for: '
+                    f'use has_name("{m.group(1)}", \'...\') (contains, ignoring case and diacritics), not =.')
+    return None
+
+
 def lint(code: str, walkin: bool = True, order_cols: tuple[str, ...] = ()) -> str | None:
     """Why this query shape is wrong, or None. walkin: the views have the `walkin` column (the shop records customers).
     order_cols: money columns of the order repeated on its lines."""
-    why = order_money_lint(code, order_cols)
+    why = order_money_lint(code, order_cols) or free_text_lint(code)
     if why:
         return why
     for rx, message in _LINTS:
@@ -538,6 +606,34 @@ def rebind_key(code: str, error: str) -> str | None:
     return re.sub(rf'"?\b{re.escape(m.group(1))}\b"?', to, code) if to else None
 
 
+TABLE_MACROS = ("customer_stats", "item_stats", "day_stats", "month_stats", "hour_stats", "debt_by_order", "debt_by_customer",
+                "slow_products", "lots_left", "expiring_lots", "stock_split", "group_stats", "supplier_stats", "out_of_stock")
+# macros that already return percent units, never to be scaled or divided again
+PERCENT_MACROS = ("share_customers_min_orders", "share_of", "cancel_rate")
+_ARGS = r"\((?:[^()']|'[^']*'|\((?:[^()']|'[^']*'|\([^()]*\))*\))*\)"  # a call's argument list, two levels of nesting
+_TABLE_COLUMN = re.compile(rf"\b({'|'.join(TABLE_MACROS)})\s*({_ARGS})\s*\.\s*(\"[^\"]+\"|\w+\b)(?!\s*[\[(])", re.I)
+_TABLE_ALONE = re.compile(rf"^(\s*select\s+)({'|'.join(TABLE_MACROS)})\s*({_ARGS})\s*;?\s*$", re.I | re.S)
+_SCALED = [re.compile(rf"\b100(?:\.0*)?\s*\*\s*((?:{'|'.join(PERCENT_MACROS)})\s*{_ARGS})", re.I),
+           re.compile(rf"\b((?:{'|'.join(PERCENT_MACROS)})\s*{_ARGS})\s*\*\s*100(?:\.0*)?\b", re.I),
+           re.compile(rf"\b((?:{'|'.join(PERCENT_MACROS)})\s*{_ARGS})\s*/\s*\w+\s*{_ARGS}", re.I)]
+_PRICE_GIVEN = re.compile(r"\bprice_effect\s*\(\s*('(?:[^']|'')*')\s*,\s*(\d+(?:\.\d+)?)\s*,", re.I)
+
+
+def rewrite_macros(code: str, macros=()) -> str:
+    """Calls of the store's macros the model writes in a shape that cannot run or is never right, written the right way:
+    a TABLE macro's column read as `m(...).col`, a TABLE macro selected alone, a percent macro scaled by 100 or divided by a
+    count, price_effect given the new price instead of the day. Each rewrite keeps what the call asks for."""
+    body = "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("--"))
+    head = code[:len(code) - len(code.lstrip())] + "\n".join(line for line in code.splitlines() if line.lstrip().startswith("--"))
+    new = _TABLE_COLUMN.sub(lambda m: f"(select {m.group(3)} from {m.group(1)}{m.group(2)})", body)
+    new = _TABLE_ALONE.sub(lambda m: f"{m.group(1)}* from {m.group(2)}{m.group(3)}", new)
+    for rx in _SCALED:
+        new = rx.sub(lambda m: m.group(1), new)
+    if not macros or "price_effect_at" in macros:
+        new = _PRICE_GIVEN.sub(lambda m: f"price_effect_at({m.group(1)}, {m.group(2)},", new)
+    return code if new == body else f"{head.strip()}\n{new}".strip()
+
+
 _LIMIT = re.compile(r"\blimit\b", re.I)
 _ORDER_BY = re.compile(r"\border\s+by\b", re.I)
 # Table macros that already return rows in rank order (criterion, then key), so `limit k` alone is a top-k
@@ -561,7 +657,7 @@ def macro_only(code: str) -> bool:
 
 def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, timeout: float = 30.0,
             periods: list[tuple[str | None, str]] = (), span: tuple[str, str] | None = None, walkin: bool = True,
-            order_cols: tuple[str, ...] = ()) -> dict:
+            order_cols: tuple[str, ...] = (), units: tuple[str, ...] = ()) -> dict:
     """Same record as sandbox._execute, for a reply taken by extract_sql.
     periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`."""
     m = _UNANSWERABLE.match(code)
@@ -575,7 +671,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         try:
             if _LIMIT.search(code) and not _ORDER_BY.search(code) and not _RANKED_SOURCE.match(_body(code)):
                 raise AnswerShape("LIMIT without ORDER BY picks rows at random: order by the criterion, then by code.")
-            code = add_named_products(add_not_walkin(code, walkin))
+            code = add_named_products(add_not_walkin(rewrite_macros(code), walkin))
             why = lint(code, walkin, order_cols)
             if why:
                 raise AnswerShape(why)
@@ -598,6 +694,9 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
     contract = None
     if error is None and warning is None:
         warning, contract = _shadow_warning(con, result, shadow, timeout)
+        unit = unit_shadow(written, shadow[0], units) if shadow and not warning else None
+        if unit:
+            warning, contract = _unit_warning(con, result, unit, shadow[1:], timeout)
     return {"result": result if error is None else None, "error": error, "warning": warning, "contract": contract, "stdout": preview,
             **_ran(written, code)}
 
@@ -642,6 +741,8 @@ class SqlPool:
         self.span = (lo.isoformat(), hi.isoformat()) if lo is not None else None
         self.order_cols = order_money_cols(self.base)
         self.values = ValueIndex.from_store(self.base) if cols else ValueIndex({})
+        self.units = tuple(r[0] for r in self.base.execute(
+            "select distinct base_unit from sales_all where base_unit is not null").fetchall()) if "base_unit" in cols else ()
 
     def macros(self) -> list[str]:
         return [r[0] for r in self.base.execute("select distinct function_name from duckdb_functions() where not internal").fetchall()]
@@ -649,7 +750,8 @@ class SqlPool:
     def run(self, code: str, as_of: str, shadow=None, periods: list[tuple[str | None, str]] = ()) -> dict:
         con = self._free.get()
         try:
-            return execute(con, code, str(as_of), self.names, shadow, self.timeout, periods, self.span, self.walkin, self.order_cols)
+            return execute(con, code, str(as_of), self.names, shadow, self.timeout, periods, self.span, self.walkin, self.order_cols,
+                           self.units)
         finally:
             self._free.put(con)
 
@@ -674,8 +776,15 @@ def sql_terms(msg: str) -> str:
     return _PANDAS_CALL.sub(one, msg)
 
 
+_TABLE_FN = re.compile(r'Function "(\w+)" is a table function but it was used as a scalar function')
+
+
 def sql_repair_message(exec_out: dict) -> str:
     msg = f"Your query failed:\n{sql_terms(str(exec_out.get('error')))}"
+    m = _TABLE_FN.search(str(exec_out.get("error")))
+    if m:  # the model repeats `m(...).col` after DuckDB's own message: say how a TABLE macro is read
+        msg += (f"\n{m.group(1)}(...) is a TABLE: read it with `select <column> from {m.group(1)}(...) where ...`, "
+                f"or `(select <column> from {m.group(1)}(...) where <one row>)` inside an expression.")
     if exec_out.get("stdout"):
         msg += f"\n\nfirst rows: {exec_out['stdout'][-500:]}"
     return msg + "\n\nFix it and return the full corrected query in one ```sql block, with its `-- type:` line."
