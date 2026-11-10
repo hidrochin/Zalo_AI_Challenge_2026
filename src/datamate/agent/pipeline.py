@@ -32,7 +32,7 @@ from datamate.ingest.schema_card import schema_card
 from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, fit_money, fit_month, invariants
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
-from datamate.rules import rule_gate, rule_note
+from datamate.rules import params_off, rule_gate, rule_note, rule_params
 from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, hint_periods, sql_card, sql_check_message,
                                 sql_question_part, sql_repair_message, sql_shadow)
 from datamate.sql.store import STORE_VERSION, ensure_store
@@ -310,7 +310,8 @@ def run(cfg: RunConfig) -> dict:
     def ask(system, parts):
         return _generate(llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
 
-    off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask)
+    params = rule_params(rulebook)  # numbers the macros take from this rulebook; unreadable ones turn their macros off
+    off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask) | params_off(params)
     system = ENGINES[cfg.engine].build_system(rulebook) + rule_note(off)
     examples_path = cfg.examples_path.with_name("examples_sql.jsonl") if cfg.engine == "sql" and cfg.examples_path else cfg.examples_path
     bank = ExampleBank.from_train(Path(cfg.data_root) / "train", examples_path,
@@ -352,7 +353,7 @@ def run(cfg: RunConfig) -> dict:
             macros = []
             if cfg.engine == "sql":
                 store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
-                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout)
+                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout, params=params)
                 macros = [m for m in pool.macros() if m not in shop_off]
                 biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros))
                 part_of = (lambda q: business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, kept.get(q["id"])))) if kept else None

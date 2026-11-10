@@ -20,7 +20,7 @@ from datamate.canon import build_orders
 from datamate.eval.semantic import find_check
 from datamate.ingest.business import META_COLS, Business
 from datamate.ingest.schema_card import _column_line
-from datamate.sql.store import _slug, _writable, connect, run_select, set_as_of
+from datamate.sql.store import _slug, _writable, connect, run_select, set_as_of, set_params
 
 SYSTEM_TEMPLATE = """You are DataMate, an expert data analyst for Vietnamese small businesses. You answer ONE question about ONE shop's data by writing ONE DuckDB SQL SELECT on a read-only database.
 
@@ -89,7 +89,7 @@ select count(*) from orders where counted and shift_of(order_ts) = 'chiều' and
 ```
 ```sql
 -- type: table
--- 3 khách còn nợ nhiều nhất đến hết 30/06/2026; khách còn nợ bao nhiêu: debt_total; tuổi nợ, đơn quá N ngày: debt_by_order
+-- 3 khách còn nợ nhiều nhất đến hết 30/06/2026; khách còn nợ bao nhiêu: debt_total; tuổi nợ, đơn quá N ngày: debt_age_sum
 select customer_name as khach_hang, debt as so_tien_no from debt_by_customer(date '2026-06-30') limit 3
 ```
 ```sql
@@ -114,9 +114,8 @@ select min(expiry) from lots_left(as_of()) where product_name = 'Oresol 245 DHG 
 ```
 ```sql
 -- type: percent
--- tỉ trọng doanh thu nhóm khách: customer_group is on sales_lines, walk-in orders stay in the total
-select round_half_up(100.0 * sum(amount) filter (same_text(customer_group, 'sỉ')) / sum(amount), 2)
-from sales_lines where counted and "date" between date '2026-05-01' and date '2026-05-31'
+-- tỉ trọng doanh thu nhóm khách / nhóm hàng: the group column, exactly that group ('trà' is not 'trà sữa'); walk-ins stay in the total
+select share_of(customer_group, 'sỉ', date '2026-05-01', date '2026-05-31')
 ```
 ```sql
 -- type: count
@@ -126,10 +125,9 @@ select count(*) from (select customer from orders
   group by customer having count(distinct order_id) >= 3)
 ```
 ```sql
--- type: percent
--- tỉ trọng doanh thu nhóm: filter sales_lines on the source column listed in the schema card; exactly that group ('trà' is not 'trà sữa')
-select round_half_up(100.0 * sum(amount) filter (same_text("Nhóm hàng", 'hải sản')) / sum(amount), 2)
-from sales_lines where counted and "date" between date '2025-03-01' and date '2025-03-31'
+-- type: list
+-- doanh thu đơn trả bằng COD và đơn trả bằng tiền mặt: the column and the values written in this shop's data ('Values in this shop's data' block)
+select revenue_of("Trả bằng", 'cod', date '2025-03-01', date '2025-03-31'), revenue_of("Trả bằng", 'cash', date '2025-03-01', date '2025-03-31')
 ```
 ```sql
 -- type: date
@@ -151,12 +149,15 @@ MACROS = {
     "debt_by_order": "debt_by_order(x): TABLE of orders still owing at the end of day x: order_id, date, customer, customer_name, walkin, debt, age (days from the order date). Use it for 'tuổi nợ' and 'đơn đặt quá N ngày'",
     "debt_by_customer": "debt_by_customer(x): TABLE customer, customer_name, debt, biggest first, no walk-in row. Use it for 'top khách nợ'",
     "debt_customers": "debt_customers(x): 'bao nhiêu khách còn nợ': the NUMBER of customers still owing at the end of day x (not an amount)",
-    "debt_aging": "debt_aging(x): TABLE of one row \"0-7\", \"8-15\", \"over 15\": debt by age in days at the end of day x (for 'tuổi nợ 0–7, 8–15, trên 15')",
+    "debt_age_sum": "debt_age_sum(x, lo, hi): debt at the end of day x of the orders whose age in days is from lo to hi (hi NULL = no upper bound). Take the buckets from the question: 'tuổi nợ 0–7, 8–15, trên 15' = select debt_age_sum(x, 0, 7), debt_age_sum(x, 8, 15), debt_age_sum(x, 16, null) as a list; 'quá 7 ngày' = debt_age_sum(x, 8, null)",
     "debt_repaid": "debt_repaid(a, b): 'thu nợ, trả nợ' in the period: payments dated in it, after the day of purchase, on any on-credit order, also of earlier periods",
     "debt_repaid_of": "debt_repaid_of(customer_name, a, b): debt_repaid for one customer",
     "debt_new": "debt_new(a, b): 'nợ thêm': what on-credit orders placed in the period left unpaid at the end of the day of purchase",
     "debt_new_of": "debt_new_of(customer_name, a, b): debt_new for one customer",
     "delivery_trips": "delivery_trips(a, b): 'số đợt giao': distinct (order, trip) pairs delivered in the period",
+    "import_total": "import_total(a, b): 'tiền nhập hàng': money of the import receipts dated in the period, cancelled receipts dropped",
+    "supplier_stats": "supplier_stats(a, b): TABLE supplier, amount (import money), receipts (number of receipts), biggest amount first. Rulebook: nhà cung cấp nhập nhiều (tiền) nhất = amount",
+    "out_of_stock": "out_of_stock(d): TABLE product_name of the goods out of stock at the END of day d ('hết hàng cuối ngày': goods bought to resell, stock 0 after the day's last move); count(*) for 'mấy mặt hàng'",
     "avg_import_price": "avg_import_price(product_name, a, b): 'giá nhập bình quân', weighted by quantity; never avg() of prices",
     "import_minus_sales": "import_minus_sales(product_name, a, b): 'nhập trừ bán, chênh nhập và bán' in base units (sold = counted orders)",
     "gross_profit": "gross_profit(a, b): 'lãi gộp': revenue minus quantity × the cost on each sale line",
@@ -178,8 +179,16 @@ MACROS = {
     "item_stats": "item_stats(a, b): TABLE one row per item: product_name, product_key, qty (base units), revenue, orders (orders containing it)[, profit]. bán chạy = qty; nhiều tiền = revenue; ưa chuộng nhất / có mặt trong nhiều đơn = orders; lời nhất = profit",
     "items_in_min_orders": "items_in_min_orders(n, a, b): how many items appear in at least n counted orders",
     "day_stats": "day_stats(a, b): TABLE one row per day with orders: date, revenue, orders. 'ngày bán nhiều tiền nhất' = revenue; 'ngày đắt khách nhất' = orders; 'mấy ngày/bữa bán được từ X' = count(*) where revenue >= X",
-    "month_stats": "month_stats(a, b): TABLE one row per month: month ('YYYY-MM'), revenue, orders. 'tháng nào cao nhất' = select month ... order by revenue desc; growth month after month = compare consecutive rows",
-    "shift_revenue": "shift_revenue(s, a, b): revenue of shift s ('sáng' or 'chiều') in the period",
+    "month_stats": "month_stats(a, b): TABLE one row per month: month ('YYYY-MM'), revenue, orders. 'tháng nào cao nhất' = select month from month_stats(a, b) order by revenue desc, month limit 1",
+    "revenue_rising": "revenue_rising(a, b): true when the revenue of every month from a to b is above the month before it ('doanh thu có tăng liên tục / tháng sau luôn cao hơn tháng trước'): a = the first day of the first month, b = the last day of the last month",
+    "revenue_of": "revenue_of(col, value, a, b): revenue (default rule) of the lines whose column col equals value: a channel, payment method, product or customer group, staff, a flag. col is a column of sales_lines, quoted: revenue_of(\"Kênh bán\", 'Zalo OA', a, b). For a yes/no column pass flag(col) and true",
+    "share_of": "share_of(col, value, a, b): percent of the shop's whole revenue (walk-ins and fee lines in the total) made by the lines whose col equals value ('nhóm X chiếm bao nhiêu %', 'đơn trả bằng tiền mặt bằng bao nhiêu %')",
+    "orders_of": "orders_of(col, value, a, b): counted orders with at least one line whose col equals value ('số đơn có mua nhóm X', 'số đơn qua kênh Y')",
+    "qty_of": "qty_of(col, value, a, b): quantity sold in base units of the lines whose col equals value",
+    "group_stats": "group_stats(col, a, b): TABLE one row per value of col (staff, channel, group...): value, revenue, orders, qty (base units), days. 'nhân viên bán giỏi nhất' = select value from group_stats(\"<staff column>\", a, b) order by revenue desc, value limit 1",
+    "qty_unit": "qty_unit(unit, a, b): 'bán được bao nhiêu <đơn vị>' with no item named: base-unit quantity of the items whose base unit is that unit ('bao nhiêu ly' = qty_unit('ly', a, b))",
+    "flag": "flag(col): a yes/no cell as a boolean whatever the shop writes (true, 1, 'x', 'có'): 'thuốc kê đơn' = flag(\"Thuốc kê đơn\")",
+    "shift_revenue": "shift_revenue(s, a, b): revenue of shift s ('sáng' or 'chiều') in the period, shift hours as the rulebook gives them",
     "shift_orders": "shift_orders(s, a, b): counted orders of shift s. Ca chiều vs ca sáng: pct_change(<chiều>, <sáng>), the morning shift is the base",
     "hour_stats": "hour_stats(a, b): TABLE hour, orders, busiest first. 'giờ cao điểm' = the first hour (a number)",
     "size_qty": "size_qty(s, a, b): cups of size s ('M', 'L') sold: items whose name ends with '(s)', base units",
@@ -192,7 +201,7 @@ MACROS = {
     "has_name": "has_name(col, 'text'): col contains text, ignoring case and diacritics",
     "same_text": "same_text(col, 'text'): col equals text, ignoring case, diacritics and punctuation; use it for 'hoạt chất X' (a combination drug is another active ingredient) and 'nhóm X' (exactly that group), has_name would count more",
     "fold_text": "fold_text(x): lowercase without diacritics, underscores as spaces",
-    "shift_of": "shift_of(ts): 'sáng' for 06:00-13:59, 'chiều' for 14:00-21:59, else NULL",
+    "shift_of": "shift_of(ts): 'sáng' or 'chiều' by the hours of the rulebook's 'Ca sáng, ca chiều' rule, else NULL",
     "as_of": "as_of(): today",
 }
 
@@ -611,12 +620,15 @@ def order_money_cols(con) -> tuple[str, ...]:
 class SqlPool:
     """N cursors on one read-only store; run() is thread-safe, each cursor keeps its own as_of."""
 
-    def __init__(self, path: Path, names: set[str] | None, n: int = 2, timeout: int = 30):
-        self.base = connect(path, "2000-01-01")
+    def __init__(self, path: Path, names: set[str] | None, n: int = 2, timeout: int = 30, params: dict | None = None):
+        """params: the rulebook numbers the macros read (rules.rule_params); None keeps the train rulebook's."""
+        self.base = connect(path, "2000-01-01", params)
         self.names, self.timeout = names, timeout
         self._free: queue.Queue = queue.Queue()
         for _ in range(max(1, n)):
-            self._free.put(self.base.cursor())
+            cur = self.base.cursor()
+            set_params(cur, params)  # each cursor has its own variables
+            self._free.put(cur)
         cols = {r[0] for r in self.base.execute("select column_name from duckdb_columns() where table_name = 'sales_all'").fetchall()}
         self.walkin = "walkin" in cols
         lo, hi = self.base.execute('select min("date"), max("date") from sales_all').fetchone() if cols else (None, None)
