@@ -206,6 +206,21 @@ def _product_names(t: pd.DataFrame, ti: TableInfo, lookup: tuple[dict, dict]) ->
     return None
 
 
+_SUPPLIER_HEAD = r"^(nha cung cap|ncc|ten ncc|ma ncc|ma nha cung cap|nha cc)$"
+_NAME_HEAD = re.compile(r"^(ten( goi| ncc| nha cung cap)?|nha cung cap|ho ten)$")
+
+
+def _supplier_names(biz: Business, col: str, codes: pd.Series) -> pd.Series:
+    """Supplier codes written out with the name of a supplier list that keys them (MaNhaCungCap -> TenGoi); names stay."""
+    for name, t in biz.tables.items():
+        if col not in t.columns or t[col].duplicated().any() or len(t) > 5000:
+            continue
+        full = next((c for c in t.columns if c != col and _NAME_HEAD.match(header_key(c))), None)
+        if full is not None and codes.dropna().isin(t[col]).mean() > 0.8:
+            return codes.map(dict(zip(t[col], t[full]))).fillna(codes)
+    return codes
+
+
 def _imports(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
     for name, t in biz.tables.items():
         ti = biz.info[name]
@@ -222,6 +237,8 @@ def _imports(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
         f["product_name"] = _product_names(t, ti, lookup)
         when = pick(t, ti, "import_date", r"^ngay nhap", r"^(ngay nhap|ngay|thoi gian)$")
         f["date"], f["cancelled"] = (_day(t[when]) if when else pd.NaT), False
+        sup = pick(t, ti, "supplier", r"^nha cung cap", _SUPPLIER_HEAD)
+        f["supplier"] = t[sup].values if sup else None
         status = next((c for c in t.columns if str(c).endswith("__norm")), None)
         if status:
             f["cancelled"] = t[status] == "huỷ"
@@ -232,11 +249,17 @@ def _imports(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
                     continue
                 hd = pick(h, hi, "import_date", r"^ngay nhap", r"^(ngay nhap|ngay|thoi gian)( kho)?$")
                 hs = next((c for c in h.columns if str(c).endswith("__norm")), None)
+                hsup = None if sup else pick(h, hi, "supplier", r"^nha cung cap", _SUPPLIER_HEAD)
                 head = h.set_index(doc)
                 if hd:
                     f["date"] = f["date"].fillna(f["doc"].map(_day(head[hd])))
                 if hs:
                     f["cancelled"] = f["cancelled"] | (f["doc"].map(head[hs]) == "huỷ")
+                if hsup:
+                    f["supplier"] = f["doc"].map(head[hsup])
+                    sup = hsup
+        if sup:
+            f["supplier"] = _supplier_names(biz, sup, f["supplier"])
         f = f[~f["cancelled"]].dropna(subset=["date", "qty", "price"]).drop(columns="cancelled")
         return f.assign(amount=f["qty"] * f["price"]).reset_index(drop=True)
     return None

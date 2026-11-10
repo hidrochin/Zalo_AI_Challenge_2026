@@ -96,6 +96,10 @@ def unit_factors(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict
         fcol = next((c for c, h in heads.items() if _FACTOR.match(h) and pd.api.types.is_numeric_dtype(t[c])), None)
         ucol = next((c for c, h in heads.items() if _CONV_UNIT.match(h) and not _BASE_UNIT.match(h)
                      and roles_by_table.get(n, {}).get(c) != "base_unit"), None)
+        written = _written_rules(t, fcol) if fcol is not None and ucol is None else None
+        if written is not None:  # the rule is the cell's text: 'Quy đổi' = "1 thùng = 4 bịch"
+            t = t.assign(_conv_unit=written[0], _conv_factor=written[1])
+            fcol, ucol = "_conv_factor", "_conv_unit"
         if fcol is None or ucol is None:
             continue
         best = None
@@ -111,7 +115,7 @@ def unit_factors(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict
         if best is None:
             continue
         kname, kcol, _ = best
-        sub = f"{fcol}__unit" if f"{fcol}__unit" in t.columns else None
+        sub = f"{fcol}__unit" if f"{fcol}__unit" in t.columns and written is None else None
         raw = {(fold(k), fold(u)): (float(f), fold(s) if sub and isinstance(s, str) else None)
                for k, u, f, s in zip(t[kcol], t[ucol], t[fcol], t[sub] if sub else [None] * len(t))
                if pd.notna(k) and pd.notna(u) and pd.notna(f)}
@@ -125,6 +129,24 @@ def unit_factors(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict
             factors[(k, u)] = f
         found.append((factors, kname, f"T['{n}'] (`{fcol}` per `{ucol}`, keyed by {kname})"))
     return found
+
+
+_WRITTEN_RULE = re.compile(r"^\s*([^\d=]+?)\s*=\s*(\d+(?:[.,]\d+)?)\s*\S.*$")
+
+
+def _written_rules(t: pd.DataFrame, fcol: str) -> tuple[pd.Series, pd.Series] | None:
+    """(unit, base units per unit) of a factor column whose cells are written rules: ingestion keeps the number of
+    "1 thùng = 4 bịch" in `fcol` (1) and the rest in `fcol__unit` ("thùng = 4 bịch"). None unless most cells read so."""
+    sub = f"{fcol}__unit"
+    if sub not in t.columns:
+        return None
+    text = t[sub].where(t[sub].map(lambda v: isinstance(v, str)))
+    m = text.dropna().str.extract(_WRITTEN_RULE)
+    if text.notna().sum() < 2 or m[0].notna().mean() < 0.8:
+        return None
+    parts = text.str.extract(_WRITTEN_RULE)
+    lead = pd.to_numeric(t[fcol], errors="coerce").where(lambda x: x > 0).fillna(1.0)
+    return parts[0].str.strip(), pd.to_numeric(parts[1].str.replace(",", "."), errors="coerce") / lead
 
 
 _CODE_HEAD = re.compile(r"^(ma( hang( hoa)?| h ?\.? ?hoa| sp| san pham| hh)?|sku|code)$")  # 'Mã H.hóa'; not barcode
