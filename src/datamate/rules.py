@@ -51,7 +51,8 @@ DEPENDS = {
     'customer_stats': ('Xác định khách', 'Số đơn', 'Đơn tính vào doanh thu'),
     'item_stats': ('Bán chạy', 'Số đơn', 'Đơn tính vào doanh thu'),
 }
-# Clause texts the definitions were checked against: the train rulebook (contracts on gold) and later wordings read by hand.
+# Clause texts the definitions were checked against: the train rulebook only (contracts on gold). No other split's
+# wording may be stored here: a rulebook of another split is not a development resource.
 TESTED: dict[str, tuple[str, ...]] = {
     'Đơn tính vào doanh thu': (
         'đơn **không huỷ** và **không trả hàng**. Đơn có trả hàng, **kể cả chỉ trả một phần**, là đơn trả hàng: bỏ **cả đơn**. Đơn đang giao vẫn tính',
@@ -61,7 +62,6 @@ TESTED: dict[str, tuple[str, ...]] = {
     ),
     'Đơn thuộc kỳ nào': (
         'theo **ngày đặt**, không theo ngày giao hay ngày thu tiền',
-        'theo **ngày đặt**, không theo ngày giao hay ngày thu tiền. Đơn trả hàng sau kỳ, kể cả trả sau hôm nay, vẫn bị loại khỏi doanh thu kỳ đặt',
     ),
     'Số đơn': (
         'chỉ tính đơn không huỷ, không trả; cả khi đếm số đơn có một mặt hàng, số đơn của một khách. **Khách đã mua** trong kỳ là khách có ít nhất một đơn như vậy trong kỳ',

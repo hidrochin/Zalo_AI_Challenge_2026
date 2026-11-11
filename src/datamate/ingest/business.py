@@ -16,13 +16,13 @@ from datamate.ingest.roles import assign_roles, is_known_status, normalize_statu
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 20
+INGEST_VERSION = 21
 META_COLS = ("_file", "_sheet")
 README_UNITS = "README.QuyDoi"
 
 _DATE_NAME = re.compile(r"\b(ngay|date|thoi gian|time|thoi diem|hsd|han su dung|han dung|han tra|han thanh toan|gio|sinh nhat|ngay sinh)\b")
 _CODE_NAME = re.compile(
-    r"\b(ma|id|sdt|so dt|dien thoai|phone|di dong|imei|cccd|cmnd|mst|ma so thue|bien so|barcode|ean|so ct|so phieu|so hd|so hoa don|lo)\b"
+    r"\b(ma|id|so dt|dien thoai|phone|di dong|cccd|cmnd|mst|ma so thue|bien so|barcode|ean|so ct|so phieu|so hd|so hoa don|lo)\b"
 )
 _GENERIC_SHEET = re.compile(r"^(sheet\d*|trang\d*|t?h?\w{0,5}\s*\d{1,2}\D{1,3}20\d{2}|\d{1,2}\D20\d{2})$", re.I)
 
@@ -150,7 +150,7 @@ def assemble(biz_id: str, split: str, readme: Readme, pieces: list[tuple[RawShee
             for k, v in readme.descs_for(sh.file, sh.sheet).items():
                 descs.setdefault(k, v)
         sources = [(sh.file, sh.sheet) for sh, _ in members]
-        roles = {**assign_roles(cols, descs, readme.order_keys), **extra_roles.get(name, {})}
+        roles = {**assign_roles(cols, descs), **extra_roles.get(name, {})}
         ti = TableInfo(name=name, sources=sources, descs=descs, roles=roles)
         df = _clean(df, ti)
         tables[name] = df

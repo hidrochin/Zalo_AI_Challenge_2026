@@ -175,28 +175,24 @@ MACROS = {
     "expiring_lots": "expiring_lots(d, n): TABLE of lots with stock whose expiry is from day d to d + n: lot, product_name, expiry, left, capital (= left × the lot's own price, 'tiền vốn'); count rows for 'mấy lô'",
     "avg_order_value": "avg_order_value(a, b): revenue / counted orders, rounded to đồng",
     "avg_order_value_group": "avg_order_value_group(group, a, b): avg_order_value of one customer group ('khách nhóm G trung bình mỗi đơn')",
-    "customer_stats": "customer_stats(a, b): TABLE one row per customer (walk-ins excluded): customer, customer_name, orders, days (days with an order), revenue, avg_order, cancels. Rulebook: mua nhiều tiền nhất = revenue; trung thành nhất = days; sộp nhất = avg_order among orders >= 3; hay đổi ý nhất = cancels; mua nhiều lần/đơn nhất = orders. Ties: order by the measure desc, then customer",
+    "customer_stats": "customer_stats(a, b): TABLE one row per customer (walk-ins excluded): customer, customer_name, orders, revenue. Rulebook: mua nhiều tiền nhất = revenue; mua nhiều lần/đơn nhất = orders. Ties: order by the measure desc, then customer",
     "customers_min_orders": "customers_min_orders(n, a, b): how many customers have at least n counted orders in the period",
     "share_customers_min_orders": "share_customers_min_orders(n, a, b): percent of the customers who bought in the period that have at least n orders ('khách mua từ N đơn trở lên chiếm mấy %')",
-    "item_stats": "item_stats(a, b): TABLE one row per item: product_name, product_key, qty (base units), revenue, orders (orders containing it)[, profit]. bán chạy = qty; nhiều tiền = revenue; ưa chuộng nhất / có mặt trong nhiều đơn = orders; lời nhất = profit",
+    "item_stats": "item_stats(a, b): TABLE one row per item: product_name, product_key, qty (base units), revenue, orders (orders containing it)[, profit]. bán chạy = qty; nhiều tiền = revenue; có mặt trong nhiều đơn = orders; lời nhất = profit",
     "items_in_min_orders": "items_in_min_orders(n, a, b): how many items appear in at least n counted orders",
-    "day_stats": "day_stats(a, b): TABLE one row per day with orders: date, revenue, orders. 'ngày bán nhiều tiền nhất' = revenue; 'ngày đắt khách nhất' = orders; 'mấy ngày/bữa bán được từ X' = count(*) where revenue >= X",
+    "day_stats": "day_stats(a, b): TABLE one row per day with orders: date, revenue. 'ngày nào doanh thu cao nhất' = revenue; 'mấy ngày/bữa bán được từ X' = count(*) where revenue >= X",
     "month_stats": "month_stats(a, b): TABLE one row per month: month ('YYYY-MM'), revenue, orders. 'tháng nào cao nhất' = select month from month_stats(a, b) order by revenue desc, month limit 1",
     "revenue_rising": "revenue_rising(a, b): true when the revenue of every month from a to b is above the month before it ('doanh thu có tăng liên tục / tháng sau luôn cao hơn tháng trước'): a = the first day of the first month, b = the last day of the last month",
     "revenue_of": "revenue_of(col, value, a, b): revenue (default rule) of the lines whose column col equals value: a channel, payment method, product or customer group, staff, a flag. col is a column of sales_lines, quoted: revenue_of(\"Kênh bán\", 'Zalo OA', a, b). For a yes/no column pass flag(col) and true",
     "share_of": "share_of(col, value, a, b): percent of the shop's whole revenue (walk-ins and fee lines in the total) made by the lines whose col equals value ('nhóm X chiếm bao nhiêu %', 'đơn trả bằng tiền mặt bằng bao nhiêu %')",
     "orders_of": "orders_of(col, value, a, b): counted orders with at least one line whose col equals value ('số đơn có mua nhóm X', 'số đơn qua kênh Y')",
     "qty_of": "qty_of(col, value, a, b): quantity sold in base units of the lines whose col equals value",
-    "group_stats": "group_stats(col, a, b): TABLE one row per value of col (staff, channel, group...): value, revenue, orders, qty (base units), days. 'nhân viên bán giỏi nhất' = select value from group_stats(\"<staff column>\", a, b) order by revenue desc, value limit 1",
+    "group_stats": "group_stats(col, a, b): TABLE one row per value of col (staff, channel, group...): value, revenue, orders, qty (base units). 'nhân viên bán giỏi nhất' = select value from group_stats(\"<staff column>\", a, b) order by revenue desc, value limit 1",
     "qty_unit": "qty_unit(unit, a, b): 'bán được bao nhiêu <đơn vị>' with no item named: base-unit quantity of the items whose base unit is that unit ('bao nhiêu ly' = qty_unit('ly', a, b))",
     "flag": "flag(col): a yes/no cell as a boolean whatever the shop writes (true, 1, 'x', 'có'): 'thuốc kê đơn' = flag(\"Thuốc kê đơn\")",
     "shift_revenue": "shift_revenue(s, a, b): revenue of shift s ('sáng' or 'chiều') in the period, shift hours as the rulebook gives them",
     "shift_orders": "shift_orders(s, a, b): counted orders of shift s. Ca chiều vs ca sáng: pct_change(<chiều>, <sáng>), the morning shift is the base",
-    "hour_stats": "hour_stats(a, b): TABLE hour, orders, busiest first. 'giờ cao điểm' = the first hour (a number)",
     "size_qty": "size_qty(s, a, b): cups of size s ('M', 'L') sold: items whose name ends with '(s)', base units",
-    "model_line": "model_line(product_name): 'dòng máy': the name before its capacity '…GB' (the whole name when it has none)",
-    "brand_of": "brand_of(product_name): 'hãng': the first word of the name; iPhone is Apple",
-    "extra_lines": "extra_lines('voucher' | 'ship' | 'điểm', a, b): money of the lines that are not goods (voucher discount, shipping fee, points used) as a positive number, by invoice day, orders not cancelled or returned",
     "price_on": "price_on(product_name, d): 'giá bán X ngày D', price per base unit before line discount",
     "round_half_up": "round_half_up(x, n): rounds half away from zero",
     "pct_change": "pct_change(new, old): percent change, NULL when old is 0",
@@ -480,7 +476,7 @@ _LINTS = [
     (re.compile(r"\b100(\.0*)?\s*\*\s*cancel_rate\s*\(", re.I), "cancel_rate() already returns percent units: do not multiply it by 100."),
     (re.compile(r"\bcount\(\s*\*\s*\)\s+from\s+sales_lines\b", re.I), "sales_lines has one row per product line, so count(*) counts lines. "
                                                                          "Orders: count(distinct order_id) or the `orders` view. Items sold "
-                                                                         "('bán mấy máy/chiếc/lon'): sum(qty_base)."),
+                                                                         "('bán mấy lon/chai'): sum(qty_base)."),
     (re.compile(r"\b(having|order\s+by)\s+count\(\s*\*\s*\)", re.I), None),
     (re.compile(r"\bavg\(\s*\"?(gi[aá] nh[aậ]p|dongianhap|đơn giá|don gia)", re.I), "A mean of prices is not 'giá nhập bình quân': use avg_import_price(), weighted by quantity."),
     (re.compile(r"has_name\(\s*\"?(ho[aạ]t ch[aấ]t|thanhphanchinh|th[aà]nh ph[aầ]n)\"?\s*,\s*'[^']+'", re.I),
@@ -509,11 +505,11 @@ def order_money_lint(code: str, order_cols: tuple[str, ...]) -> str | None:
 
 
 _EQUALS_TEXT = re.compile(r'"([^"]+)"\s*=\s*\'[^\']*\'')
-_FREE_TEXT = re.compile(r"^(ghi chu|note|notes|dien giai|mo ta|noi dung|lam gi|cong viec|chi tiet|ghi chu don|tinh trang xe)$")
+_FREE_TEXT = re.compile(r"^(ghi chu|dien giai|mo ta|noi dung|chi tiet|ghi chu don)$")
 
 
 def free_text_lint(code: str) -> str | None:
-    """`=` on a column written by hand ('Ghi chú' = 'bảo hành') misses the cells that say more ('bảo hành, phiếu d/m')."""
+    """`=` on a column written by hand ('Ghi chú' = 'X') misses the cells that say more ('X, ...')."""
     from datamate.ingest.roles import header_key
 
     for m in _EQUALS_TEXT.finditer(code):
@@ -632,7 +628,7 @@ def rebind_key(code: str, error: str) -> str | None:
     return re.sub(rf'"?\b{re.escape(m.group(1))}\b"?', to, code) if to else None
 
 
-TABLE_MACROS = ("customer_stats", "item_stats", "day_stats", "month_stats", "hour_stats", "debt_by_order", "debt_by_customer",
+TABLE_MACROS = ("customer_stats", "item_stats", "day_stats", "month_stats", "debt_by_order", "debt_by_customer",
                 "slow_products", "lots_left", "expiring_lots", "stock_split", "group_stats", "supplier_stats", "out_of_stock")
 # macros that already return percent units, never to be scaled or divided again
 PERCENT_MACROS = ("share_customers_min_orders", "share_of", "cancel_rate")
@@ -739,7 +735,7 @@ def _ran(written: str, code: str) -> dict:
 
 
 _ORDER_OWN = {"order_id", "date", "order_ts", "counted", "goods_amount", "n_lines", "qty_base", "walkin"}
-_MONEY_HEAD = re.compile(r"\b(tien|tong|tra|no|giam|bot|thu|phi|ship|chiet khau|ck|gia tri|thanh toan|coc|may cu|vat|thue)\b")
+_MONEY_HEAD = re.compile(r"\b(tien|tong|tra|no|giam|bot|thu|phi|chiet khau|ck|gia tri|thanh toan|vat|thue)\b")
 
 
 def _is_order_money(c: str) -> bool:

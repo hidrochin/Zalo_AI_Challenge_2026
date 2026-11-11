@@ -185,6 +185,29 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 - Examples are retrieved only from train, and questions from the same business are excluded.
 - There is no logic keyed on business or question IDs.
 - `/data` is read-only; caches and outputs live in `cache/` and `outputs/`.
+- Nothing learned from the public test lives in inference code (organizers' QnA, `description/QnA.txt`): no public
+  rulebook wording (only the train rulebook is stored, in `rules.TESTED`), no public-only macro, header, status word or
+  layout, no fix chosen on public labels. A feature stays only when train data or the train rulebook needs it.
+  Exception chosen by the user: question preprocessing (`preprocess/` lexicon and slang).
+
+---
+
+## Status (2026-11-11, late): public knowledge removed
+
+The organizers' answers (`description/QnA.txt`) say the public test is used neither to train nor at inference, "kể cả
+việc xử lý tập public test để tạo ra thông tin train khác", and only the train rulebook may be packaged. Removed:
+- `rules.TESTED`: the public wording of 'Đơn thuộc kỳ nào';
+- macros for public-rulebook terms: `hour_stats`, `model_line`, `brand_of`, `extra_lines`, and the columns `days`,
+  `avg_order`, `cancels` (customer_stats), `orders` (day_stats), `days` (group_stats); their catalog regexes and docs;
+- ingest built from public shops: conversion rules written in a cell, the abbreviation lookup sheet, staff full names,
+  toppings in a drink's cell, status read from notes, ticket rows without an order id, the README "các dòng cùng
+  **X** là một đơn" key, payments read from order notes, loose customer-group headers;
+- header and status alternatives that match public headers only (checked against every train header);
+- public-only words in lints and value hints; `tests/test_public_fixes.py` (public questions).
+
+Check: the canonical sales lines, orders and fact tables of all 30 train shops are identical before and after
+(the scratchpad `train_snap.py`), so everything removed served public only. `INGEST_VERSION` 21, `STORE_VERSION` 14.
+Public scores from before this change are no longer comparable.
 
 ---
 

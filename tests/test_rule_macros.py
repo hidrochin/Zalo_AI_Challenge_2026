@@ -4,7 +4,6 @@ macro calls runnable, the unit check, the value hints and the conversion rules w
 import pandas as pd
 import pytest
 
-from datamate.canon import _written_rules
 from datamate.sql.agent import free_text_lint, rewrite_macros, unit_asked, unit_shadow
 from datamate.sql.store import build_store, connect, run_select
 from datamate.sql.values import ValueIndex, subjective_note
@@ -87,8 +86,8 @@ def test_rewrites_keep_macro_calls_runnable():
     col = "-- type: boolean\nselect month_stats(date '2025-06-01', date '2025-06-30').revenue < month_stats(date '2025-07-01', date '2025-07-31').revenue"
     assert rewrite_macros(col).splitlines()[-1] == ("select (select revenue from month_stats(date '2025-06-01', date '2025-06-30')) < "
                                                     "(select revenue from month_stats(date '2025-07-01', date '2025-07-31'))")
-    assert rewrite_macros("-- type: number\nselect hour_stats(date '2026-03-01', date '2026-03-31')").endswith(
-        "select * from hour_stats(date '2026-03-01', date '2026-03-31')")
+    assert rewrite_macros("-- type: number\nselect day_stats(date '2026-03-01', date '2026-03-31')").endswith(
+        "select * from day_stats(date '2026-03-01', date '2026-03-31')")
     assert "price_effect_at('Bạc xỉu (M)', 35000, 14)" in rewrite_macros("-- type: percent\nselect price_effect('Bạc xỉu (M)', 35000, 14)")
     indexed = "-- type: boolean\nselect month_stats(date '2026-01-01', date '2026-03-31').revenue[1] < 3"
     assert rewrite_macros(indexed) == indexed  # an index into a column: no safe rewrite, the repair message explains
@@ -97,14 +96,14 @@ def test_rewrites_keep_macro_calls_runnable():
 
 
 def test_equality_on_a_hand_written_note_is_flagged():
-    assert free_text_lint("select count(*) from raw_so where \"Ghi chú\" = 'bảo hành'")
-    assert free_text_lint("select count(*) from raw_so where has_name(\"Ghi chú\", 'bảo hành')") is None
+    assert free_text_lint("select count(*) from raw_so where \"Ghi chú\" = 'giao sau'")
+    assert free_text_lint("select count(*) from raw_so where has_name(\"Ghi chú\", 'giao sau')") is None
     assert free_text_lint("select count(*) from orders where \"Kênh\" = 'store'") is None
 
 
 def test_unit_check_only_for_a_plain_count_in_a_base_unit():
     units = ("ly", "gói", "lọ", "phần")
-    assert unit_asked("Tuần này bán được tổng cộng bao nhiêu gói?", units) == "gói"
+    assert unit_asked("Tháng này quán bán được bao nhiêu gói?", units) == "gói"
     assert unit_asked("Hqua ban duoc bao nhieu lo", units) == "lọ"  # no diacritics: matched by folding
     assert unit_asked("hiện còn bn lô chưa bán hết", units) is None  # 'lô' is not 'lọ'
     assert unit_asked("Tỉ lệ huỷ mấy phần trăm?", units) is None
@@ -131,14 +130,7 @@ def test_value_hints_name_the_column_and_the_written_value():
 
 
 def test_subjective_superlative_unless_the_rulebook_defines_it():
-    assert "UNANSWERABLE" in subjective_note("Khách trung thực nhất tháng 10/2025 là ai?", "")
-    assert subjective_note("Khách trung thực nhất là ai?", "| Khách trung thực nhất | khách không huỷ đơn |") is None
-    assert subjective_note("Lô Siro ăn ngon Ích Nhi gần hết hạn nhất?", "", names=("Siro ăn ngon Ích Nhi",)) is None
+    assert "UNANSWERABLE" in subjective_note("Nhân viên nào tay nghề cao nhất tháng 10/2025?", "")
+    assert subjective_note("Nhân viên tay nghề cao nhất là ai?", "| Nhân viên tay nghề cao nhất | nhiều đơn nhất |") is None
+    assert subjective_note("Bánh Dễ Thương bán chạy nhất tuần nào?", "", names=("Bánh Dễ Thương",)) is None
     assert subjective_note("Mặt hàng nào bán chạy nhất?", "") is None
-
-
-def test_conversion_written_in_the_cell():
-    t = pd.DataFrame({"Quy đổi": [1.0, 1.0, None], "Quy đổi__unit": ["thùng = 4 bịch", "thùng = 12 hộp", None]})
-    units, factors = _written_rules(t, "Quy đổi")
-    assert units.tolist()[:2] == ["thùng", "thùng"] and factors.tolist()[:2] == [4.0, 12.0]
-    assert _written_rules(pd.DataFrame({"Quy đổi": [24.0, 12.0], "Quy đổi__unit": ["lon", "chai"]}), "Quy đổi") is None

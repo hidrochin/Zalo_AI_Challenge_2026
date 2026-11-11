@@ -83,18 +83,6 @@ def test_build_sales_treats_an_unknown_walkin_label_as_walkin():
     assert s["counted"].all()  # still sales
 
 
-def test_lookup_sheet_spells_out_abbreviated_names():
-    lines = pd.DataFrame({"Mã": ["1", "2", "3", "4"], "Ngày": pd.to_datetime(["2025-01-01"] * 4), "Hàng": ["IP16", "ip16 ", "Cáp  C", "Cáp Type-C 1m"],
-                          "Tiền": [10, 20, 30, 40], "SL": [1, 1, 1, 1]})
-    sheet = pd.DataFrame({"Ghi tắt": ["IP16", "Cáp C", "Ốp", "Sạc"], "Tên hàng": ["iPhone 16", "Cáp Type-C 1m", "Ốp lưng", "Củ sạc"],
-                          "Loại": ["máy mới", "phụ kiện", "phụ kiện", "phụ kiện"]})
-    roles = {"lines": {"Mã": "order_id", "Ngày": "order_date", "Hàng": "product_name", "Tiền": "line_amount", "SL": "qty"},
-             "Ghi tắt": {"Tên hàng": "product_name"}}
-    s, _ = build_sales({"lines": lines, "Ghi tắt": sheet}, roles)
-    assert s["product_name"].tolist() == ["iPhone 16", "iPhone 16", "Cáp Type-C 1m", "Cáp Type-C 1m"]
-    assert s["Loại"].tolist() == ["máy mới", "máy mới", "phụ kiện", "phụ kiện"]
-
-
 def test_description_column_is_not_a_lookup_sheet():
     lines = pd.DataFrame({"Mã": ["1", "2", "3"], "Ngày": pd.to_datetime(["2025-01-01"] * 3), "Hàng": ["Trà", "Cà phê", "Sữa"], "Tiền": [1, 2, 3], "SL": [1, 1, 1]})
     master = pd.DataFrame({"Hàng": ["Trà", "Cà phê", "Sữa"], "Mô tả": ["trà ngon", "cà phê đậm", "sữa tươi"]})
@@ -103,17 +91,8 @@ def test_description_column_is_not_a_lookup_sheet():
     assert s["product_name"].tolist() == ["Trà", "Cà phê", "Sữa"]
 
 
-def test_staff_nicknames_get_full_names_only_when_unique():
-    tickets = pd.DataFrame({"Ngày": pd.to_datetime(["2025-01-01"] * 4), "Thợ": ["A.Đức", "a Đạt", "Đức", "Đạt"], "Tiền": [1, 2, 3, 4]})
-    staff = pd.DataFrame({"Họ tên": ["Lê Văn Đức", "Hà Loan Đạt"]})
-    roles = {"t": {"Ngày": "order_date", "Tiền": "ticket_amount"}, "s": {}}
-    s, _ = build_sales({"t": tickets, "s": staff}, roles)
-    assert s["Thợ"].tolist() == ["Lê Văn Đức", "Hà Loan Đạt", "Lê Văn Đức", "Hà Loan Đạt"]
-    assert s["order_id"].nunique() == 4
-
-
 def test_order_only_shop_reads_each_order_as_one_line():
-    orders = pd.DataFrame({"Mã": ["A", "B"], "Ngày": pd.to_datetime(["2025-01-01", "2025-01-02"]), "Giá trị hàng": [100, 200],
+    orders = pd.DataFrame({"Mã": ["A", "B"], "Ngày": pd.to_datetime(["2025-01-01", "2025-01-02"]), "Tiền hàng": [100, 200],
                            "TT": ["xong", "huỷ"], "TT__norm": ["hoàn thành", "huỷ"]})
     s, _ = build_sales({"o": orders}, {"o": {"Mã": "order_id", "Ngày": "order_date", "TT": "status"}})
     assert s.loc[s["counted"], "amount"].sum() == 100
@@ -126,21 +105,6 @@ def test_boolean_cells_stay_boolean():
     out = _type_columns(df, ["Tên", "Kê đơn", "Ghi chú"], TableInfo("t", [("f.xlsx", None)], {}, {}))
     assert out["Kê đơn"].dtype == bool and out["Kê đơn"].tolist() == [True, False, True]
     assert out["Ghi chú"].iloc[:2].tolist() == ["True", "khác"] and out["Ghi chú"].isna().iloc[2]  # free text stays text
-
-
-def test_toppings_in_a_drink_cell_become_their_own_lines():
-    from datamate.canon import split_toppings
-
-    lines = pd.DataFrame({"order_id": ["A", "A", "B"], "amount": [97000, 7000, 59000], "qty": [2, 1, 1], "qty_base": [2, 1, 1],
-                          "unit_price": [45000, 7000, 45000],
-                          "product_name": ["Latte (M) + Trân châu đen (7.000đ)", "Topping Trân châu đen", "Latte (M) + 2 Kem cheese (14.000đ)"]})
-    out, n = split_toppings(lines)
-    assert n == 2
-    got = out.groupby("product_name").agg(qty=("qty_base", "sum"), amount=("amount", "sum")).to_dict("index")
-    assert got["Latte (M)"] == {"qty": 3, "amount": 90000 + 45000}
-    assert got["Topping Trân châu đen"] == {"qty": 2, "amount": 14000}  # same item as the topping sold alone
-    assert got["Kem cheese"] == {"qty": 2, "amount": 14000}
-    assert out["amount"].sum() == lines["amount"].sum()
 
 
 def test_service_fee_stays_in_revenue_but_is_not_an_item():

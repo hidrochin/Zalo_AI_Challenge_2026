@@ -224,6 +224,9 @@ profit uses the **cost recorded on the sale line**.
   an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
 - **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
   pandas code generation is paused; Docker and vLLM work is deferred.
+- **Rule (2026-11-11, organizers' QnA in `description/QnA.txt`):** inference code holds nothing learned from the public
+  test (rulebook wording, macros, headers, layouts, fixes chosen on public labels). Add a fix only when train has the
+  case. Question preprocessing is exempt (user's choice). See README "Status (2026-11-11, late)".
 - **Status (2026-11-11):** read the README "Status (2026-11-11): start here" section first. Public v5 leaderboard 0.759.
   - Committed on `text2sql` (`b89d4dd`..`5de216b`, not pushed):
     - train rules as macros, gated on their clauses;
