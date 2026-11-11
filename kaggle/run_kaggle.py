@@ -19,15 +19,15 @@ W = "/kaggle/working"
 OUT = f"{W}/out"
 PROJ = "/tmp/zalo"  # outside /kaggle/working so it is not saved as kernel output
 ENV = "/tmp/vllm-env"  # stable vLLM
-ENV_NIGHTLY = "/tmp/vllm-nightly"  # Gemma 4 12B needs a vLLM nightly (2026-11); installed only when a Gemma model is tried
+ENV_NIGHTLY = "/tmp/vllm-nightly"  # a vLLM nightly, for a model the release lacks (0.33.0 already serves Gemma 4)
 PORT = 8000
 # (model, vLLM env, extra args, thinking): the first one that starts and answers sanely is used. Gemma 4 12B first, as the
 # final image will run it; T4 (sm_75) has no bf16 and no Marlin kernels, so a plain AWQ build in fp16, then the full model
 GEMMA = ["--dtype", "half", "--reasoning-parser", "gemma4"]
 MODELS = [
     # its config says compressed-tensors (W4A16), not awq: vLLM reads the method from the config
-    ("nicklas373/gemma-4-12B-it-AWQ", ENV_NIGHTLY, GEMMA + ["--max-model-len", "32768"], True),
-    ("google/gemma-4-12B-it", ENV_NIGHTLY, GEMMA + ["--max-model-len", "16384"], True),
+    ("nicklas373/gemma-4-12B-it-AWQ", ENV, GEMMA + ["--max-model-len", "32768"], True),
+    ("google/gemma-4-12B-it", ENV, GEMMA + ["--max-model-len", "16384"], True),
     ("Qwen/Qwen3.5-9B", ENV, ["--dtype", "half", "--limit-mm-per-prompt", '{"image":0,"video":0}', "--max-model-len", "32768"], True),
 ]
 STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | holdout | dev120 | dev120_oracle | train; push.sh sets it
@@ -89,6 +89,10 @@ def install(env):
            if env == ENV_NIGHTLY else f"{pip} vllm")
     try:
         sh(cmd)
+        # a torchaudio built for another torch cannot load, and transformers imports it for any model with audio (Gemma 4):
+        # without it, transformers skips audio
+        sh(f"{env}/bin/python -c 'import torchaudio' 2>/dev/null || uv pip uninstall -q --python {env}/bin/python torchaudio",
+           executable="/bin/bash")
         sh(f"set -o pipefail; {env}/bin/python -c 'import vllm, torch; print(vllm.__version__, torch.__version__)' | tee -a {OUT}/kaggle_run.txt",
            executable="/bin/bash")
         return True
