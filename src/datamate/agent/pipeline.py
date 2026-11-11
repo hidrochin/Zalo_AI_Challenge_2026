@@ -33,7 +33,7 @@ from datamate.postprocess import Expect, check_answer, date_window, expect_answe
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
 from datamate.rules import params_off, rule_gate, rule_note, rule_params
-from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, hint_periods, sql_card, sql_check_message,
+from datamate.sql.agent import (PRIMITIVES, SqlPool, build_sql_system, extract_sql, hint_periods, sql_card, sql_check_message,
                                 sql_question_part, sql_repair_message, sql_shadow)
 from datamate.sql.store import STORE_VERSION, ensure_store
 from datamate.sql.values import subjective_note
@@ -61,6 +61,7 @@ class RunConfig:
     k_examples: int = 4
     examples_path: Path | None = Path("assets/examples.jsonl")
     keep_tables: Path | None = None  # experiment: JSON of question id -> raw tables to show, null = all (SQL engine)
+    oracle: Path | None = None  # experiment: JSON {"notes": {question id: note}, "setup": {business: [SQL]}} (debug/oracle)
     min_share: float = 0.5
     unans_share: float = 0.6
     llm_retries: int = 6  # server errors: back off 5..120 s, then stop the run (a resumed run retries)
@@ -72,6 +73,10 @@ class RunConfig:
     ids: list[str] = field(default_factory=list)
     resume: bool = True
     fast: bool = False  # answer questions a closed frame explains in full without the model
+    think_rewrite: bool = False  # thinking also for the rewrite and the one-off ingest/rule questions (short budgets)
+    # experiment (SQL engine): "full" = the formula catalog; "primitives" = only generic helpers, no rulebook macros,
+    # catalog advice, contract checks or rulebook lints: the model computes every business term from the rulebook itself
+    catalog: str = "full"
 
 
 def _pandas_shadow(text: str, hints: list[str]) -> tuple[str, str] | None:
@@ -152,7 +157,12 @@ def make_llm(cfg: RunConfig):
         return GeminiLLM(cfg.model)
     from datamate.agent.llm_local import LocalLLM
 
-    return LocalLLM(cfg.base_url, cfg.model, max_tokens=cfg.max_tokens, enable_thinking=cfg.enable_thinking)
+    return LocalLLM(cfg.base_url, cfg.model, max_tokens=cfg.max_tokens, enable_thinking=cfg.enable_thinking, effort=cfg.effort)
+
+
+def aux_llm(llm, cfg: RunConfig):
+    """The model for short calls: thinking off unless cfg.think_rewrite."""
+    return llm if cfg.think_rewrite or not hasattr(llm, "without_thinking") else llm.without_thinking()
 
 
 def _select(questions: list[dict], cfg: RunConfig) -> list[dict]:
@@ -220,10 +230,11 @@ def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], ind
 
 def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
                    cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset(),
-                   macros=(), rulebook: str = "") -> dict:
+                   macros=(), rulebook: str = "", oracle_note: str | None = None) -> dict:
     t0 = time.time()
     engine = ENGINES[cfg.engine]
-    text, rw, pre = preprocess(q, llm, cfg, index)
+    text, rw, pre = preprocess(q, aux_llm(llm, cfg), cfg, index)
+    full = cfg.catalog == "full"
     expect = expect_answer(text, rw)
     norm = {**pre.get("norm", {}), "expect": _expect_text(expect) if expect.hard else None}
     if cfg.engine == "sql":  # values and qualities the question names, found without a model call (sql/values.py)
@@ -233,9 +244,11 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
     hints = time_hints(text, q["as_of_date"], cal)
     expect.window = date_window(text, hints)
-    shadow = None if is_gated(text, off) else engine.shadow(text, hints)
+    shadow = None if is_gated(text, off) or not full else engine.shadow(text, hints)
     extra = {"periods": hint_periods(hints)} if cfg.engine == "sql" else {}  # a period outside the data makes 'no rows' a reason
     user_parts = [biz_part, engine.question_part(q["question"], q["as_of_date"], examples, hints, norm)]
+    if oracle_note:  # experiment: what an intervention tells the model, checked by hand (debug/oracle)
+        user_parts[1] += "\n\nVerified facts about this shop's data for this question (use them):\n" + oracle_note
     samples = []
     for s in range(cfg.samples):
         temperature = 0.0 if s == 0 else cfg.temperature
@@ -254,7 +267,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
                 break
             code = engine.extract(text_reply)
             advice = None
-            if code and attempt == 0 and cfg.repair:
+            if code and attempt == 0 and cfg.repair and full:
                 advice = term_advice(text, code, terms, cfg.engine, macros) or (grain_advice(text, code) if cfg.engine == "pandas" else None)
             if code is None:
                 out = {"result": None, "error": engine.no_code, "stdout": ""}
@@ -310,14 +323,19 @@ def run(cfg: RunConfig) -> dict:
     todo = [q for q in questions if q["id"] not in done]
 
     llm = make_llm(cfg)
+    aux = aux_llm(llm, cfg)
     rulebook = (split_dir / "rulebook.md").read_text(encoding="utf-8")
 
     def ask(system, parts):
-        return _generate(llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
+        return _generate(aux, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
 
     params = rule_params(rulebook)  # numbers the macros take from this rulebook; unreadable ones turn their macros off
     off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask) | params_off(params)
-    system = ENGINES[cfg.engine].build_system(rulebook) + rule_note(off)
+    full = cfg.catalog == "full"
+    if cfg.engine == "sql" and not full:  # no rulebook macro is offered, so no note about which of them changed
+        system = build_sql_system(rulebook, primitives=True)
+    else:
+        system = ENGINES[cfg.engine].build_system(rulebook) + rule_note(off)
     examples_path = cfg.examples_path.with_name("examples_sql.jsonl") if cfg.engine == "sql" and cfg.examples_path else cfg.examples_path
     bank = ExampleBank.from_train(Path(cfg.data_root) / "train", examples_path,
                                   normalize=None if cfg.normalize == "off" else (lambda t: rules_normalize(t).text))
@@ -327,6 +345,7 @@ def run(cfg: RunConfig) -> dict:
     _LLM_DOWN.clear()
 
     kept = json.loads(Path(cfg.keep_tables).read_text(encoding="utf-8")) if cfg.keep_tables else None
+    oracle = json.loads(Path(cfg.oracle).read_text(encoding="utf-8")) if cfg.oracle else {"notes": {}, "setup": {}}
     by_biz: dict[str, list[dict]] = {}
     for q in todo:
         by_biz.setdefault(q["business_id"], []).append(q)
@@ -358,17 +377,22 @@ def run(cfg: RunConfig) -> dict:
             macros = []
             if cfg.engine == "sql":
                 store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
-                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout, params=params)
-                macros = [m for m in pool.macros() if m not in shop_off]
-                biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros))
-                part_of = (lambda q: business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, kept.get(q["id"])))) if kept else None
+                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout, params=params,
+                               rules_code=full)
+                stored = pool.macros()
+                macros = [m for m in stored if m not in shop_off] if full else [m for m in stored if m in PRIMITIVES]
+                pool.block([m for m in stored if m not in macros] if not full else [])
+                pool.setup(oracle["setup"].get(biz_id, []))  # after macros(): the card does not list the oracle's views
+                biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, views=stored))
+                part_of = (lambda q: business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, kept.get(q["id"]), views=stored))) if kept else None
             else:
                 biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
                 pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
                 part_of = None
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook)
+                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook,
+                                      oracle["notes"].get(q["id"]))
                             for q in left]
                     for f in as_completed(futs):
                         try:

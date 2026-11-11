@@ -44,11 +44,21 @@ def setup():
     os.makedirs(OUT, exist_ok=True)
     sh("ls -R /kaggle/input | head -20")
     bundle = glob.glob("/kaggle/input/**/bundle.tar.gz", recursive=True)
+    roots = sorted({os.path.dirname(p) for p in glob.glob("/kaggle/input/**/pyproject.toml", recursive=True)}, key=len)
+    data = [r for r in roots if os.path.isdir(f"{r}/data/train")]
+    code = [r for r in roots if not os.path.isdir(f"{r}/data")]
+    # Kaggle unpacks archives in datasets. push.sh with DM_DATA mounts two: an older one for data/, a code-only one
+    if data:
+        sh(f"cp -r {data[0]} {PROJ}")
+    if bundle or code:  # the current code over the data: drop the older code first
+        sh(f"mkdir -p {PROJ} && rm -rf {PROJ}/src {PROJ}/assets {PROJ}/pyproject.toml {PROJ}/uv.lock")
     if bundle:
-        sh(f"mkdir -p {PROJ} && tar -xzf {bundle[0]} -C {PROJ}")
-    else:  # Kaggle unpacks archives in datasets
-        root = os.path.dirname(min(glob.glob("/kaggle/input/**/pyproject.toml", recursive=True), key=len))
-        sh(f"cp -r {root} {PROJ} && find {PROJ} -name '._*' -delete")
+        sh(f"tar -xzf {bundle[0]} -C {PROJ}")
+    elif code:
+        sh(f"cp -r {code[0]}/src {code[0]}/assets {code[0]}/pyproject.toml {code[0]}/uv.lock {PROJ}/")
+    elif not data:
+        sh(f"cp -r {roots[0]} {PROJ}")
+    sh(f"find {PROJ} -name '._*' -delete && ls {PROJ} {PROJ}/data")
     sh(f"cp {PROJ}/assets/BUILD.txt {OUT}/ || true")
     if BUILD:  # a stale dataset version mounts old code: stop before hours of GPU time
         got = hashlib.sha1(open(f"{PROJ}/assets/BUILD.txt", "rb").read()).hexdigest()
@@ -184,6 +194,13 @@ def main():
         n = sum(1 for _ in open(f"{PROJ}/data/public_test/questions.jsonl"))
         proc = run_stage("public", "--split public_test", n, model, proc)
         sh(f"cp {OUT}/public/submission.jsonl {W}/submission.jsonl && wc -l {W}/submission.jsonl")
+    if "oracle" in STAGES:  # interventions on the open public errors (debug/oracle/build.py); base = same questions, no note
+        sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split public_test --workers 4 | tail -20")
+        for arm in ("base", "fact", "table", "rule"):
+            ids = "assets/oracle/ids.txt" if arm == "base" else f"assets/oracle/ids_{arm}.txt"
+            n = sum(1 for ln in open(f"{PROJ}/{ids}") if ln.strip())
+            extra = "" if arm == "base" else f" --oracle assets/oracle/{arm}.json"
+            proc = run_stage(f"oracle_{arm}", f"--split public_test --ids-file {ids}{extra}", n, model, proc)
     proc.terminate()
 
 

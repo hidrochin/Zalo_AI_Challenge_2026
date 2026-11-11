@@ -20,7 +20,7 @@ from datamate.canon import build_orders
 from datamate.eval.semantic import find_check
 from datamate.ingest.business import META_COLS, Business
 from datamate.ingest.schema_card import _column_line
-from datamate.sql.store import _slug, _writable, connect, run_select, set_as_of, set_params
+from datamate.sql.store import SqlRejected, _slug, _writable, connect, run_select, set_as_of, set_params
 from datamate.sql.values import ValueIndex
 from datamate.text import fold
 
@@ -222,8 +222,24 @@ class AnswerShape(ValueError):
     """The query ran, but its result cannot be read as the declared answer type."""
 
 
-def build_sql_system(rulebook: str) -> str:
-    return SYSTEM_TEMPLATE.format(rulebook=rulebook.strip())
+# Generic helpers that hold no rulebook definition: what the "primitives" catalog keeps (RunConfig.catalog)
+PRIMITIVES = ("as_of", "has_name", "same_text", "fold_text", "round_half_up", "pct_change", "flag", "shift_of", "stock_at",
+              "lots_left")
+_SKELETON = re.compile(r"```sql\n.*?```\n", re.S)
+_MACRO_RULE = ("- A macro in the schema card is the tested definition of its rulebook term: call it instead of rebuilding the "
+               "logic from raw tables. Macros marked TABLE go after FROM.")
+
+
+def build_sql_system(rulebook: str, primitives: bool = False) -> str:
+    """primitives: the skeletons that call a rulebook macro are left out, and the model computes every term itself."""
+    text = SYSTEM_TEMPLATE
+    if primitives:
+        rule_macros = [m for m in MACROS if m not in PRIMITIVES]
+        text = _SKELETON.sub(lambda m: "" if any(re.search(rf"\b{n}\s*\(", m.group(0)) for n in rule_macros) else m.group(0), text)
+        text = text.replace(_MACRO_RULE, "- The macros in the schema card are generic helpers only. Compute every business term "
+                            "(revenue, debt, stock, profit, rankings...) yourself from the views and raw tables, as the RULEBOOK "
+                            "defines it. Macros marked TABLE go after FROM.")
+    return text.format(rulebook=rulebook.strip())
 
 
 def _columns(title: str, df: pd.DataFrame, roles: dict | None = None, descs: dict | None = None) -> list[str]:
@@ -235,9 +251,12 @@ def _columns(title: str, df: pd.DataFrame, roles: dict | None = None, descs: dic
     return out
 
 
-def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros: list[str], keep: list[str] | None = None) -> str:
+def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros: list[str], keep: list[str] | None = None,
+             views=None) -> str:
     """The prompt's description of this shop's database: views first, then raw tables, then macros.
-    keep: the raw tables to list, by slug (table-selection experiment); None lists all of them."""
+    keep: the raw tables to list, by slug (table-selection experiment); None lists all of them.
+    views: the store's macros, whose fact views (payments, deliveries, imports) the card lists; None = macros."""
+    views = macros if views is None else views
     out = [f"# Schema card: {biz.id}"]
     if biz.readme.data_end is not None:
         out.append(f"Data recorded until {biz.readme.data_end:%Y-%m-%d} (from README).")
@@ -262,11 +281,11 @@ def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros:
         out += [f"  note: {n}" for n in ti.notes]
     if biz.warnings:
         out.append("\nIngestion warnings: " + "; ".join(biz.warnings))
-    if "debt_total" in macros:
+    if "debt_total" in views:
         out.append("\nView payments: order_id, date, amount (one row per payment).")
-    if "delivery_trips" in macros:
+    if "delivery_trips" in views:
         out.append("\nView deliveries: order_id, trip, date.")
-    if "avg_import_price" in macros:
+    if "avg_import_price" in views:
         out.append("\nView imports: doc, date, product_name, qty, unit, price, amount, qty_base (receipts that are not cancelled).")
     out.append("\n## Macros\n" + "\n".join(f"- {MACROS[m]}" for m in MACROS if m in macros))
     return "\n".join(out)
@@ -504,19 +523,26 @@ def free_text_lint(code: str) -> str | None:
     return None
 
 
-def lint(code: str, walkin: bool = True, order_cols: tuple[str, ...] = ()) -> str | None:
+_RULE_LINTS = (0, 1, 4, 5)  # _LINTS entries that encode a rulebook term or a macro; the rest are about grain
+
+
+def lint(code: str, walkin: bool = True, order_cols: tuple[str, ...] = (), rules: bool = True) -> str | None:
     """Why this query shape is wrong, or None. walkin: the views have the `walkin` column (the shop records customers).
-    order_cols: money columns of the order repeated on its lines."""
+    order_cols: money columns of the order repeated on its lines. rules: also the lints that encode rulebook terms."""
     why = order_money_lint(code, order_cols) or free_text_lint(code)
     if why:
         return why
-    for rx, message in _LINTS:
+    for i, (rx, message) in enumerate(_LINTS):
+        if not rules and i in _RULE_LINTS:
+            continue
         if rx.search(code):
             if message:
                 return message
             if _FROM_LINES.search(code):
                 return ("sales_lines has one row per product line, so count(*) in HAVING or ORDER BY counts lines, not orders. "
                         "Use count(distinct order_id), or group the `orders` view.")
+    if not rules:
+        return None
     if walkin and _BY_CUSTOMER.search(code) and not _NO_WALKIN.search(code):
         return "Walk-in orders share an empty customer and are not a customer: add `not walkin` before grouping by customer."
     if _FROM_ORDERS.search(code) and not _STATUS_WORDS.search(code):
@@ -657,9 +683,11 @@ def macro_only(code: str) -> bool:
 
 def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, timeout: float = 30.0,
             periods: list[tuple[str | None, str]] = (), span: tuple[str, str] | None = None, walkin: bool = True,
-            order_cols: tuple[str, ...] = (), units: tuple[str, ...] = ()) -> dict:
+            order_cols: tuple[str, ...] = (), units: tuple[str, ...] = (), rules_code: bool = True,
+            blocked: frozenset[str] = frozenset()) -> dict:
     """Same record as sandbox._execute, for a reply taken by extract_sql.
-    periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`."""
+    periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`.
+    rules_code: the rewrites and lints that encode rulebook terms; blocked: stored macros this run does not offer."""
     m = _UNANSWERABLE.match(code)
     preview, written = "", code
     if m:
@@ -671,8 +699,12 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         try:
             if _LIMIT.search(code) and not _ORDER_BY.search(code) and not _RANKED_SOURCE.match(_body(code)):
                 raise AnswerShape("LIMIT without ORDER BY picks rows at random: order by the criterion, then by code.")
-            code = add_named_products(add_not_walkin(rewrite_macros(code), walkin))
-            why = lint(code, walkin, order_cols)
+            called = next((m.group(1) for m in re.finditer(r"\b(\w+)\s*\(", _body(code)) if m.group(1) in blocked), None)
+            if called:  # as DuckDB says it: the macro is not part of this run's database
+                raise SqlRejected(f"Catalog Error: Function with name {called} does not exist!")
+            if rules_code:
+                code = add_named_products(add_not_walkin(rewrite_macros(code), walkin))
+            why = lint(code, walkin, order_cols, rules_code)
             if why:
                 raise AnswerShape(why)
             set_as_of(con, as_of)
@@ -692,7 +724,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
     error, warning = check_result(result, names, helper_guard=False, outside=periods_outside(list(periods), span, as_of),
                                   zero_ok=macro_only(code))
     contract = None
-    if error is None and warning is None:
+    if error is None and warning is None and rules_code:
         warning, contract = _shadow_warning(con, result, shadow, timeout)
         unit = unit_shadow(written, shadow[0], units) if shadow and not warning else None
         if unit:
@@ -726,10 +758,13 @@ def order_money_cols(con) -> tuple[str, ...]:
 class SqlPool:
     """N cursors on one read-only store; run() is thread-safe, each cursor keeps its own as_of."""
 
-    def __init__(self, path: Path, names: set[str] | None, n: int = 2, timeout: int = 30, params: dict | None = None):
-        """params: the rulebook numbers the macros read (rules.rule_params); None keeps the train rulebook's."""
+    def __init__(self, path: Path, names: set[str] | None, n: int = 2, timeout: int = 30, params: dict | None = None,
+                 rules_code: bool = True):
+        """params: the rulebook numbers the macros read (rules.rule_params); None keeps the train rulebook's.
+        rules_code: the rewrites, lints and contract checks that encode rulebook terms (off in the "primitives" catalog)."""
         self.base = connect(path, "2000-01-01", params)
         self.names, self.timeout = names, timeout
+        self.rules_code, self.blocked = rules_code, frozenset()
         self._free: queue.Queue = queue.Queue()
         for _ in range(max(1, n)):
             cur = self.base.cursor()
@@ -747,11 +782,28 @@ class SqlPool:
     def macros(self) -> list[str]:
         return [r[0] for r in self.base.execute("select distinct function_name from duckdb_functions() where not internal").fetchall()]
 
+    def block(self, names) -> None:
+        """Stored macros a query may not call: the read-only store cannot drop them, so run() rejects the call."""
+        self.blocked = frozenset(names)
+
+    def setup(self, statements: list[str]) -> None:
+        """Run temp-object statements on every cursor (each is its own session): the oracle experiment's views."""
+        if not statements:
+            return
+        curs = [self._free.get() for _ in range(self._free.qsize())]
+        try:
+            for cur in curs:
+                for s in statements:
+                    cur.execute(s)
+        finally:
+            for cur in curs:
+                self._free.put(cur)
+
     def run(self, code: str, as_of: str, shadow=None, periods: list[tuple[str | None, str]] = ()) -> dict:
         con = self._free.get()
         try:
             return execute(con, code, str(as_of), self.names, shadow, self.timeout, periods, self.span, self.walkin, self.order_cols,
-                           self.units)
+                           self.units, self.rules_code, self.blocked)
         finally:
             self._free.put(con)
 
