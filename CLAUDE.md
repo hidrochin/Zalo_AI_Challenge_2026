@@ -227,7 +227,18 @@ profit uses the **cost recorded on the sale line**.
 - **Rule (2026-11-11, organizers' QnA in `description/QnA.txt`):** inference code holds nothing learned from the public
   test (rulebook wording, macros, headers, layouts, fixes chosen on public labels). Add a fix only when train has the
   case. Question preprocessing is exempt (user's choice). See README "Status (2026-11-11, late)".
-- **Status (2026-11-11):** read the README "Status (2026-11-11): start here" section first. Public v5 leaderboard 0.759.
+- **Status (2026-11-12, late):** read the README "Status (2026-11-12, late): start here" section first.
+  - Direction (user, after the mentor): the LLM reads the rulebook and writes the computations. Flags:
+    - `--catalog compiled`: the rulebook compiled to macros;
+    - `--shop-views`;
+    - `--judge unans`: the second agent;
+    - `--context rich`: keys, missing facts, rulebook lines per question, plan lines.
+  - Validation: `assets/holdout.txt` (train). Public only measures.
+  - Kaggle public runs in flight on Qwen3.5-9B with thinking:
+    - A: `hydrochii/datamate-agents-a`;
+    - B: `hydrochiii/datamate-agents-b` (`--context rich`).
+  - Gemma 4 12B does not serve on Kaggle T4 yet (probe `hydrochiii/datamate-gemma-probe`).
+- **Status (2026-11-11):** public v5 leaderboard 0.759; README "Status (2026-11-11): start here".
   - Committed on `text2sql` (`b89d4dd`..`5de216b`, not pushed):
     - train rules as macros, gated on their clauses;
     - shift hours read from the rulebook;
@@ -248,8 +259,7 @@ profit uses the **cost recorded on the sale line**.
   `98d4c7b`, so its 0.473 is not comparable with the public 0.288.
   - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
   - Public leaderboard: PA −0.110 → 0.040 → **0.288** (pipeline `98d4c7b`, precision ≈ 68%).
-  - E0, all 3000 train questions on Kaggle: **PA 0.473** (precision 77.7%), logs in
-    `outputs/kaggle/result_train/out/train`.
+  - E0, all 3000 train questions on Kaggle: **PA 0.473** (precision 77.7%); its logs were deleted on 2026-11-12.
   - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train DM_KERNEL=<name> DM_ENGINE=pandas|sql DM_DATASET=<bundle> kaggle/push.sh update`.
   - The prompt is about 13–16k tokens, so a local server needs ≥ 24k context (set `num_ctx` through
     a Modelfile).

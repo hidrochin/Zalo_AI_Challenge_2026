@@ -192,6 +192,79 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
+## Status (2026-11-12, late): start here
+
+Commits on `text2sql` (not pushed): `49a3930` agent pipeline (section below), `a8ddbae` `--context rich`, `0009102` and
+`6064dfb` Kaggle runner fixes. `assets/oracle/` stays untracked (it was built from public errors).
+
+**Kaggle runs in flight (public test, 1000 questions, SQL, Qwen3.5-9B with thinking, `--max-tokens 8192`):**
+
+| run | account / kernel | code | flags |
+|---|---|---|---|
+| A | `hydrochii/datamate-agents-a` | `49a3930` | `--catalog compiled --shop-views --judge unans` |
+| B | `hydrochiii/datamate-agents-b` | `6064dfb` | the same + `--context rich` |
+
+A was meant for Gemma 4 12B but fell back to Qwen (see below); B pins Qwen (`DM_MODEL`) so the pair compares. B's code
+differs from A's by more than `--context`: the compile lint (an argument named like a column is an error), shop views
+that repeat a canonical table dropped, the judge on a doubt in any attempt. A B−A gap is all of these together.
+Get and score them (public labels: evaluation only, never to pick a fix):
+```bash
+uvx --with six kaggle kernels output hydrochii/datamate-agents-a -p outputs/kaggle/result_agents_a
+KAGGLE_API_TOKEN="$(grep '^KAGGLE_API_TOKEN_2=' .env | cut -d= -f2-)" \
+  uvx --with six kaggle kernels output hydrochiii/datamate-agents-b -p outputs/kaggle/result_agents_b
+uv run python -c "import sys; from pathlib import Path; from datamate.eval.scorer import read_jsonl, score
+refs = {r['id']: r for r in read_jsonl(Path('ground_truth.jsonl'))}
+for run in sys.argv[1:]:
+    preds = {p['id']: p for p in read_jsonl(Path(run) / 'out/public/submission.jsonl')}
+    print(run, {k: v for k, v in score(preds, refs).items() if not isinstance(v, dict)})
+" outputs/kaggle/result_agents_a outputs/kaggle/result_agents_b
+```
+Compare with public v5 (leaderboard 0.759, replay 0.792, hand-written rule macros) to see what the agent direction
+costs or gains. Per-question logs: `out/public/logs/<id>.json` (`judge` key: the second agent's verdict and action).
+
+**`--context rich`** (commit `a8ddbae`; papers behind it: M-Schema/XiYan-SQL, Shkapenyuk 2025 profiling, BIRD
+evidence +20 points, "Death of Schema Linking" (small models still gain from linking), DAIL-SQL, CHASE-SQL, TA-SQL, TrustSQL):
+- card: a raw table that feeds sales_lines lists only the columns sales_lines lacks (`"Hàng" = product_name, ...`);
+  a Keys block joins the other raw tables to the views; "Not in this shop's canonical tables" lists the facts the
+  store lacks (payments/debt, deliveries, imports, expenses, stock, lots, cost); compiled macros show their SQL.
+  biz_105 card: 13.5k → 10.3k chars. Risk to check on B's logs: a plain "shop has no X data" note was rejected on
+  2026-11-08 (train 23/23 right, but public had 13 answerable questions whose facts ingest did not detect: dev_014
+  debt/stock, dev_013 deliveries). The rich block adds "unless a raw table or a view written for this shop records it";
+  look at those 13 questions in B before keeping it.
+- [src/datamate/agent/evidence.py](src/datamate/agent/evidence.py): the rulebook lines a question's words point to
+  (folded unigrams/bigrams, idf over the rulebook, term cell ×3, stop words), quoted next to the question.
+- the query starts with `-- terms: ... -> column`, `-- rule: ...`, `-- needs: ...`.
+- Not done (priority 4): a train bank of question → SQL pairs that matched gold, as few-shot (DAIL-SQL). Today the
+  examples show answers only, and for a shop without debt data the debt examples of other shops pull toward answering.
+
+Local check (Ollama `gemma4-12b-32k`, thinking off, 1–2 questions): the flow runs end to end. "số ly size M" right;
+the debt question of biz_105 (gold unanswerable) answered with a table under `base` (−1) and abstained under `rich`
+(0, by the walk-in check, not by the "Not in" block). With thinking off the 12B still invents "khách nợ -> orders"
+and the compiled macros were sloppy (`payment_method = payment_method`, `is_valid_order` returning a count): thinking
+is needed, and "runs" is a weak test of a compiled macro.
+
+**Gemma 4 12B on Kaggle (T4, sm_75): not serving yet.** Found and fixed: the "AWQ" repo `nicklas373/gemma-4-12B-it-AWQ`
+is compressed-tensors W4A16 (no `--quantization awq`); the nightly env held a torchaudio built for another torch, and
+transformers imports it for a model with audio (now uninstalled when it cannot load; Gemma uses the stable env, vLLM
+0.33.0 already registers `Gemma4UnifiedForConditionalGeneration` and the `gemma4` reasoning parser). Still open: the
+W4A16 build loads for ~5 min, then "Engine core initialization failed"; the root cause is in the worker lines of
+`vllm_gemma-4-12B-it-AWQ.log` in the probe's output (`hydrochiii/datamate-gemma-probe` version 2, `DM_STAGES=probe`):
+```bash
+KAGGLE_API_TOKEN="$(grep '^KAGGLE_API_TOKEN_2=' .env | cut -d= -f2-)" \
+  uvx --with six kaggle kernels output hydrochiii/datamate-gemma-probe -p outputs/kaggle/gemma_probe
+```
+W4A16 kernels exist for sm_75 (Marlin and Humming ≥ 75, Exllama ≥ 60, Triton). Suspects: memory (vision/audio
+encoders, 32k KV cache) or the Turing attention backend with Gemma 4's head sizes. Next tries: `--limit-mm-per-prompt
+'{"image":0,"audio":0}'`, `--max-model-len 16384`, `--enforce-eager`. The runner now prints vLLM's error lines live.
+
+Cleanup: stale DuckDB stores (other than `i21_s14`), stale compile/shop-view caches, smoke outputs, the dropped
+pandas/codegen/combined Kaggle results (incl. E0 `result_train`), old SQL Kaggle results v3/v4/train_v2/dev120/oracle
+and old local experiments were deleted. Kept: `cache/ingest`, current stores, `outputs/kaggle/result_sql_public_v5/v6`,
+`result_public_v7`, `gemini_pilot`, `debug/`.
+
+Next: score A and B; read the probe log and serve Gemma (then rerun A and B on Gemma: the user wants both on Gemma
+with thinking, same code, only `--context` differing); the question → SQL example bank; Docker (user, pending).
+
 ## Status (2026-11-12): agent pipeline (mentor's direction)
 
 Chosen by the user: the LLM reads the rulebook, writes the computations and decides (mentor's M1, M2, M4, M5);
@@ -218,8 +291,8 @@ Validation (user's choice): `assets/holdout.txt`, 80 questions (16 per shop, eve
 of different export styles: biz_105 (hand-kept book), biz_110 (orders only), biz_123 (sqlite POS), biz_124 (mixed
 sources), biz_128 (pharmacy). They are never used to pick prompts or fixes. Public only measures; a fix needs a train case.
 
-Kaggle: `kaggle/run_kaggle.py` tries Gemma 4 12B first (AWQ build in fp16, then the full model, on a vLLM nightly:
-the 12B is not in a stable vLLM yet; T4 has no bf16 and no Marlin), then Qwen3.5-9B. Thinking is on for Gemma.
+Kaggle: `kaggle/run_kaggle.py` tries Gemma 4 12B first (the W4A16 build in fp16, then the full model; T4 has no
+bf16), then Qwen3.5-9B. Thinking is on for every model. (Superseded on vLLM env and quantization: see the late status above.)
 `DM_STAGES=holdout,public DM_ENGINE=sql DM_ARGS="--catalog compiled --shop-views --judge unans" kaggle/push.sh update`.
 
 ---
