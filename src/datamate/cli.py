@@ -73,6 +73,8 @@ def cmd_run(a) -> None:
         examples_path=Path(a.examples) if a.examples else None, min_share=a.min_share, unans_share=a.unans_share,
         seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=ids, resume=not a.no_resume,
         llm_retries=a.llm_retries, normalize=a.normalize, fast=a.fast, keep_tables=Path(a.keep_tables) if a.keep_tables else None,
+        oracle=Path(a.oracle) if a.oracle else None, catalog=a.catalog, think_rewrite=a.think_rewrite,
+        shop_views=a.shop_views, context=a.context, judge=a.judge, think_max_tokens=a.think_max_tokens, prepare_only=a.prepare_only,
     )
     try:
         summary = run(cfg)
@@ -234,7 +236,7 @@ def main(argv=None) -> None:
     s.add_argument("--temperature", type=float, default=0.6)
     s.add_argument("--max-tokens", type=int, default=1024)
     s.add_argument("--thinking", choices=["on", "off", "default"], default="default", help="Qwen3 chat-template switch (vLLM)")
-    s.add_argument("--effort", default="medium", help="Claude effort level")
+    s.add_argument("--effort", default="medium", help="Claude effort level; Ollama reasoning_effort when --thinking on")
     s.add_argument("--concurrency", type=int, default=4)
     s.add_argument("--exec-workers", type=int, default=2)
     s.add_argument("--timeout", type=int, default=30)
@@ -254,7 +256,19 @@ def main(argv=None) -> None:
     s.add_argument("--normalize", choices=["off", "rules", "llm"], default="llm",
                    help="question preprocessing: rules only, or rules + one LLM rewrite")
     s.add_argument("--keep-tables", help="experiment: JSON of question id -> raw tables shown to the model (SQL engine)")
+    s.add_argument("--oracle", help="experiment: JSON of notes per question and SQL setup per business (debug/oracle)")
     s.add_argument("--fast", action="store_true", help="answer questions a closed frame explains in full without the model")
+    s.add_argument("--catalog", choices=["full", "primitives", "compiled"], default="full",
+                   help="SQL: full = hand-written rulebook macros; primitives = generic helpers only; compiled = generic helpers "
+                        "+ macros the model writes from the split's rulebook at the start of the run")
+    s.add_argument("--shop-views", action="store_true", help="SQL: the model writes views per shop from its README and raw tables")
+    s.add_argument("--context", choices=["base", "rich"], default="base",
+                   help="SQL: rich = keys, missing facts and macro SQL in the card, rulebook lines per question, plan lines")
+    s.add_argument("--judge", choices=["off", "unans", "all"], default="off",
+                   help="second agent on UNANSWERABLE verdicts (unans) or on every verdict (all)")
+    s.add_argument("--think-max-tokens", type=int, default=8192, help="token budget of the compile, shop-view and judge calls")
+    s.add_argument("--prepare-only", action="store_true", help="run the rulebook compiler and shop views, answer nothing")
+    s.add_argument("--think-rewrite", action="store_true", help="thinking also for the rewrite and ingest/rule questions")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("score", help="score a run directory against train answers")

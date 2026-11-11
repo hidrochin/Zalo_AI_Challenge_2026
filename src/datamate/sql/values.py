@@ -16,7 +16,7 @@ from datamate.text import fold
 MAX_VALUES = 80  # more distinct values than this is a name or free-text column, not a category
 _SKIP_COLS = re.compile(r"^(order_id|date|status|counted|order_ok|is_goods|walkin|product_(key|name|name_raw|id)|"
                         r"customer(_key|_name|_name_raw|_id)?|order_ts|unit|base_unit)$|__norm$|__unit$")  # units: qty_unit
-_UNIT_HEAD = re.compile(r"^(dvt|dv|don vi( tinh| co so| co ban| ban| nhap| lon)?|dv (co so|co ban|tinh|nho)|unit)$")
+_UNIT_HEAD = re.compile(r"^(dvt|don vi( tinh| co so| co ban| ban| nhap| lon)?|dv (co so|co ban|tinh|nho)|unit)$")
 _STOP = {"khac", "co", "khong", "le", "moi", "cu", "tat ca", "cac", "nhom", "loai", "hang", "don", "ban", "mua", "ngay", "thang"}
 # how a question says a common code: question phrase (folded) -> values a shop may write for it (folded)
 SYNONYMS = {
@@ -34,17 +34,16 @@ SYNONYMS = {
     "zalo": ("zalo", "zalo oa"),
     "zalo oa": ("zalo oa", "zalo"),
     "facebook": ("facebook", "fb", "fanpage", "messenger"),
-    "san thuong mai dien tu": ("marketplace", "ecommerce", "shopee", "lazada", "tiki", "tiktok shop", "san tmdt"),
     "san tmdt": ("marketplace", "ecommerce", "shopee", "lazada", "tiki", "tiktok shop", "san tmdt"),
-    "giao hang": ("delivery", "ship", "giao hang"),
+    "giao hang": ("delivery", "giao hang"),
     "online": ("online", "web", "website", "app"),
     "mang ve": ("takeaway", "take away", "mang ve"),
     "tai cho": ("dine in", "tai cho", "tai ban"),
 }
 _GROUP_PHRASE = re.compile(r"\bnhom ((?:(?!(?:thang|tuan|quy|nam|ngay|trong|chiem|ban|co|la|duoc|cua|nao|tu|den|va|voi|thi|th|"
                            r"mua|nay|qua|hom|bao|may|bn|chi|dong|gop|o|so|tong|doanh|dthu|tien|thu|khach|don)\b)[a-z0-9]+ ?){1,3})")
-SUBJECTIVE = re.compile(r"\b(ngon|trung thuc|than thien|dang tin( cay)?|tin cay|uy tin|kho tinh|de tinh|lanh nghe|tay nghe|quy men|"
-                        r"chat luong|nhiet tinh|vui ve|lich su|tan tam|hai long|yeu thich|tot bung|de thuong|chu dao|niem no|"
+SUBJECTIVE = re.compile(r"\b(dang tin( cay)?|tin cay|uy tin|de tinh|lanh nghe|tay nghe|quy men|"
+                        r"vui ve|lich su|tan tam|hai long|yeu thich|tot bung|de thuong|chu dao|niem no|"
                         r"thong minh|hieu biet|dep)\b(?:\s+\w+){0,2}\s+nhat\b")
 
 
@@ -139,7 +138,7 @@ class ValueIndex:
 
 
 def subjective_note(text: str, rulebook: str, names: tuple[str, ...] = ()) -> str | None:
-    """A superlative of a quality the data cannot measure ('khách trung thực nhất', 'món ngon nhất') that the rulebook does
+    """A superlative of a quality the data cannot measure ('nhân viên tay nghề cao nhất', 'được khách quý mến nhất') that the rulebook does
     not define: the rulebook's unanswerable case for subjective questions."""
     f = fold(text)
     for n in names:

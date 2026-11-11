@@ -98,12 +98,12 @@ def fit_month(result: dict, e: Expect) -> dict:
 
 _MONEY_WORD = re.compile(r"\b(tien|doanh thu|doanh so|gia tri|gia von|tien von|lai|loi nhuan|no|chi phi|dong|vnd|von)\b")
 _NOT_MONEY = re.compile(r"\b(bao nhieu|may|so|dem)\s+(don|khach|lan|ngay|mat hang|mon|san pham|hoa don|phieu|nguoi|ky|chuyen|"
-                        r"dot|luot|xe|ly|goi|lon|chai|cai|hop|vien|bich|may|chiec)\b|\bluot\b|\bphan tram\b|%")
+                        r"dot|luot|xe|ly|goi|lon|chai|cai|hop|vien|may)\b|\bluot\b|\bphan tram\b|%")
 
 
 def fit_money(result: dict, rules_text: str) -> dict:
     """Rulebook: money is whole đồng, an average of money too, half up. A fractional number asked about money is rounded
-    (never a non-integer gold among 1427 money-like train and public questions)."""
+    (never a non-integer gold among 834 money-like train questions)."""
     a = result.get("answer")
     if result.get("type") != "number" or isinstance(a, bool) or not isinstance(a, float) or a == int(a):
         return result

@@ -32,8 +32,8 @@ def test_train_rulebook_keeps_every_definition(tmp_path):
     assert rule_gate(file.read_text(encoding="utf-8"), tmp_path / "r.json", boom) == frozenset()
 
 
-def test_public_rulebook_drops_the_macros_of_its_removed_rules(tmp_path):
-    file = Path("data/public_test/rulebook.md")
+def test_edited_rulebook_drops_the_macros_of_its_removed_rules(tmp_path):
+    file = Path("data/train/rulebook.md")
     if not file.exists():
         pytest.skip("no data")
     asked = []
@@ -42,7 +42,11 @@ def test_public_rulebook_drops_the_macros_of_its_removed_rules(tmp_path):
         asked.append(parts[0])
         return '{"changed": false}'
 
-    off = rule_gate(file.read_text(encoding="utf-8"), tmp_path / "r.json", gen)
+    rows = file.read_text(encoding="utf-8").splitlines()
+    gone = ("Giá bán X ngày D", "Giá nhập bình quân một mặt hàng trong tháng", "Tồn theo đơn vị lớn")
+    book = "\n".join(r for r in rows if not any(r.startswith(f"| {g} |") for g in gone))
+    book = book.replace(TESTED["Giao nhiều đợt"][0], TESTED["Giao nhiều đợt"][0] + ". Đợt giao lại sau khi khách hẹn cũng là một đợt")
+    off = rule_gate(book, tmp_path / "r.json", gen)
     assert off == {"price_on", "avg_import_price", "stock_split"}  # 'Giá bán X ngày D', 'Giá nhập bình quân…', 'Tồn theo đơn vị lớn'
     assert asked == ["Rule: Giao nhiều đợt"]  # reworded: asked once whether a number can differ
 

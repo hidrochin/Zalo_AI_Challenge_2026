@@ -17,6 +17,7 @@ from datamate.agent.hints import time_hints
 from datamate.agent.prompt import build_system, business_part, check_message, extract_code, question_part, repair_message
 from datamate.agent.retrieve import ExampleBank
 from datamate.agent.columns import resolve_columns
+from datamate.agent.judge import doubt, judge_messages, parse_verdict, retry_note, solver_text
 from datamate.agent.lint import grain_advice, ready_terms, term_advice
 from datamate.agent.sandbox import ExecPool, name_index
 from datamate.agent.statuses import resolve_statuses
@@ -33,8 +34,11 @@ from datamate.postprocess import Expect, check_answer, date_window, expect_answe
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
 from datamate.rules import params_off, rule_gate, rule_note, rule_params
-from datamate.sql.agent import (SqlPool, build_sql_system, extract_sql, hint_periods, sql_card, sql_check_message,
-                                sql_question_part, sql_repair_message, sql_shadow)
+from datamate.sql.agent import (MACROS, PRIMITIVES, SqlPool, absent_part, build_sql_system, extract_sql, hint_periods, sql_card,
+                                sql_check_message, sql_question_part, sql_repair_message, sql_shadow)
+from datamate.agent.evidence import pick_rules
+from datamate.sql.compile import compile_rulebook, usable
+from datamate.sql.shopviews import card_part, shop_views
 from datamate.sql.store import STORE_VERSION, ensure_store
 from datamate.sql.values import subjective_note
 
@@ -61,6 +65,7 @@ class RunConfig:
     k_examples: int = 4
     examples_path: Path | None = Path("assets/examples.jsonl")
     keep_tables: Path | None = None  # experiment: JSON of question id -> raw tables to show, null = all (SQL engine)
+    oracle: Path | None = None  # experiment: JSON {"notes": {question id: note}, "setup": {business: [SQL]}} (debug/oracle)
     min_share: float = 0.5
     unans_share: float = 0.6
     llm_retries: int = 6  # server errors: back off 5..120 s, then stop the run (a resumed run retries)
@@ -72,6 +77,16 @@ class RunConfig:
     ids: list[str] = field(default_factory=list)
     resume: bool = True
     fast: bool = False  # answer questions a closed frame explains in full without the model
+    think_rewrite: bool = False  # thinking also for the rewrite and the one-off ingest/rule questions (short budgets)
+    # SQL engine: "full" = the hand-written formula catalog; "primitives" = only generic helpers, no rulebook macros,
+    # catalog advice, contract checks or rulebook lints: the model computes every business term from the rulebook itself;
+    # "compiled" = primitives plus the macros the model writes from the split's rulebook at the start of the run (sql/compile.py)
+    catalog: str = "full"
+    shop_views: bool = False  # SQL engine: the model writes views per shop from its README and raw tables (sql/shopviews.py)
+    context: str = "base"  # base | rich (SQL): card with keys, missing facts and macro SQL; rulebook lines per question; plan lines
+    judge: str = "off"  # off | unans | all: a second agent checks UNANSWERABLE verdicts (unans) or every verdict (all)
+    think_max_tokens: int = 8192  # compile, shop views and judge calls
+    prepare_only: bool = False  # run the one-off agent steps (rulebook macros, shop views) and stop before the questions
 
 
 def _pandas_shadow(text: str, hints: list[str]) -> tuple[str, str] | None:
@@ -152,7 +167,12 @@ def make_llm(cfg: RunConfig):
         return GeminiLLM(cfg.model)
     from datamate.agent.llm_local import LocalLLM
 
-    return LocalLLM(cfg.base_url, cfg.model, max_tokens=cfg.max_tokens, enable_thinking=cfg.enable_thinking)
+    return LocalLLM(cfg.base_url, cfg.model, max_tokens=cfg.max_tokens, enable_thinking=cfg.enable_thinking, effort=cfg.effort)
+
+
+def aux_llm(llm, cfg: RunConfig):
+    """The model for short calls: thinking off unless cfg.think_rewrite."""
+    return llm if cfg.think_rewrite or not hasattr(llm, "without_thinking") else llm.without_thinking()
 
 
 def _select(questions: list[dict], cfg: RunConfig) -> list[dict]:
@@ -220,22 +240,27 @@ def fast_pass(questions: list[dict], cal, sales, trust, off: frozenset[str], ind
 
 def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
                    cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset(),
-                   macros=(), rulebook: str = "") -> dict:
+                   macros=(), rulebook: str = "", oracle_note: str | None = None) -> dict:
     t0 = time.time()
     engine = ENGINES[cfg.engine]
-    text, rw, pre = preprocess(q, llm, cfg, index)
+    text, rw, pre = preprocess(q, aux_llm(llm, cfg), cfg, index)
+    full = cfg.catalog == "full"
     expect = expect_answer(text, rw)
     norm = {**pre.get("norm", {}), "expect": _expect_text(expect) if expect.hard else None}
     if cfg.engine == "sql":  # values and qualities the question names, found without a model call (sql/values.py)
         named = tuple(m["name"] for m in pre.get("mentions", []) if m.get("full"))
         norm["values"] = pool.values.hints(text, named)
         norm["subjective"] = subjective_note(text, rulebook, named)
+        if cfg.context == "rich":
+            norm["rules"] = pick_rules(rulebook, text)
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
     hints = time_hints(text, q["as_of_date"], cal)
     expect.window = date_window(text, hints)
-    shadow = None if is_gated(text, off) else engine.shadow(text, hints)
+    shadow = None if is_gated(text, off) or not full else engine.shadow(text, hints)
     extra = {"periods": hint_periods(hints)} if cfg.engine == "sql" else {}  # a period outside the data makes 'no rows' a reason
     user_parts = [biz_part, engine.question_part(q["question"], q["as_of_date"], examples, hints, norm)]
+    if oracle_note:  # experiment: what an intervention tells the model, checked by hand (debug/oracle)
+        user_parts[1] += "\n\nVerified facts about this shop's data for this question (use them):\n" + oracle_note
     samples = []
     for s in range(cfg.samples):
         temperature = 0.0 if s == 0 else cfg.temperature
@@ -254,7 +279,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
                 break
             code = engine.extract(text_reply)
             advice = None
-            if code and attempt == 0 and cfg.repair:
+            if code and attempt == 0 and cfg.repair and full:
                 advice = term_advice(text, code, terms, cfg.engine, macros) or (grain_advice(text, code) if cfg.engine == "pandas" else None)
             if code is None:
                 out = {"result": None, "error": engine.no_code, "stdout": ""}
@@ -284,11 +309,69 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
         sample["result"], sample["error"] = out["result"], out["error"]
         samples.append(sample)
     final, vote = decide([s["result"] for s in samples], cfg.min_share, cfg.unans_share)
+    judged = None
+    hedge = next((h for s in samples for a in s["attempts"] for h in [doubt(a.get("reply"))] if h), None)
+    if final["type"] in ("unanswerable", "abstain"):
+        hedge = None
+    if cfg.judge != "off" and (final["type"] == "unanswerable" or hedge
+                               or (cfg.judge == "all" and final["type"] != "abstain")):
+        final, judged = _judge(q, final, samples, llm, pool, system, user_parts, text, expect, rulebook, cfg, shadow, extra,
+                               hedge)
     return {
         "id": q["id"], "business_id": q["business_id"], "question": q["question"], "as_of_date": q["as_of_date"],
         "final": finalize(final), "vote": vote, "pre": pre, "expect": vars(expect), "examples": [e["id"] for e in examples],
-        "hints": hints, "samples": samples, "elapsed": round(time.time() - t0, 2),
+        "hints": hints, "samples": samples, "judge": judged, "elapsed": round(time.time() - t0, 2),
     }
+
+
+def _checked(out: dict, text: str, expect: Expect) -> dict:
+    """The answer checks of a solver attempt, as in solve_question: a contradiction makes it a warning."""
+    if out["error"] is None and out["result"] is not None:
+        out["result"] = fit_money(fit_month(out["result"], expect), text)
+        why, hard = check_answer(out["result"], expect)
+        broken = invariants(out["result"], text, expect.window)
+        if broken:
+            why = "\n".join([why or ""] + [m for _, m in broken]).strip()
+        if why:
+            out = {**out, "warning": "\n".join(w for w in (out.get("warning"), why) if w)}
+    return out
+
+
+def _judge(q, final, samples, llm, pool, system, user_parts, text, expect, rulebook, cfg, shadow, extra,
+           hedge: str | None = None) -> tuple[dict, dict]:
+    """The second agent's verdict on the solver's: agreement keeps it, an answerable verdict on UNANSWERABLE gets one more
+    solver try with the judge's pointer, a disagreement that stays abstains. hedge: the solver answered but also wrote
+    UNANSWERABLE; a judge that finds the data missing too makes it UNANSWERABLE."""
+    code = next((a.get("code") for s in samples for a in reversed(s["attempts"]) if a.get("code")), None)
+    js, jparts = judge_messages(rulebook, user_parts[0], q["question"], text, solver_text(final, code, hedge))
+    try:
+        reply = _generate(llm, cfg, js, jparts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.think_max_tokens)
+    except LLMUnavailable:
+        raise
+    except Exception as e:  # noqa: BLE001
+        return final, {"error": repr(e)}
+    verdict = parse_verdict(reply)
+    rec = {"reply": reply[-2000:], "verdict": verdict}
+    if verdict is None or verdict["answerable"] == (final["type"] != "unanswerable"):
+        return final, {**rec, "action": "keep"}
+    if final["type"] != "unanswerable":  # answered, but the judge finds the data missing
+        if hedge:  # so did the solver
+            return {"type": "unanswerable", "reason": verdict["where"] or hedge}, {**rec, "action": "unanswerable"}
+        return {"type": "abstain"}, {**rec, "action": "abstain"}
+    engine = ENGINES[cfg.engine]
+    try:
+        again = _generate(llm, cfg, system, user_parts + [retry_note(verdict)], [], temperature=0.0, seed=cfg.seed)
+    except LLMUnavailable:
+        raise
+    except Exception as e:  # noqa: BLE001
+        return {"type": "abstain"}, {**rec, "action": "abstain", "retry_error": repr(e)}
+    code = engine.extract(again)
+    out = _checked(pool.run(code, q["as_of_date"], shadow, **extra), text, expect) if code else {"result": None, "error": engine.no_code}
+    rec["retry"] = {"reply": again, "code": code, **{k: v for k, v in out.items() if k in ("result", "error", "warning")}}
+    res = out.get("result")
+    if res is not None and res.get("type") != "unanswerable" and not out.get("warning"):
+        return res, {**rec, "action": "answer"}
+    return {"type": "abstain"}, {**rec, "action": "abstain"}
 
 
 def run(cfg: RunConfig) -> dict:
@@ -310,14 +393,31 @@ def run(cfg: RunConfig) -> dict:
     todo = [q for q in questions if q["id"] not in done]
 
     llm = make_llm(cfg)
+    aux = aux_llm(llm, cfg)
     rulebook = (split_dir / "rulebook.md").read_text(encoding="utf-8")
 
     def ask(system, parts):
-        return _generate(llm, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
+        return _generate(aux, cfg, system, parts, [], temperature=0.0, seed=cfg.seed, max_tokens=cfg.rewrite_max_tokens)
 
     params = rule_params(rulebook)  # numbers the macros take from this rulebook; unreadable ones turn their macros off
     off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask) | params_off(params)
-    system = ENGINES[cfg.engine].build_system(rulebook) + rule_note(off)
+    full, compiled = cfg.catalog == "full", cfg.catalog == "compiled"
+    rich = cfg.context == "rich" and cfg.engine == "sql"
+
+    def think(system, parts, history):  # the one-off agent steps: rulebook macros, shop views
+        return _generate(llm, cfg, system, parts, history, temperature=0.0, seed=cfg.seed, max_tokens=cfg.think_max_tokens)
+
+    hidden = frozenset(m for m in MACROS if m not in PRIMITIVES)  # the hand-written rule macros of the stores
+    rule_macros = []
+    if cfg.engine == "sql" and not full:  # no hand-written rulebook macro is offered, so no note about which of them changed
+        system = build_sql_system(rulebook, primitives=True, compiled=compiled, plan=rich)
+        if compiled:
+            shops = sorted(p.name for p in (split_dir / "data").iterdir() if p.is_dir())
+            stores = {b: ensure_store(split_dir, b, Path(cfg.cache_dir).parent) for b in shops}
+            rule_macros = compile_rulebook(rulebook, stores, think, Path(cfg.cache_dir).parent / "compiled" / split_dir.name / "macros.json",
+                                           model=cfg.model, hidden=hidden)
+    else:
+        system = ENGINES[cfg.engine].build_system(rulebook) + rule_note(off)
     examples_path = cfg.examples_path.with_name("examples_sql.jsonl") if cfg.engine == "sql" and cfg.examples_path else cfg.examples_path
     bank = ExampleBank.from_train(Path(cfg.data_root) / "train", examples_path,
                                   normalize=None if cfg.normalize == "off" else (lambda t: rules_normalize(t).text))
@@ -327,6 +427,7 @@ def run(cfg: RunConfig) -> dict:
     _LLM_DOWN.clear()
 
     kept = json.loads(Path(cfg.keep_tables).read_text(encoding="utf-8")) if cfg.keep_tables else None
+    oracle = json.loads(Path(cfg.oracle).read_text(encoding="utf-8")) if cfg.oracle else {"notes": {}, "setup": {}}
     by_biz: dict[str, list[dict]] = {}
     for q in todo:
         by_biz.setdefault(q["business_id"], []).append(q)
@@ -358,17 +459,46 @@ def run(cfg: RunConfig) -> dict:
             macros = []
             if cfg.engine == "sql":
                 store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
-                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout, params=params)
-                macros = [m for m in pool.macros() if m not in shop_off]
-                biz_part = business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros))
-                part_of = (lambda q: business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, kept.get(q["id"])))) if kept else None
+                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout, params=params,
+                               rules_code=full)
+                stored = pool.macros()
+                macros = [m for m in stored if m not in shop_off] if full else [m for m in stored if m in PRIMITIVES]
+                card = sql_card(biz, sales, sales_desc, macros, views=stored, rich=rich)
+                probe = pool.base.cursor()  # a session of its own, to find what runs on this store
+                ours = usable(probe, rule_macros, hidden) if compiled else []
+                pool.block([m for m in stored if m not in macros and m not in {r.name for r in ours}] if not full else [])
+                pool.setup(oracle["setup"].get(biz_id, []))  # after macros(): the card does not list the oracle's views
+                setup = [r.temp_sql() for r in ours]
+                if ours:
+                    card += ("\n\n## Macros written from this split's rulebook (call one when its doc is the term the question asks; "
+                             "TABLE ones go after FROM" + ("; the line under each is its SQL: if it disagrees with the "
+                             "RULEBOOK, compute the term yourself" if rich else "") + ")\n"
+                             + "\n".join(f"- {r.card_line(body=rich)}" for r in ours))
+                if cfg.shop_views:
+                    views = shop_views(biz_id, card, biz.readme.text, probe, think,
+                                       Path(cfg.cache_dir).parent / "shopviews" / split_dir.name, model=cfg.model)
+                    for v in views:
+                        probe.execute(v.temp_sql())
+                    setup = [v.temp_sql() for v in views] + setup
+                    card += card_part(probe, views)
+                if rich:
+                    card += absent_part(probe)
+                probe.close()
+                pool.setup(setup)
+                biz_part = business_part(biz_id, biz.readme.text, card)
+                part_of = (lambda q: business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, kept.get(q["id"]), views=stored))) if kept else None
             else:
                 biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
                 pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
                 part_of = None
+            if cfg.prepare_only:
+                pool.close()
+                bar.update(len(by_biz[biz_id]))
+                continue
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook)
+                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook,
+                                      oracle["notes"].get(q["id"]))
                             for q in left]
                     for f in as_completed(futs):
                         try:

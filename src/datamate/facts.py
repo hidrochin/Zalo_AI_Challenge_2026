@@ -64,10 +64,9 @@ class Facts:
 def _order_fields(biz: Business) -> dict[str, pd.Series]:
     """order id -> value, for what sits on an order but not on the sales lines' canonical columns."""
     wanted = {
-        "total": ("order_total", r"^tong tien don|^so khach phai tra|^khach can tra|^tong tien cua ca don|^tong thanh toan", r"^(tong sau giam gia|tong don|tong bill|phai thu|tong thanh toan|tong tien don|tong tien)$"),
-        "method": ("pay_method", r"^hinh thuc thanh toan", r"^(phuong thuc( tt| thanh toan)?|tra bang|hinh thuc( tt| thanh toan)|thanh toan bang|httt|pttt|loai tt)$"),
-        "channel": ("channel", r"^kenh( ban| dat)?\b", r"^(kenh( ban| dat)?|ban qua|loai ban|nguon( don)?)$"),
-        "note": ("debt_note", r"don ghi no", r"^$"),
+        "total": ("order_total", r"^tong tien don|^so khach phai tra|^tong tien cua ca don|^tong thanh toan", r"^(tong sau giam gia|tong don|tong bill|phai thu|tong thanh toan|tong tien don|tong tien)$"),
+        "method": ("pay_method", r"^hinh thuc thanh toan", r"^(phuong thuc( tt| thanh toan)?|tra bang|hinh thuc( tt| thanh toan)|httt|pttt)$"),
+        "channel": ("channel", r"^kenh( ban)?\b", r"^(kenh ban|ban qua|loai ban|nguon don)$"),
     }
     out: dict[str, pd.Series] = {}
     for name, t in biz.tables.items():
@@ -91,60 +90,12 @@ def _orders(biz: Business, sales: pd.DataFrame) -> pd.DataFrame | None:
     o = all_orders[keep].copy()
     o["total"] = _money(o["order_id"].map(fields["total"]))
     method = o["order_id"].map(fields["method"]).map(fold, na_action="ignore").fillna("") if "method" in fields else pd.Series("", index=o.index)
-    note = o["order_id"].map(fields["note"]).map(fold, na_action="ignore").fillna("") if "note" in fields else pd.Series("", index=o.index)
     channel = o["order_id"].map(fields["channel"]).map(fold, na_action="ignore").fillna("") if "channel" in fields else pd.Series("", index=o.index)
     cod = method.map(lambda v: bool(_COD_WORD.search(v)))
     market = channel.map(lambda v: bool(_MARKET_WORD.search(v)))
-    o["on_credit"] = (method.map(lambda v: bool(_DEBT_WORD.search(v))) | note.map(lambda v: bool(_DEBT_WORD.search(v)))) & ~cod & (o["status"] != "huỷ")
+    o["on_credit"] = method.map(lambda v: bool(_DEBT_WORD.search(v))) & ~cod & (o["status"] != "huỷ")
     o["can_owe"] = ~cod & ~market & (o["status"] != "huỷ")  # rulebook: COD and marketplace orders are never debt
     return o
-
-
-_OWED = re.compile(r"(?:\bno\b|thieu(?: lai)?|ghi so|ghi no|con lai)\s*:?\s*(\d[\d.,]*\s*(?:k|nghin|ngan|tr|trieu|d|dong|vnd)?)")
-_OWED_ALL = re.compile(r"no ca don|chua tra|no het|ghi no ca|no toan bo")
-_GAVE = re.compile(r"(?:dua(?: truoc)?|tra(?: truoc)?|\bck\b|chuyen khoan)\s*:?\s*(\d[\d.,]*\s*(?:k|nghin|ngan|tr|trieu|d|dong|vnd)?)")
-_PAID_UP = re.compile(r"(da )?tra (du|het)|ck du|chuyen khoan du|tra xong|da thanh toan|het no")
-
-
-def _note_amount(text: str, pattern: re.Pattern = _OWED) -> float | None:
-    from datamate.ingest.parsers import parse_number
-
-    m = pattern.search(text)
-    if not m:
-        return None
-    raw = m.group(1).replace(" ", "").replace("nghin", "k").replace("ngan", "k").replace("trieu", "tr").replace("dong", "")
-    v = parse_number(raw.rstrip("d"))
-    return float(v) if v is not None else None
-
-
-def note_payments(orders: pd.DataFrame, notes: pd.Series, data_end) -> pd.DataFrame | None:
-    """Payments read from the order notes when a shop keeps no payment book (README: the note says what the customer gave
-    or still owes, as of the end of the data). An order not on credit is paid on its day. Per order on credit: what was
-    not left owing is paid on the order day; a
-    note that says the debt was paid up later puts the rest on the last day of the data, the only date it is known by."""
-    rows = []
-    for oid, day, total, credit in orders[["order_id", "date", "total", "on_credit"]].itertuples(index=False):
-        text = notes.get(oid)
-        if not credit:  # paid in full when bought
-            rows.append((oid, day, total))
-            continue
-        if not isinstance(text, str) or not text.strip():
-            continue
-        t = fold(text)
-        owed = 0.0 if _PAID_UP.search(t) else (total if _OWED_ALL.search(t) else _note_amount(t))
-        if owed is None and _note_amount(t, _GAVE) is not None:  # 'đưa trước 236k, còn lại ghi sổ'
-            owed = max(total - _note_amount(t, _GAVE), 0.0)
-        if owed is None:
-            continue
-        first = _note_amount(t) if _PAID_UP.search(t) else owed  # 'nợ 69 nghìn, khách ck đủ rồi': 69k was owed at first
-        first = total if first is None else min(first, total)
-        if total - first > 0.5:
-            rows.append((oid, day, total - first))
-        if first - owed > 0.5 and data_end is not None:
-            rows.append((oid, pd.Timestamp(data_end).normalize(), first - owed))
-    if not rows:
-        return None
-    return pd.DataFrame(rows, columns=["order_id", "date", "amount"])
 
 
 def _payments(biz: Business, order_ids: set) -> pd.DataFrame | None:
@@ -160,7 +111,7 @@ def _payments(biz: Business, order_ids: set) -> pd.DataFrame | None:
         dates = [c for c in cols if pd.api.types.is_datetime64_any_dtype(t[c])]
         money = [c for c in cols if pd.api.types.is_numeric_dtype(t[c]) and (t[c].dropna() > 0).mean() > 0.9]
         when = pick(t, ti, "pay_date", r"^thoi diem thu|^ngay thu", r"^(thoi gian thu|ngay thu|ngay gio thu|thoi diem|thoi gian)$") or (dates[0] if dates else None)
-        amount = pick(t, ti, "pay_amount", r"^so tien$", r"^(so tien( thu)?|gia tri|tien( thu)?)$") or (money[0] if len(money) == 1 else None)
+        amount = pick(t, ti, "pay_amount", r"^so tien$", r"^(so tien( thu)?|gia tri|tien)$") or (money[0] if len(money) == 1 else None)
         if amount is None or when is None:
             continue
         return pd.DataFrame({"order_id": t[oid], "date": _day(t[when]), "amount": _money(t[amount])}).dropna(subset=["order_id", "date"])
@@ -172,7 +123,7 @@ def _deliveries(biz: Business) -> pd.DataFrame | None:
         ti = biz.info[name]
         oid = _role(ti, "order_id")
         trip = pick(t, ti, "trip", r"^dot giao", r"^(luot giao|lan giao|dot giao|dot)$")
-        when = pick(t, ti, "delivery_date", r"^ngay giao", r"^(ngay (giao|cho)( hang)?|thoi gian (giao|cho))$")
+        when = pick(t, ti, "delivery_date", r"^ngay giao", r"^ngay (giao|cho)( hang)?$")
         if oid is None or trip is None or when is None:
             continue
         return pd.DataFrame({"order_id": t[oid], "trip": t[trip], "date": _day(t[when])}).dropna(subset=["order_id", "date"])
@@ -207,7 +158,7 @@ def _product_names(t: pd.DataFrame, ti: TableInfo, lookup: tuple[dict, dict]) ->
 
 
 _SUPPLIER_HEAD = r"^(nha cung cap|ncc|ten ncc|ma ncc|ma nha cung cap|nha cc)$"
-_NAME_HEAD = re.compile(r"^(ten( goi| ncc| nha cung cap)?|nha cung cap|ho ten)$")
+_NAME_HEAD = re.compile(r"^(ten( goi| ncc| nha cung cap)?|nha cung cap)$")
 
 
 def _supplier_names(biz: Business, col: str, codes: pd.Series) -> pd.Series:
@@ -270,7 +221,7 @@ def _expenses(biz: Business) -> pd.DataFrame | None:
         ti = biz.info[name]
         if not (re.search(r"chi ?phi|expense", fold(name)) or "expense_amount" in ti.roles.values()):
             continue
-        amount = pick(t, ti, "expense_amount", r"^so tien", r"^(so tien( chi)?|thanh tien|tien( chi)?|gia tri|chi phi)$")
+        amount = pick(t, ti, "expense_amount", r"^so tien", r"^(so tien( chi)?|thanh tien|tien|gia tri|chi phi)$")
         when = pick(t, ti, "expense_date", r"^ngay", r"^(ngay( chi| mua| phat sinh)?|thoi gian)$")
         if amount and when:
             return pd.DataFrame({"date": _day(t[when]), "amount": _money(t[amount])}).dropna(subset=["date"])
@@ -341,7 +292,7 @@ def _lots(biz: Business, lookup: tuple[dict, dict]) -> tuple[pd.DataFrame | None
 
 _PRICE_TABLE = re.compile(r"gia|price")
 _PRICE_HEAD = r"^(gia moi|gia ban( le| moi)?|gia ap dung|gia|don gia( ban)?)$"
-_PRICE_DATE = r"^(ngay( ap dung| doi( gia)?| thay doi| hieu luc| bat dau)?|tu ngay|ap dung tu|thoi gian)$"
+_PRICE_DATE = r"^(ngay( ap dung| doi( gia)?| thay doi| hieu luc| bat dau)?|ap dung tu|thoi gian)$"
 
 
 def _price_list(biz: Business, lookup: tuple[dict, dict]) -> pd.DataFrame | None:
@@ -423,9 +374,6 @@ def _read_facts(biz: Business, sales: pd.DataFrame | None) -> Facts:
     f.orders = _orders(biz, sales)
     if f.orders is not None:
         f.payments = _payments(biz, set(f.orders["order_id"]))
-        notes = _order_fields(biz).get("note")
-        if f.payments is None and notes is not None and f.orders["on_credit"].any():
-            f.payments = note_payments(f.orders, notes, biz.readme.data_end)
         if f.payments is not None and not f.orders["on_credit"].any():  # no payment method recorded: what the day of purchase left unpaid
             paid = f.payments.merge(f.orders[["order_id", "date"]].rename(columns={"date": "ordered"}), on="order_id")
             same_day = paid[paid["date"] <= paid["ordered"]].groupby("order_id")["amount"].sum()

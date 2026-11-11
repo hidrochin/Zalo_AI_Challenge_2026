@@ -20,7 +20,7 @@ from datamate.canon import build_orders
 from datamate.eval.semantic import find_check
 from datamate.ingest.business import META_COLS, Business
 from datamate.ingest.schema_card import _column_line
-from datamate.sql.store import _slug, _writable, connect, run_select, set_as_of, set_params
+from datamate.sql.store import SqlRejected, _slug, _writable, connect, run_select, set_as_of, set_params
 from datamate.sql.values import ValueIndex
 from datamate.text import fold
 
@@ -175,28 +175,24 @@ MACROS = {
     "expiring_lots": "expiring_lots(d, n): TABLE of lots with stock whose expiry is from day d to d + n: lot, product_name, expiry, left, capital (= left × the lot's own price, 'tiền vốn'); count rows for 'mấy lô'",
     "avg_order_value": "avg_order_value(a, b): revenue / counted orders, rounded to đồng",
     "avg_order_value_group": "avg_order_value_group(group, a, b): avg_order_value of one customer group ('khách nhóm G trung bình mỗi đơn')",
-    "customer_stats": "customer_stats(a, b): TABLE one row per customer (walk-ins excluded): customer, customer_name, orders, days (days with an order), revenue, avg_order, cancels. Rulebook: mua nhiều tiền nhất = revenue; trung thành nhất = days; sộp nhất = avg_order among orders >= 3; hay đổi ý nhất = cancels; mua nhiều lần/đơn nhất = orders. Ties: order by the measure desc, then customer",
+    "customer_stats": "customer_stats(a, b): TABLE one row per customer (walk-ins excluded): customer, customer_name, orders, revenue. Rulebook: mua nhiều tiền nhất = revenue; mua nhiều lần/đơn nhất = orders. Ties: order by the measure desc, then customer",
     "customers_min_orders": "customers_min_orders(n, a, b): how many customers have at least n counted orders in the period",
     "share_customers_min_orders": "share_customers_min_orders(n, a, b): percent of the customers who bought in the period that have at least n orders ('khách mua từ N đơn trở lên chiếm mấy %')",
-    "item_stats": "item_stats(a, b): TABLE one row per item: product_name, product_key, qty (base units), revenue, orders (orders containing it)[, profit]. bán chạy = qty; nhiều tiền = revenue; ưa chuộng nhất / có mặt trong nhiều đơn = orders; lời nhất = profit",
+    "item_stats": "item_stats(a, b): TABLE one row per item: product_name, product_key, qty (base units), revenue, orders (orders containing it)[, profit]. bán chạy = qty; nhiều tiền = revenue; có mặt trong nhiều đơn = orders; lời nhất = profit",
     "items_in_min_orders": "items_in_min_orders(n, a, b): how many items appear in at least n counted orders",
-    "day_stats": "day_stats(a, b): TABLE one row per day with orders: date, revenue, orders. 'ngày bán nhiều tiền nhất' = revenue; 'ngày đắt khách nhất' = orders; 'mấy ngày/bữa bán được từ X' = count(*) where revenue >= X",
+    "day_stats": "day_stats(a, b): TABLE one row per day with orders: date, revenue. 'ngày nào doanh thu cao nhất' = revenue; 'mấy ngày/bữa bán được từ X' = count(*) where revenue >= X",
     "month_stats": "month_stats(a, b): TABLE one row per month: month ('YYYY-MM'), revenue, orders. 'tháng nào cao nhất' = select month from month_stats(a, b) order by revenue desc, month limit 1",
     "revenue_rising": "revenue_rising(a, b): true when the revenue of every month from a to b is above the month before it ('doanh thu có tăng liên tục / tháng sau luôn cao hơn tháng trước'): a = the first day of the first month, b = the last day of the last month",
     "revenue_of": "revenue_of(col, value, a, b): revenue (default rule) of the lines whose column col equals value: a channel, payment method, product or customer group, staff, a flag. col is a column of sales_lines, quoted: revenue_of(\"Kênh bán\", 'Zalo OA', a, b). For a yes/no column pass flag(col) and true",
     "share_of": "share_of(col, value, a, b): percent of the shop's whole revenue (walk-ins and fee lines in the total) made by the lines whose col equals value ('nhóm X chiếm bao nhiêu %', 'đơn trả bằng tiền mặt bằng bao nhiêu %')",
     "orders_of": "orders_of(col, value, a, b): counted orders with at least one line whose col equals value ('số đơn có mua nhóm X', 'số đơn qua kênh Y')",
     "qty_of": "qty_of(col, value, a, b): quantity sold in base units of the lines whose col equals value",
-    "group_stats": "group_stats(col, a, b): TABLE one row per value of col (staff, channel, group...): value, revenue, orders, qty (base units), days. 'nhân viên bán giỏi nhất' = select value from group_stats(\"<staff column>\", a, b) order by revenue desc, value limit 1",
+    "group_stats": "group_stats(col, a, b): TABLE one row per value of col (staff, channel, group...): value, revenue, orders, qty (base units). 'nhân viên bán giỏi nhất' = select value from group_stats(\"<staff column>\", a, b) order by revenue desc, value limit 1",
     "qty_unit": "qty_unit(unit, a, b): 'bán được bao nhiêu <đơn vị>' with no item named: base-unit quantity of the items whose base unit is that unit ('bao nhiêu ly' = qty_unit('ly', a, b))",
     "flag": "flag(col): a yes/no cell as a boolean whatever the shop writes (true, 1, 'x', 'có'): 'thuốc kê đơn' = flag(\"Thuốc kê đơn\")",
     "shift_revenue": "shift_revenue(s, a, b): revenue of shift s ('sáng' or 'chiều') in the period, shift hours as the rulebook gives them",
     "shift_orders": "shift_orders(s, a, b): counted orders of shift s. Ca chiều vs ca sáng: pct_change(<chiều>, <sáng>), the morning shift is the base",
-    "hour_stats": "hour_stats(a, b): TABLE hour, orders, busiest first. 'giờ cao điểm' = the first hour (a number)",
     "size_qty": "size_qty(s, a, b): cups of size s ('M', 'L') sold: items whose name ends with '(s)', base units",
-    "model_line": "model_line(product_name): 'dòng máy': the name before its capacity '…GB' (the whole name when it has none)",
-    "brand_of": "brand_of(product_name): 'hãng': the first word of the name; iPhone is Apple",
-    "extra_lines": "extra_lines('voucher' | 'ship' | 'điểm', a, b): money of the lines that are not goods (voucher discount, shipping fee, points used) as a positive number, by invoice day, orders not cancelled or returned",
     "price_on": "price_on(product_name, d): 'giá bán X ngày D', price per base unit before line discount",
     "round_half_up": "round_half_up(x, n): rounds half away from zero",
     "pct_change": "pct_change(new, old): percent change, NULL when old is 0",
@@ -222,8 +218,39 @@ class AnswerShape(ValueError):
     """The query ran, but its result cannot be read as the declared answer type."""
 
 
-def build_sql_system(rulebook: str) -> str:
-    return SYSTEM_TEMPLATE.format(rulebook=rulebook.strip())
+# Generic helpers that hold no rulebook definition: what the "primitives" catalog keeps (RunConfig.catalog)
+PRIMITIVES = ("as_of", "has_name", "same_text", "fold_text", "round_half_up", "pct_change", "flag", "shift_of", "stock_at",
+              "lots_left")
+_SKELETON = re.compile(r"```sql\n.*?```\n", re.S)
+_MACRO_RULE = ("- A macro in the schema card is the tested definition of its rulebook term: call it instead of rebuilding the "
+               "logic from raw tables. Macros marked TABLE go after FROM.")
+
+
+_PLAN = ("After the type line write three comment lines, then the query:\n"
+         "`-- terms: <each business term of the question> -> <the view, column or macro that holds it>`\n"
+         "`-- rule: <the RULEBOOK rule you apply, quoted briefly>`\n"
+         "`-- needs: <the tables and columns the query reads>`\n"
+         "If a term the question needs has nothing that holds it, reply UNANSWERABLE instead.\n")
+
+
+def build_sql_system(rulebook: str, primitives: bool = False, compiled: bool = False, plan: bool = False) -> str:
+    """primitives: the skeletons that call a rulebook macro are left out, and the model computes every term itself.
+    compiled: the same, but the card also lists the macros the model wrote from this rulebook (sql/compile.py).
+    plan: the query starts with comment lines naming the terms, the rule and the columns it uses."""
+    text = SYSTEM_TEMPLATE
+    if plan:
+        text = text.replace("If the data cannot support the question, reply", _PLAN + "If the data cannot support the question, reply")
+    if primitives:
+        rule_macros = [m for m in MACROS if m not in PRIMITIVES]
+        text = _SKELETON.sub(lambda m: "" if any(re.search(rf"\b{n}\s*\(", m.group(0)) for n in rule_macros) else m.group(0), text)
+        text = text.replace(_MACRO_RULE, (
+            "- The schema card lists generic helpers and the macros written from this RULEBOOK: call one when its doc is the "
+            "term the question asks, with the question's own arguments. Compute any other business term yourself from the "
+            "views and raw tables, as the RULEBOOK defines it. Macros marked TABLE go after FROM." if compiled else
+            "- The macros in the schema card are generic helpers only. Compute every business term "
+            "(revenue, debt, stock, profit, rankings...) yourself from the views and raw tables, as the RULEBOOK "
+            "defines it. Macros marked TABLE go after FROM."))
+    return text.format(rulebook=rulebook.strip())
 
 
 def _columns(title: str, df: pd.DataFrame, roles: dict | None = None, descs: dict | None = None) -> list[str]:
@@ -235,9 +262,58 @@ def _columns(title: str, df: pd.DataFrame, roles: dict | None = None, descs: dic
     return out
 
 
-def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros: list[str], keep: list[str] | None = None) -> str:
+# role of a raw column -> the sales_lines column that holds it (sql_card(rich=True): source tables shown by their mapping)
+_SALES_OF_ROLE = {"order_id": "order_id", "order_date": "date", "order_ts": "order_ts", "status": "status", "line_amount": "amount",
+                  "qty": "qty", "unit": "unit", "unit_price": "unit_price", "product_name": "product_name",
+                  "customer_name": "customer_name", "customer_id": "customer", "base_unit": "base_unit"}
+_KEY_ROLES = {"order_id": "order_id", "product_name": "product_name", "customer_name": "customer_name", "customer_id": "customer"}
+_SOURCE = re.compile(r"T\['([^']+)'\]")
+# canonical fact tables (sql/store.py) and what a shop without any of them lacks
+FACTS = ((("payments_all",), "payments received for orders, so debts (công nợ, trả nợ, khách nợ)"),
+         (("deliveries_all",), "delivery trips (giao hàng, đợt giao)"),
+         (("imports_all",), "import receipts (nhập hàng, nhà cung cấp, giá nhập)"),
+         (("expenses_all",), "expenses (chi phí, lãi ròng)"),
+         (("stock_card_all", "stock_report_all", "lots_all"), "stock (tồn kho)"),
+         (("lots_all",), "lots and expiry dates (lô, hạn dùng)"),
+         (("catalog_cost_all",), "a cost price per product in the product list (giá vốn)"))
+
+
+def absent_part(con) -> str:
+    """The card's list of the canonical facts this shop's store lacks: a small model misses what is not there."""
+    try:
+        have = {r[0] for r in con.execute("select table_name from duckdb_tables()").fetchall()}
+    except duckdb.Error:
+        return ""
+    missing = [what for names, what in FACTS if not have & set(names)]
+    if not missing:
+        return ""
+    return ("\n\n## Not in this shop's canonical tables\n" + "\n".join(f"- {m}" for m in missing)
+            + "\nA question that needs one of these is UNANSWERABLE, unless a raw table or a view written for this shop "
+              "records it.")
+
+
+def _source_lines(name: str, df: pd.DataFrame, roles: dict, descs: dict, sales: pd.DataFrame) -> list[str]:
+    """A raw table that feeds sales_lines: its columns already there by their sales_lines name, the others in full."""
+    mapped = {c: _SALES_OF_ROLE[r] for c, r in roles.items() if r in _SALES_OF_ROLE and _SALES_OF_ROLE[r] in sales.columns
+              and c in df.columns}
+    out = [f"\n## Table raw_{_slug(name)}  rows={len(df)}  (feeds sales_lines; use sales_lines for these columns: "
+           + ", ".join(f'"{c}" = {s}' for c, s in mapped.items()) + ")"]
+    for c in _writable(df).columns:
+        if c not in META_COLS and c not in mapped and not str(c).endswith("__norm"):
+            out.append(_column_line(df, c, roles.get(c), descs.get(c)).replace(f"`{c}`", f'"{c}"', 1))
+    return out
+
+
+def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros: list[str], keep: list[str] | None = None,
+             views=None, rich: bool = False) -> str:
     """The prompt's description of this shop's database: views first, then raw tables, then macros.
-    keep: the raw tables to list, by slug (table-selection experiment); None lists all of them."""
+    keep: the raw tables to list, by slug (table-selection experiment); None lists all of them.
+    views: the store's macros, whose fact views (payments, deliveries, imports) the card lists; None = macros.
+    rich: raw tables that feed sales_lines list only what sales_lines lacks, and a Keys block says how the raw tables
+    join the views."""
+    views = macros if views is None else views
+    sources = set(_SOURCE.findall(sales_desc)) if rich and sales is not None else set()
+    keys = []
     out = [f"# Schema card: {biz.id}"]
     if biz.readme.data_end is not None:
         out.append(f"Data recorded until {biz.readme.data_end:%Y-%m-%d} (from README).")
@@ -258,15 +334,24 @@ def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros:
         if keep is not None and f"raw_{_slug(name)}" not in keep:
             continue
         ti = biz.info[name]
-        out += _columns(f"Table raw_{_slug(name)}  source: {', '.join(sorted({f for f, _ in ti.sources}))}", df, ti.roles, ti.descs)
+        if name in sources:
+            out += _source_lines(name, df, ti.roles, ti.descs, sales)
+        else:
+            out += _columns(f"Table raw_{_slug(name)}  source: {', '.join(sorted({f for f, _ in ti.sources}))}", df, ti.roles, ti.descs)
+            if rich and sales is not None:
+                keys += [f'- raw_{_slug(name)}."{c}" ~ sales_lines.{_KEY_ROLES[r]}' for c, r in ti.roles.items()
+                         if r in _KEY_ROLES and _KEY_ROLES[r] in sales.columns and c in df.columns]
         out += [f"  note: {n}" for n in ti.notes]
+    if keys:
+        out.append("\n## Keys: how the raw tables join the views (spellings can differ: match names with same_text(a, b))\n"
+                   + "\n".join(keys))
     if biz.warnings:
         out.append("\nIngestion warnings: " + "; ".join(biz.warnings))
-    if "debt_total" in macros:
+    if "debt_total" in views:
         out.append("\nView payments: order_id, date, amount (one row per payment).")
-    if "delivery_trips" in macros:
+    if "delivery_trips" in views:
         out.append("\nView deliveries: order_id, trip, date.")
-    if "avg_import_price" in macros:
+    if "avg_import_price" in views:
         out.append("\nView imports: doc, date, product_name, qty, unit, price, amount, qty_base (receipts that are not cancelled).")
     out.append("\n## Macros\n" + "\n".join(f"- {MACROS[m]}" for m in MACROS if m in macros))
     return "\n".join(out)
@@ -293,6 +378,9 @@ def sql_question_part(question: str, as_of: str, examples: list[dict], hints: li
                 + "\n".join(norm["values"]))
     if (norm or {}).get("subjective"):
         out += "\n\nNote: " + norm["subjective"]
+    if (norm or {}).get("rules"):
+        out += ("\n\nRULEBOOK lines whose words the question uses (check that they are the rule it asks; the whole "
+                "RULEBOOK is in the system message):\n" + "\n".join(norm["rules"]))
     lines = sql_hints(hints or [])
     if lines:
         out += "\n\nTime expressions, already resolved by the rulebook (use exactly these dates):\n" + "\n".join(lines)
@@ -461,7 +549,7 @@ _LINTS = [
     (re.compile(r"\b100(\.0*)?\s*\*\s*cancel_rate\s*\(", re.I), "cancel_rate() already returns percent units: do not multiply it by 100."),
     (re.compile(r"\bcount\(\s*\*\s*\)\s+from\s+sales_lines\b", re.I), "sales_lines has one row per product line, so count(*) counts lines. "
                                                                          "Orders: count(distinct order_id) or the `orders` view. Items sold "
-                                                                         "('bán mấy máy/chiếc/lon'): sum(qty_base)."),
+                                                                         "('bán mấy lon/chai'): sum(qty_base)."),
     (re.compile(r"\b(having|order\s+by)\s+count\(\s*\*\s*\)", re.I), None),
     (re.compile(r"\bavg\(\s*\"?(gi[aá] nh[aậ]p|dongianhap|đơn giá|don gia)", re.I), "A mean of prices is not 'giá nhập bình quân': use avg_import_price(), weighted by quantity."),
     (re.compile(r"has_name\(\s*\"?(ho[aạ]t ch[aấ]t|thanhphanchinh|th[aà]nh ph[aầ]n)\"?\s*,\s*'[^']+'", re.I),
@@ -490,11 +578,11 @@ def order_money_lint(code: str, order_cols: tuple[str, ...]) -> str | None:
 
 
 _EQUALS_TEXT = re.compile(r'"([^"]+)"\s*=\s*\'[^\']*\'')
-_FREE_TEXT = re.compile(r"^(ghi chu|note|notes|dien giai|mo ta|noi dung|lam gi|cong viec|chi tiet|ghi chu don|tinh trang xe)$")
+_FREE_TEXT = re.compile(r"^(ghi chu|dien giai|mo ta|noi dung|chi tiet|ghi chu don)$")
 
 
 def free_text_lint(code: str) -> str | None:
-    """`=` on a column written by hand ('Ghi chú' = 'bảo hành') misses the cells that say more ('bảo hành, phiếu d/m')."""
+    """`=` on a column written by hand ('Ghi chú' = 'X') misses the cells that say more ('X, ...')."""
     from datamate.ingest.roles import header_key
 
     for m in _EQUALS_TEXT.finditer(code):
@@ -504,19 +592,26 @@ def free_text_lint(code: str) -> str | None:
     return None
 
 
-def lint(code: str, walkin: bool = True, order_cols: tuple[str, ...] = ()) -> str | None:
+_RULE_LINTS = (0, 1, 4, 5)  # _LINTS entries that encode a rulebook term or a macro; the rest are about grain
+
+
+def lint(code: str, walkin: bool = True, order_cols: tuple[str, ...] = (), rules: bool = True) -> str | None:
     """Why this query shape is wrong, or None. walkin: the views have the `walkin` column (the shop records customers).
-    order_cols: money columns of the order repeated on its lines."""
+    order_cols: money columns of the order repeated on its lines. rules: also the lints that encode rulebook terms."""
     why = order_money_lint(code, order_cols) or free_text_lint(code)
     if why:
         return why
-    for rx, message in _LINTS:
+    for i, (rx, message) in enumerate(_LINTS):
+        if not rules and i in _RULE_LINTS:
+            continue
         if rx.search(code):
             if message:
                 return message
             if _FROM_LINES.search(code):
                 return ("sales_lines has one row per product line, so count(*) in HAVING or ORDER BY counts lines, not orders. "
                         "Use count(distinct order_id), or group the `orders` view.")
+    if not rules:
+        return None
     if walkin and _BY_CUSTOMER.search(code) and not _NO_WALKIN.search(code):
         return "Walk-in orders share an empty customer and are not a customer: add `not walkin` before grouping by customer."
     if _FROM_ORDERS.search(code) and not _STATUS_WORDS.search(code):
@@ -606,7 +701,7 @@ def rebind_key(code: str, error: str) -> str | None:
     return re.sub(rf'"?\b{re.escape(m.group(1))}\b"?', to, code) if to else None
 
 
-TABLE_MACROS = ("customer_stats", "item_stats", "day_stats", "month_stats", "hour_stats", "debt_by_order", "debt_by_customer",
+TABLE_MACROS = ("customer_stats", "item_stats", "day_stats", "month_stats", "debt_by_order", "debt_by_customer",
                 "slow_products", "lots_left", "expiring_lots", "stock_split", "group_stats", "supplier_stats", "out_of_stock")
 # macros that already return percent units, never to be scaled or divided again
 PERCENT_MACROS = ("share_customers_min_orders", "share_of", "cancel_rate")
@@ -657,9 +752,11 @@ def macro_only(code: str) -> bool:
 
 def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, timeout: float = 30.0,
             periods: list[tuple[str | None, str]] = (), span: tuple[str, str] | None = None, walkin: bool = True,
-            order_cols: tuple[str, ...] = (), units: tuple[str, ...] = ()) -> dict:
+            order_cols: tuple[str, ...] = (), units: tuple[str, ...] = (), rules_code: bool = True,
+            blocked: frozenset[str] = frozenset()) -> dict:
     """Same record as sandbox._execute, for a reply taken by extract_sql.
-    periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`."""
+    periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`.
+    rules_code: the rewrites and lints that encode rulebook terms; blocked: stored macros this run does not offer."""
     m = _UNANSWERABLE.match(code)
     preview, written = "", code
     if m:
@@ -671,8 +768,12 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         try:
             if _LIMIT.search(code) and not _ORDER_BY.search(code) and not _RANKED_SOURCE.match(_body(code)):
                 raise AnswerShape("LIMIT without ORDER BY picks rows at random: order by the criterion, then by code.")
-            code = add_named_products(add_not_walkin(rewrite_macros(code), walkin))
-            why = lint(code, walkin, order_cols)
+            called = next((m.group(1) for m in re.finditer(r"\b(\w+)\s*\(", _body(code)) if m.group(1) in blocked), None)
+            if called:  # as DuckDB says it: the macro is not part of this run's database
+                raise SqlRejected(f"Catalog Error: Function with name {called} does not exist!")
+            if rules_code:
+                code = add_named_products(add_not_walkin(rewrite_macros(code), walkin))
+            why = lint(code, walkin, order_cols, rules_code)
             if why:
                 raise AnswerShape(why)
             set_as_of(con, as_of)
@@ -692,7 +793,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
     error, warning = check_result(result, names, helper_guard=False, outside=periods_outside(list(periods), span, as_of),
                                   zero_ok=macro_only(code))
     contract = None
-    if error is None and warning is None:
+    if error is None and warning is None and rules_code:
         warning, contract = _shadow_warning(con, result, shadow, timeout)
         unit = unit_shadow(written, shadow[0], units) if shadow and not warning else None
         if unit:
@@ -707,7 +808,7 @@ def _ran(written: str, code: str) -> dict:
 
 
 _ORDER_OWN = {"order_id", "date", "order_ts", "counted", "goods_amount", "n_lines", "qty_base", "walkin"}
-_MONEY_HEAD = re.compile(r"\b(tien|tong|tra|no|giam|bot|thu|phi|ship|chiet khau|ck|gia tri|thanh toan|coc|may cu|vat|thue)\b")
+_MONEY_HEAD = re.compile(r"\b(tien|tong|tra|no|giam|bot|thu|phi|chiet khau|ck|gia tri|thanh toan|vat|thue)\b")
 
 
 def _is_order_money(c: str) -> bool:
@@ -726,10 +827,13 @@ def order_money_cols(con) -> tuple[str, ...]:
 class SqlPool:
     """N cursors on one read-only store; run() is thread-safe, each cursor keeps its own as_of."""
 
-    def __init__(self, path: Path, names: set[str] | None, n: int = 2, timeout: int = 30, params: dict | None = None):
-        """params: the rulebook numbers the macros read (rules.rule_params); None keeps the train rulebook's."""
+    def __init__(self, path: Path, names: set[str] | None, n: int = 2, timeout: int = 30, params: dict | None = None,
+                 rules_code: bool = True):
+        """params: the rulebook numbers the macros read (rules.rule_params); None keeps the train rulebook's.
+        rules_code: the rewrites, lints and contract checks that encode rulebook terms (off in the "primitives" catalog)."""
         self.base = connect(path, "2000-01-01", params)
         self.names, self.timeout = names, timeout
+        self.rules_code, self.blocked = rules_code, frozenset()
         self._free: queue.Queue = queue.Queue()
         for _ in range(max(1, n)):
             cur = self.base.cursor()
@@ -747,11 +851,28 @@ class SqlPool:
     def macros(self) -> list[str]:
         return [r[0] for r in self.base.execute("select distinct function_name from duckdb_functions() where not internal").fetchall()]
 
+    def block(self, names) -> None:
+        """Stored macros a query may not call: the read-only store cannot drop them, so run() rejects the call."""
+        self.blocked = frozenset(names)
+
+    def setup(self, statements: list[str]) -> None:
+        """Run temp-object statements on every cursor (each is its own session): the oracle experiment's views."""
+        if not statements:
+            return
+        curs = [self._free.get() for _ in range(self._free.qsize())]
+        try:
+            for cur in curs:
+                for s in statements:
+                    cur.execute(s)
+        finally:
+            for cur in curs:
+                self._free.put(cur)
+
     def run(self, code: str, as_of: str, shadow=None, periods: list[tuple[str | None, str]] = ()) -> dict:
         con = self._free.get()
         try:
             return execute(con, code, str(as_of), self.names, shadow, self.timeout, periods, self.span, self.walkin, self.order_cols,
-                           self.units)
+                           self.units, self.rules_code, self.blocked)
         finally:
             self._free.put(con)
 

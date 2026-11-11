@@ -22,7 +22,7 @@ from datamate.ingest.business import INGEST_VERSION, roles_path, status_path
 from datamate.sql.dims import entity_dims
 from datamate.text import fold
 
-STORE_VERSION = 13
+STORE_VERSION = 14
 
 BASE_MACROS = [
     "create macro round_half_up(x, n) as cast(round(cast(x as decimal(38, 10)), n) as double)",
@@ -66,20 +66,17 @@ ORDER_MACROS = [
 
 
 # The rulebook's rankings and counts as tables of one row per customer / item / day / month: the model picks a column
-# and a sort instead of rebuilding the grain (orders, days, base units) each time. Ties go to the smaller key (code).
+# and a sort instead of rebuilding the grain (orders, base units) each time. Ties go to the smaller key (code).
 CUSTOMER_STATS = """create macro customer_stats(a, b) as table select customer, any_value(customer_name) as customer_name,
-       count(distinct order_id) filter (counted) as orders, count(distinct "date") filter (counted) as days,
-       coalesce(sum(amount) filter (counted), 0) as revenue,
-       round_half_up(sum(amount) filter (counted) / nullif(count(distinct order_id) filter (counted), 0), 0) as avg_order,
-       count(distinct order_id) filter (status = 'huỷ') as cancels
+       count(distinct order_id) filter (counted) as orders, coalesce(sum(amount) filter (counted), 0) as revenue
        from sales_lines where customer is not null and "date" between a and b group by customer order by revenue desc, customer"""
 ITEM_STATS = """create macro item_stats(a, b) as table select product_name, min(product_key) as product_key,
        coalesce(sum(qty_base) filter (counted), 0) as qty, coalesce(sum(amount) filter (counted), 0) as revenue,
        count(distinct order_id) filter (counted) as orders{profit}
        from sales_lines where is_goods and product_name is not null and "date" between a and b
        group by product_name order by qty desc, product_key"""
-DAY_STATS = """create macro day_stats(a, b) as table select "date", coalesce(sum(amount) filter (counted), 0) as revenue,
-       count(distinct order_id) filter (counted) as orders from sales_lines where "date" between a and least(b, as_of())
+DAY_STATS = """create macro day_stats(a, b) as table select "date", coalesce(sum(amount) filter (counted), 0) as revenue
+       from sales_lines where "date" between a and least(b, as_of())
        group by "date" order by 1"""
 MONTH_STATS = """create macro month_stats(a, b) as table select strftime("date", '%Y-%m') as month,
        coalesce(sum(amount) filter (counted), 0) as revenue, count(distinct order_id) filter (counted) as orders
@@ -105,7 +102,7 @@ PART_MACROS = [
     # one row per value of a column (staff, channel, group...): rank or compare them; NULL values are no group
     """create macro group_stats(col, a, b) as table select cast(col as varchar) as "value",
        coalesce(sum(amount) filter (counted), 0) as revenue, count(distinct order_id) filter (counted) as orders,
-       coalesce(sum(qty_base) filter (counted and is_goods), 0) as qty, count(distinct "date") filter (counted) as days
+       coalesce(sum(qty_base) filter (counted and is_goods), 0) as qty
        from sales_lines where col is not null and "date" between a and b group by 1 order by revenue desc, 1""",
 ]
 # rulebook 'Bán được bao nhiêu <đơn vị>': base-unit quantity of the items whose base unit is that unit
@@ -116,8 +113,6 @@ SHIFT_MACROS = [
        where same_text(shift_of(order_ts), s) and "date" between a and b)""",
     """create macro shift_orders(s, a, b) as (select count(distinct order_id) filter (counted) from sales_lines
        where same_text(shift_of(order_ts), s) and "date" between a and b)""",
-    """create macro hour_stats(a, b) as table select hour(order_ts) as hour, count(distinct order_id) filter (counted) as orders
-       from sales_lines where order_ts is not null and "date" between a and b group by hour order by orders desc, hour""",
 ]
 COUNT_MACROS = [
     """create macro customers_min_orders(n, a, b) as (select count(*) from customer_stats(a, b) where orders >= n)""",
@@ -130,15 +125,6 @@ GROUP_AOV = """create macro avg_order_value_group(g, a, b) as (select round_half
        where same_text(customer_group, g) and "date" between a and b)"""
 SIZE_QTY = """create macro size_qty(sz, a, b) as (select coalesce(sum(qty_base), 0) from sales_lines where counted and is_goods
        and regexp_matches(lower(product_name), '\\(' || lower(sz) || '\\)\\s*$') and "date" between a and b)"""
-# phone shops (rulebook): the model line is the name before its capacity '…GB'; the brand is the first word, iPhone is Apple
-PHONE_MACROS = [
-    r"""create macro model_line(x) as trim(regexp_replace(x, '\s*\d+\s*(GB|TB)\b.*$', '', 'i'))""",
-    """create macro brand_of(x) as case when lower(split_part(trim(x), ' ', 1)) = 'iphone' then 'Apple'
-       else split_part(trim(x), ' ', 1) end""",
-]
-# money lines that are not goods (voucher, points used, shipping fee): by the invoice's day, orders not cancelled/returned
-EXTRA_LINES = """create macro extra_lines(text, a, b) as (select abs(coalesce(sum(amount), 0)) from sales_lines
-       where not is_goods and order_ok and has_name(product_name, text) and "date" between a and b)"""
 PRICE_LIST_FROM_SALES = """create table price_list_all as select product_name, "date", price from (
        select product_name, "date", {price} as price, count(*) as n from sales_all
        where order_ok and is_goods and product_name is not null and qty_base > 0 group by all)
@@ -366,11 +352,6 @@ def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, di
                           if cost else "")
                 con.execute(ITEM_STATS.format(profit=profit))
                 con.execute(ITEM_COUNT_MACRO)
-                if sales["product_name"].astype(str).str.contains(r"\d\s*(?:GB|TB)\b", case=False).any():
-                    for macro in PHONE_MACROS:
-                        con.execute(macro)
-                if (~sales["is_goods"] & sales["product_name"].notna()).any():
-                    con.execute(EXTRA_LINES)
                 if sales["product_name"].astype(str).str.contains(r"\((?:S|M|L)\)\s*$", case=False).any():
                     con.execute(SIZE_QTY)  # drink sizes written in the name: 'Trà vải (L)'; not diaper sizes
             if "order_ts" in sales.columns:

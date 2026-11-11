@@ -5,7 +5,11 @@
 #        DM_STAGES=train kaggle/push.sh update   (all 3000 train questions, scored against gold)
 #        DM_KERNEL=datamate-public-run2 kaggle/push.sh update   (another kernel, so a running one is not replaced)
 #        DM_ENGINE=sql kaggle/push.sh update     (the model writes SQL instead of pandas)
+#        DM_ARGS="--catalog compiled --shop-views --judge unans" kaggle/push.sh update   (extra `datamate run` flags)
+#        DM_MODEL=Qwen/Qwen3.5-9B kaggle/push.sh update   (serve this model only; default: Gemma 4 12B first, then Qwen)
 #        DM_DATASET=datamate-bundle-sql kaggle/push.sh   (own bundle per branch; `update` once it exists)
+#        DM_DATA=datamate-bundle-sql DM_DATASET=datamate-code kaggle/push.sh   (code only, ~300 KB; data/ comes from
+#                 DM_DATA, an existing dataset of this account; the kernel lays the code over it)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 USER=$(uvx --with six kaggle config view 2>/dev/null | awk '/username/{print $NF}')
@@ -18,7 +22,13 @@ rm -rf "$STAGE" "$KERNEL" && mkdir -p "$STAGE" "$KERNEL"
 # which code a result came from: the run's outputs keep this file
 { git rev-parse --abbrev-ref HEAD; git rev-parse HEAD
   find src -name '*.py' | LC_ALL=C sort | xargs shasum | shasum; git status --short; } > assets/BUILD.txt
-COPYFILE_DISABLE=1 tar -czf "$STAGE/bundle.tar.gz" --exclude '__pycache__' pyproject.toml uv.lock src assets data/train data/public_test
+if [ -n "${DM_DATA:-}" ]; then  # the data did not change: upload the code only
+  COPYFILE_DISABLE=1 tar -czf "$STAGE/bundle.tar.gz" --exclude '__pycache__' pyproject.toml uv.lock src assets
+  SOURCES="\"$USER/$DATASET\", \"$USER/$DM_DATA\""
+else
+  COPYFILE_DISABLE=1 tar -czf "$STAGE/bundle.tar.gz" --exclude '__pycache__' pyproject.toml uv.lock src assets data/train data/public_test
+  SOURCES="\"$USER/$DATASET\""
+fi
 cat > "$STAGE/dataset-metadata.json" <<EOF
 {"title": "$DATASET", "id": "$USER/$DATASET", "licenses": [{"name": "other"}]}
 EOF
@@ -31,12 +41,14 @@ fi
 # stages the kernel runs: DM_STAGES=train kaggle/push.sh update (default: public)
 sed -e "s/os.environ.get(\"DM_STAGES\", \"public\")/os.environ.get(\"DM_STAGES\", \"${DM_STAGES:-public}\")/" \
     -e "s/os.environ.get(\"DM_ENGINE\", \"pandas\")/os.environ.get(\"DM_ENGINE\", \"${DM_ENGINE:-pandas}\")/" \
+    -e "s|os.environ.get(\"DM_ARGS\", \"\")|os.environ.get(\"DM_ARGS\", \"${DM_ARGS:-}\")|" \
+    -e "s|os.environ.get(\"DM_MODEL\", \"\")|os.environ.get(\"DM_MODEL\", \"${DM_MODEL:-}\")|" \
     -e "s/os.environ.get(\"DM_BUILD\", \"\")/os.environ.get(\"DM_BUILD\", \"$(shasum assets/BUILD.txt | cut -d' ' -f1)\")/" \
   kaggle/run_kaggle.py > "$KERNEL/run_kaggle.py"
 cat > "$KERNEL/kernel-metadata.json" <<EOF
 {"id": "$USER/${DM_KERNEL:-datamate-public-run}", "title": "${DM_KERNEL:-datamate-public-run}", "code_file": "run_kaggle.py",
  "language": "python", "kernel_type": "script", "is_private": true, "enable_gpu": true,
- "enable_internet": true, "dataset_sources": ["$USER/$DATASET"], "competition_sources": [], "kernel_sources": []}
+ "enable_internet": true, "dataset_sources": [$SOURCES], "competition_sources": [], "kernel_sources": []}
 EOF
 # "ready" can still describe the previous version, so wait until the dataset serves this BUILD.txt
 echo "waiting for the dataset to serve this build..."

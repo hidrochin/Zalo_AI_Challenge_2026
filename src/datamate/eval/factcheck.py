@@ -21,7 +21,7 @@ GROUPS = [
     ("debt_aged", r"\btuoi no\b|\bno\b.*qua \d+ ngay|dat (da |cach do )?(qua|hon) \d+ ngay"),
     ("debt_flow", r"(no them|ghi no|mua chiu them|chiu them).*(tra|bot)"),
     ("debt_repaid", r"tra no|tra bot no|thu hoi.*cong no|thu no"),
-    ("debt_count", r"(bao nhieu|may|bn|so|dem( dup| giup)?( cac)?) khach.*\b(no|cong no|thieu)\b"),
+    ("debt_count", r"(bao nhieu|may|bn|so|dem( giup)?( cac)?) khach.*\b(no|cong no|thieu)\b"),
     ("debt_top", r"\b(khach|ai)\b.*\b(no|cong no)\b.*(nhieu|lon)|(nhieu|lon).*cong no|top.*\b(no|cong no)\b|\bbang\b.*\bno\b"),
     ("debt_total", r"\bcon no\b|\bcon thieu\b"),
     ("delivery_orders", r"don.*tu \d+ dot"),

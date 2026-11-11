@@ -11,7 +11,6 @@ _SECTION = re.compile(r"^##\s+Cột trong\s+`([^`]+)`(?:\s*,\s*sheet\s+`([^`]+)`
 _COL = re.compile(r"^- \*\*(.+?)\*\*:\s*(.+)$", re.M)
 _END = re.compile(r"có đến hết\s+(\d{1,2}/\d{1,2}/\d{4})")
 _UNIT_RULE = re.compile(r"\b1 ([^\s=:;,.]+(?: [^\s=:;,.]+)?) ?= ?(\d+(?:[.,]\d+)?) ?([^\s;,.]+)")
-_ORDER_KEY = re.compile(r"(?:các|những) dòng (?:có )?cùng \*\*([^*]+)\*\* là (?:một|1) (?:đơn|hoá đơn|hóa đơn|bill|phiếu)", re.I)
 
 
 @dataclass
@@ -20,7 +19,6 @@ class Readme:
     data_end: pd.Timestamp | None
     # (file, sheet or None) -> {column name: description}
     columns: dict[tuple[str, str | None], dict[str, str]] = field(default_factory=dict)
-    order_keys: set[str] = field(default_factory=set)  # folded column names that group rows into one order
 
     def known_names(self) -> set[str]:
         return {fold(c) for cols in self.columns.values() for c in cols}
@@ -61,7 +59,7 @@ def _file_matches(spec: str, file: str) -> bool:
 def parse_readme(text: str) -> Readme:
     m = _END.search(text)
     data_end = pd.to_datetime(m.group(1), dayfirst=True) if m else None
-    r = Readme(text=text, data_end=data_end, order_keys={fold(m.group(1)) for m in _ORDER_KEY.finditer(text)})
+    r = Readme(text=text, data_end=data_end)
     sections = list(_SECTION.finditer(text))
     for i, sec in enumerate(sections):
         end = sections[i + 1].start() if i + 1 < len(sections) else len(text)

@@ -39,7 +39,7 @@ Pieces = list[tuple[RawSheet, pd.DataFrame]]
 
 
 def _roles(sh: RawSheet, df: pd.DataFrame, readme: Readme) -> dict[str, str]:
-    return assign_roles(list(df.columns), readme.descs_for(sh.file, sh.sheet), readme.order_keys)
+    return assign_roles(list(df.columns), readme.descs_for(sh.file, sh.sheet))
 
 
 def _map_role(pieces: Pieces, readme: Readme, roles: tuple, fn) -> Pieces:
@@ -80,8 +80,7 @@ def rename_headers(pieces: Pieces, readme: Readme):
         renamed.update(new)
         out.append((sh, df.rename(columns=new)))
     columns = {k: {renamed.get(c, c): d for c, d in cols.items()} for k, cols in readme.columns.items()}
-    folded = {fold(a): fold(b) for a, b in renamed.items()}
-    return out, replace(readme, columns=columns, order_keys={folded.get(k, k) for k in readme.order_keys}), renamed
+    return out, replace(readme, columns=columns), renamed
 
 
 def rename(pieces: Pieces, readme: Readme, rng: random.Random):
@@ -134,7 +133,7 @@ def subtotal_rows(sheets: list[RawSheet], readme: Readme, rng: random.Random, ev
     for sh in sheets:
         h = None if sh.has_header else detect_header(sh.df, readme.known_names())
         header = [] if h is None else ["" if _is_null(v) else str(v).strip() for v in sh.df.iloc[h].tolist()]
-        roles = assign_roles(header, readme.descs_for(sh.file, sh.sheet), readme.order_keys)
+        roles = assign_roles(header, readme.descs_for(sh.file, sh.sheet))
         amount = next((header.index(c) for c, r in roles.items() if r == "line_amount"), None)
         if amount is None or len(sh.df) - h <= every:
             out.append(sh)
