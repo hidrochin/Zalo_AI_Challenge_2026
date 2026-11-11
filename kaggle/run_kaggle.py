@@ -10,6 +10,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -144,7 +145,10 @@ def start_server(only=None):
             log(f"{model} server exited with code {proc.returncode}")
         logf.flush()
         with open(vlog, errors="replace") as f:  # the reason, in the kernel's live log: the output files come only at the end
-            log("vLLM log tail:\n" + "".join([ln for ln in f if "it/s]" not in ln][-40:]))
+            lines = [ln for ln in f if "it/s]" not in ln]
+        # the root cause sits in a worker's lines, above the API server's traceback
+        errors = [ln for ln in lines if re.search(r"Error|ERROR|error:|not supported|Unsupported|out of memory|No kernel", ln)]
+        log("vLLM errors:\n" + "".join(errors[-25:]) + "\nvLLM log tail:\n" + "".join(lines[-15:]))
         proc.kill()
         proc.wait()
         time.sleep(15)
