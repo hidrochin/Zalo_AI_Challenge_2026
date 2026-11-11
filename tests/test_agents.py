@@ -4,7 +4,9 @@ A fake model returns fixed replies; the stores are small ones built here."""
 import duckdb
 import pandas as pd
 
+from datamate.agent.evidence import pick_rules
 from datamate.agent.judge import doubt, parse_verdict, solver_text
+from datamate.sql.agent import absent_part, build_sql_system
 from datamate.sql.compile import Macro, compile_rulebook, parse_macros, sections, try_macro, usable
 from datamate.sql.shopviews import card_part, parse_views, shop_views
 from datamate.sql.store import build_store
@@ -93,6 +95,25 @@ create view v_none as select * from raw_lines where false
     views = shop_views("b", "card", "readme", con, lambda s, p, h: reply, tmp_path / "v")
     assert [(v.name, v.rows, v.columns) for v in views] == [("v_plates", 2, ["plate"])]
     assert "29A-123" in card_part(con, views)
+
+
+def test_rich_context_parts(tmp_path):
+    con = duckdb.connect(str(store(tmp_path)), read_only=True)
+    clash = Macro("by_status", ["status"], {}, False, "", "create macro by_status(status) as (select count(*) from sales_all "
+                  "where status = status)")
+    assert "has the name of a column" in try_macro(con, clash, pd.Timestamp("2025-01-02").date())
+    assert "= (select coalesce(sum(amount), 0)" in parse_macros(REVENUE)[0].card_line(body=True)
+    copy = """```sql\n-- doc: lines\ncreate view v_lines as select order_id, amount, qty from sales_all\n```"""
+    assert shop_views("c", "card", "readme", con, lambda s, p, h: copy, tmp_path / "v2") == []
+    missing = absent_part(con)
+    assert "debts" in missing and "UNANSWERABLE" in missing
+    assert "Its first line" in build_sql_system("rb", plan=True) and "-- terms:" in build_sql_system("rb", plan=True)
+    assert "-- terms:" not in build_sql_system("rb")
+    rb = ("# R\n## 1. Doanh thu\n| Luật | Mặc định |\n|---|---|\n| Doanh thu | tổng thành tiền các dòng |\n"
+          "| Bán chạy | theo số lượng quy về đơn vị cơ bản |\n## 4. Công nợ\n| Luật | Mặc định |\n|---|---|\n"
+          "| Nợ một đơn | phần chưa trả của tổng đơn |")
+    assert pick_rules(rb, "top 3 mặt hàng bán chạy tháng 5") == ["[1. Doanh thu] | Bán chạy | theo số lượng quy về đơn vị cơ bản |"]
+    assert pick_rules(rb, "hôm nay trời đẹp") == []
 
 
 def test_judge_verdict():

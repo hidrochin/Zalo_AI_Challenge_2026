@@ -16,7 +16,7 @@ from typing import Callable
 
 import duckdb
 
-COMPILE_VERSION = 1
+COMPILE_VERSION = 2
 
 # What every store holds when the shop has the data (sql/store.py, facts.py). Facts only, no rule: the compiler decides
 # how the rulebook combines them.
@@ -102,8 +102,14 @@ class Macro:
     def signature(self) -> str:
         return f"{self.name}({', '.join(self.args)})"
 
-    def card_line(self) -> str:
-        return f"{self.signature}{': TABLE' if self.table else ''}: {self.doc}"
+    def card_line(self, body: bool = False) -> str:
+        """body: the macro's SQL too, on one line, so the solver can check it against the rulebook."""
+        line = f"{self.signature}{': TABLE' if self.table else ''}: {self.doc}"
+        if not body:
+            return line
+        m = _HEAD.search(self.sql)
+        sql = " ".join((self.sql[m.end():] if m else self.sql).split())
+        return f"{line}\n    = {sql[:400]}{' …' if len(sql) > 400 else ''}"
 
     def temp_sql(self) -> str:
         return _HEAD.sub(lambda m: f"create or replace temp macro {m.group(1)}({m.group(2)}) as {m.group(3) or ''}", self.sql, count=1)
@@ -167,6 +173,14 @@ def try_macro(con, macro: Macro, day: date, hidden: frozenset[str] = frozenset()
     called = next((n for n in _CALL.findall(body) if n.lower() in hidden), None)
     if called:
         return f"Catalog Error: Function with name {called} does not exist!"
+    try:  # `where payment_method = payment_method` compares the column with itself: always true
+        columns = {r[0].lower() for r in con.execute("select distinct column_name from duckdb_columns()").fetchall()}
+    except duckdb.Error:
+        columns = set()
+    clash = next((a for a in macro.args if a.lower() in columns), None)
+    if clash:
+        return (f"Argument {clash} has the name of a column: inside the query it reads as the column. Rename the argument "
+                f"(p_{clash}).")
     try:
         con.execute(macro.temp_sql())
         call = f"{macro.name}({_probe_args(macro, day)})"

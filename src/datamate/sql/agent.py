@@ -226,10 +226,20 @@ _MACRO_RULE = ("- A macro in the schema card is the tested definition of its rul
                "logic from raw tables. Macros marked TABLE go after FROM.")
 
 
-def build_sql_system(rulebook: str, primitives: bool = False, compiled: bool = False) -> str:
+_PLAN = ("After the type line write three comment lines, then the query:\n"
+         "`-- terms: <each business term of the question> -> <the view, column or macro that holds it>`\n"
+         "`-- rule: <the RULEBOOK rule you apply, quoted briefly>`\n"
+         "`-- needs: <the tables and columns the query reads>`\n"
+         "If a term the question needs has nothing that holds it, reply UNANSWERABLE instead.\n")
+
+
+def build_sql_system(rulebook: str, primitives: bool = False, compiled: bool = False, plan: bool = False) -> str:
     """primitives: the skeletons that call a rulebook macro are left out, and the model computes every term itself.
-    compiled: the same, but the card also lists the macros the model wrote from this rulebook (sql/compile.py)."""
+    compiled: the same, but the card also lists the macros the model wrote from this rulebook (sql/compile.py).
+    plan: the query starts with comment lines naming the terms, the rule and the columns it uses."""
     text = SYSTEM_TEMPLATE
+    if plan:
+        text = text.replace("If the data cannot support the question, reply", _PLAN + "If the data cannot support the question, reply")
     if primitives:
         rule_macros = [m for m in MACROS if m not in PRIMITIVES]
         text = _SKELETON.sub(lambda m: "" if any(re.search(rf"\b{n}\s*\(", m.group(0)) for n in rule_macros) else m.group(0), text)
@@ -252,12 +262,58 @@ def _columns(title: str, df: pd.DataFrame, roles: dict | None = None, descs: dic
     return out
 
 
+# role of a raw column -> the sales_lines column that holds it (sql_card(rich=True): source tables shown by their mapping)
+_SALES_OF_ROLE = {"order_id": "order_id", "order_date": "date", "order_ts": "order_ts", "status": "status", "line_amount": "amount",
+                  "qty": "qty", "unit": "unit", "unit_price": "unit_price", "product_name": "product_name",
+                  "customer_name": "customer_name", "customer_id": "customer", "base_unit": "base_unit"}
+_KEY_ROLES = {"order_id": "order_id", "product_name": "product_name", "customer_name": "customer_name", "customer_id": "customer"}
+_SOURCE = re.compile(r"T\['([^']+)'\]")
+# canonical fact tables (sql/store.py) and what a shop without any of them lacks
+FACTS = ((("payments_all",), "payments received for orders, so debts (công nợ, trả nợ, khách nợ)"),
+         (("deliveries_all",), "delivery trips (giao hàng, đợt giao)"),
+         (("imports_all",), "import receipts (nhập hàng, nhà cung cấp, giá nhập)"),
+         (("expenses_all",), "expenses (chi phí, lãi ròng)"),
+         (("stock_card_all", "stock_report_all", "lots_all"), "stock (tồn kho)"),
+         (("lots_all",), "lots and expiry dates (lô, hạn dùng)"),
+         (("catalog_cost_all",), "a cost price per product in the product list (giá vốn)"))
+
+
+def absent_part(con) -> str:
+    """The card's list of the canonical facts this shop's store lacks: a small model misses what is not there."""
+    try:
+        have = {r[0] for r in con.execute("select table_name from duckdb_tables()").fetchall()}
+    except duckdb.Error:
+        return ""
+    missing = [what for names, what in FACTS if not have & set(names)]
+    if not missing:
+        return ""
+    return ("\n\n## Not in this shop's canonical tables\n" + "\n".join(f"- {m}" for m in missing)
+            + "\nA question that needs one of these is UNANSWERABLE, unless a raw table or a view written for this shop "
+              "records it.")
+
+
+def _source_lines(name: str, df: pd.DataFrame, roles: dict, descs: dict, sales: pd.DataFrame) -> list[str]:
+    """A raw table that feeds sales_lines: its columns already there by their sales_lines name, the others in full."""
+    mapped = {c: _SALES_OF_ROLE[r] for c, r in roles.items() if r in _SALES_OF_ROLE and _SALES_OF_ROLE[r] in sales.columns
+              and c in df.columns}
+    out = [f"\n## Table raw_{_slug(name)}  rows={len(df)}  (feeds sales_lines; use sales_lines for these columns: "
+           + ", ".join(f'"{c}" = {s}' for c, s in mapped.items()) + ")"]
+    for c in _writable(df).columns:
+        if c not in META_COLS and c not in mapped and not str(c).endswith("__norm"):
+            out.append(_column_line(df, c, roles.get(c), descs.get(c)).replace(f"`{c}`", f'"{c}"', 1))
+    return out
+
+
 def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros: list[str], keep: list[str] | None = None,
-             views=None) -> str:
+             views=None, rich: bool = False) -> str:
     """The prompt's description of this shop's database: views first, then raw tables, then macros.
     keep: the raw tables to list, by slug (table-selection experiment); None lists all of them.
-    views: the store's macros, whose fact views (payments, deliveries, imports) the card lists; None = macros."""
+    views: the store's macros, whose fact views (payments, deliveries, imports) the card lists; None = macros.
+    rich: raw tables that feed sales_lines list only what sales_lines lacks, and a Keys block says how the raw tables
+    join the views."""
     views = macros if views is None else views
+    sources = set(_SOURCE.findall(sales_desc)) if rich and sales is not None else set()
+    keys = []
     out = [f"# Schema card: {biz.id}"]
     if biz.readme.data_end is not None:
         out.append(f"Data recorded until {biz.readme.data_end:%Y-%m-%d} (from README).")
@@ -278,8 +334,17 @@ def sql_card(biz: Business, sales: pd.DataFrame | None, sales_desc: str, macros:
         if keep is not None and f"raw_{_slug(name)}" not in keep:
             continue
         ti = biz.info[name]
-        out += _columns(f"Table raw_{_slug(name)}  source: {', '.join(sorted({f for f, _ in ti.sources}))}", df, ti.roles, ti.descs)
+        if name in sources:
+            out += _source_lines(name, df, ti.roles, ti.descs, sales)
+        else:
+            out += _columns(f"Table raw_{_slug(name)}  source: {', '.join(sorted({f for f, _ in ti.sources}))}", df, ti.roles, ti.descs)
+            if rich and sales is not None:
+                keys += [f'- raw_{_slug(name)}."{c}" ~ sales_lines.{_KEY_ROLES[r]}' for c, r in ti.roles.items()
+                         if r in _KEY_ROLES and _KEY_ROLES[r] in sales.columns and c in df.columns]
         out += [f"  note: {n}" for n in ti.notes]
+    if keys:
+        out.append("\n## Keys: how the raw tables join the views (spellings can differ: match names with same_text(a, b))\n"
+                   + "\n".join(keys))
     if biz.warnings:
         out.append("\nIngestion warnings: " + "; ".join(biz.warnings))
     if "debt_total" in views:
@@ -313,6 +378,9 @@ def sql_question_part(question: str, as_of: str, examples: list[dict], hints: li
                 + "\n".join(norm["values"]))
     if (norm or {}).get("subjective"):
         out += "\n\nNote: " + norm["subjective"]
+    if (norm or {}).get("rules"):
+        out += ("\n\nRULEBOOK lines whose words the question uses (check that they are the rule it asks; the whole "
+                "RULEBOOK is in the system message):\n" + "\n".join(norm["rules"]))
     lines = sql_hints(hints or [])
     if lines:
         out += "\n\nTime expressions, already resolved by the rulebook (use exactly these dates):\n" + "\n".join(lines)

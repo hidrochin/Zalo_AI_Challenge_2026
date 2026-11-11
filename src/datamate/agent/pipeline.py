@@ -34,8 +34,9 @@ from datamate.postprocess import Expect, check_answer, date_window, expect_answe
 from datamate.preprocess import EntityIndex, rules_normalize
 from datamate.preprocess.rewrite import names_block, rewrite
 from datamate.rules import params_off, rule_gate, rule_note, rule_params
-from datamate.sql.agent import (MACROS, PRIMITIVES, SqlPool, build_sql_system, extract_sql, hint_periods, sql_card, sql_check_message,
-                                sql_question_part, sql_repair_message, sql_shadow)
+from datamate.sql.agent import (MACROS, PRIMITIVES, SqlPool, absent_part, build_sql_system, extract_sql, hint_periods, sql_card,
+                                sql_check_message, sql_question_part, sql_repair_message, sql_shadow)
+from datamate.agent.evidence import pick_rules
 from datamate.sql.compile import compile_rulebook, usable
 from datamate.sql.shopviews import card_part, shop_views
 from datamate.sql.store import STORE_VERSION, ensure_store
@@ -82,6 +83,7 @@ class RunConfig:
     # "compiled" = primitives plus the macros the model writes from the split's rulebook at the start of the run (sql/compile.py)
     catalog: str = "full"
     shop_views: bool = False  # SQL engine: the model writes views per shop from its README and raw tables (sql/shopviews.py)
+    context: str = "base"  # base | rich (SQL): card with keys, missing facts and macro SQL; rulebook lines per question; plan lines
     judge: str = "off"  # off | unans | all: a second agent checks UNANSWERABLE verdicts (unans) or every verdict (all)
     think_max_tokens: int = 8192  # compile, shop views and judge calls
     prepare_only: bool = False  # run the one-off agent steps (rulebook macros, shop views) and stop before the questions
@@ -249,6 +251,8 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
         named = tuple(m["name"] for m in pre.get("mentions", []) if m.get("full"))
         norm["values"] = pool.values.hints(text, named)
         norm["subjective"] = subjective_note(text, rulebook, named)
+        if cfg.context == "rich":
+            norm["rules"] = pick_rules(rulebook, text)
     examples = bank.query(q["question"], exclude_business=q["business_id"], k=cfg.k_examples)
     hints = time_hints(text, q["as_of_date"], cal)
     expect.window = date_window(text, hints)
@@ -398,6 +402,7 @@ def run(cfg: RunConfig) -> dict:
     params = rule_params(rulebook)  # numbers the macros take from this rulebook; unreadable ones turn their macros off
     off = rule_gate(rulebook, Path(cfg.cache_dir) / split_dir.name / "rules.json", ask) | params_off(params)
     full, compiled = cfg.catalog == "full", cfg.catalog == "compiled"
+    rich = cfg.context == "rich" and cfg.engine == "sql"
 
     def think(system, parts, history):  # the one-off agent steps: rulebook macros, shop views
         return _generate(llm, cfg, system, parts, history, temperature=0.0, seed=cfg.seed, max_tokens=cfg.think_max_tokens)
@@ -405,7 +410,7 @@ def run(cfg: RunConfig) -> dict:
     hidden = frozenset(m for m in MACROS if m not in PRIMITIVES)  # the hand-written rule macros of the stores
     rule_macros = []
     if cfg.engine == "sql" and not full:  # no hand-written rulebook macro is offered, so no note about which of them changed
-        system = build_sql_system(rulebook, primitives=True, compiled=compiled)
+        system = build_sql_system(rulebook, primitives=True, compiled=compiled, plan=rich)
         if compiled:
             shops = sorted(p.name for p in (split_dir / "data").iterdir() if p.is_dir())
             stores = {b: ensure_store(split_dir, b, Path(cfg.cache_dir).parent) for b in shops}
@@ -458,7 +463,7 @@ def run(cfg: RunConfig) -> dict:
                                rules_code=full)
                 stored = pool.macros()
                 macros = [m for m in stored if m not in shop_off] if full else [m for m in stored if m in PRIMITIVES]
-                card = sql_card(biz, sales, sales_desc, macros, views=stored)
+                card = sql_card(biz, sales, sales_desc, macros, views=stored, rich=rich)
                 probe = pool.base.cursor()  # a session of its own, to find what runs on this store
                 ours = usable(probe, rule_macros, hidden) if compiled else []
                 pool.block([m for m in stored if m not in macros and m not in {r.name for r in ours}] if not full else [])
@@ -466,7 +471,9 @@ def run(cfg: RunConfig) -> dict:
                 setup = [r.temp_sql() for r in ours]
                 if ours:
                     card += ("\n\n## Macros written from this split's rulebook (call one when its doc is the term the question asks; "
-                             "TABLE ones go after FROM)\n" + "\n".join(f"- {r.card_line()}" for r in ours))
+                             "TABLE ones go after FROM" + ("; the line under each is its SQL: if it disagrees with the "
+                             "RULEBOOK, compute the term yourself" if rich else "") + ")\n"
+                             + "\n".join(f"- {r.card_line(body=rich)}" for r in ours))
                 if cfg.shop_views:
                     views = shop_views(biz_id, card, biz.readme.text, probe, think,
                                        Path(cfg.cache_dir).parent / "shopviews" / split_dir.name, model=cfg.model)
@@ -474,6 +481,8 @@ def run(cfg: RunConfig) -> dict:
                         probe.execute(v.temp_sql())
                     setup = [v.temp_sql() for v in views] + setup
                     card += card_part(probe, views)
+                if rich:
+                    card += absent_part(probe)
                 probe.close()
                 pool.setup(setup)
                 biz_part = business_part(biz_id, biz.readme.text, card)

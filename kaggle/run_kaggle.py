@@ -25,7 +25,8 @@ PORT = 8000
 # final image will run it; T4 (sm_75) has no bf16 and no Marlin kernels, so a plain AWQ build in fp16, then the full model
 GEMMA = ["--dtype", "half", "--reasoning-parser", "gemma4"]
 MODELS = [
-    ("nicklas373/gemma-4-12B-it-AWQ", ENV_NIGHTLY, GEMMA + ["--quantization", "awq", "--max-model-len", "32768"], True),
+    # its config says compressed-tensors (W4A16), not awq: vLLM reads the method from the config
+    ("nicklas373/gemma-4-12B-it-AWQ", ENV_NIGHTLY, GEMMA + ["--max-model-len", "32768"], True),
     ("google/gemma-4-12B-it", ENV_NIGHTLY, GEMMA + ["--max-model-len", "16384"], True),
     ("Qwen/Qwen3.5-9B", ENV, ["--dtype", "half", "--limit-mm-per-prompt", '{"image":0,"video":0}', "--max-model-len", "32768"], True),
 ]
@@ -114,7 +115,8 @@ def start_server(only=None):
         args = [f"{env}/bin/vllm", "serve", model, "--served-model-name", "llm", "--port", str(PORT),
                 "--tensor-parallel-size", "2", "--gpu-memory-utilization", "0.92",
                 "--max-num-seqs", "16", "--enable-prefix-caching", "--seed", "0", *extra]
-        logf = open(f"{OUT}/vllm_{model.split('/')[-1]}.log", "a")  # append: keep the log of a crashed server
+        vlog = f"{OUT}/vllm_{model.split('/')[-1]}.log"
+        logf = open(vlog, "a")  # append: keep the log of a crashed server
         proc = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT)
         t0 = time.time()
         while proc.poll() is None and time.time() - t0 < 1800:
@@ -136,6 +138,9 @@ def start_server(only=None):
                 log(f"{model} sanity request failed: {e!r}")
         else:
             log(f"{model} server exited with code {proc.returncode}")
+        logf.flush()
+        with open(vlog, errors="replace") as f:  # the reason, in the kernel's live log: the output files come only at the end
+            log("vLLM log tail:\n" + "".join([ln for ln in f if "it/s]" not in ln][-40:]))
         proc.kill()
         proc.wait()
         time.sleep(15)
@@ -204,6 +209,15 @@ def main():
     setup()
     model, proc = start_server(ONLY or None)
     log(f"using {model} (thinking {'on' if THINKING.get(model) else 'off'}); run flags: {ARGS or '-'}")
+    if "probe" in STAGES:  # does the model serve and think: one request, no questions
+        t0 = time.time()
+        r = _get("/v1/chat/completions", {"model": "llm", "temperature": 0, "max_tokens": 1024,
+                                           "messages": [{"role": "user", "content": "Một cửa hàng bán 3 ly giá 25.000đ và 2 ly giá "
+                                                         "30.000đ. Doanh thu là bao nhiêu? Trả lời một con số."}],
+                                           "chat_template_kwargs": {"enable_thinking": True}}, timeout=600)
+        msg = r["choices"][0]["message"]
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        log(f"probe: {time.time() - t0:.0f}s, {r.get('usage')}, reasoning {len(reasoning)} chars, answer {msg.get('content')!r}")
     if "holdout" in STAGES:  # held-out train shops (assets/holdout.txt): never used to pick prompts or fixes
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -5")
         n = sum(1 for ln in open(f"{PROJ}/assets/holdout.txt") if ln.strip())

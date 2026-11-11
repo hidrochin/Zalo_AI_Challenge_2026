@@ -74,7 +74,7 @@ def cmd_run(a) -> None:
         seed=a.seed, limit=a.limit, businesses=a.biz or [], ids=ids, resume=not a.no_resume,
         llm_retries=a.llm_retries, normalize=a.normalize, fast=a.fast, keep_tables=Path(a.keep_tables) if a.keep_tables else None,
         oracle=Path(a.oracle) if a.oracle else None, catalog=a.catalog, think_rewrite=a.think_rewrite,
-        shop_views=a.shop_views, judge=a.judge, think_max_tokens=a.think_max_tokens, prepare_only=a.prepare_only,
+        shop_views=a.shop_views, context=a.context, judge=a.judge, think_max_tokens=a.think_max_tokens, prepare_only=a.prepare_only,
     )
     try:
         summary = run(cfg)
@@ -262,6 +262,8 @@ def main(argv=None) -> None:
                    help="SQL: full = hand-written rulebook macros; primitives = generic helpers only; compiled = generic helpers "
                         "+ macros the model writes from the split's rulebook at the start of the run")
     s.add_argument("--shop-views", action="store_true", help="SQL: the model writes views per shop from its README and raw tables")
+    s.add_argument("--context", choices=["base", "rich"], default="base",
+                   help="SQL: rich = keys, missing facts and macro SQL in the card, rulebook lines per question, plan lines")
     s.add_argument("--judge", choices=["off", "unans", "all"], default="off",
                    help="second agent on UNANSWERABLE verdicts (unans) or on every verdict (all)")
     s.add_argument("--think-max-tokens", type=int, default=8192, help="token budget of the compile, shop-view and judge calls")

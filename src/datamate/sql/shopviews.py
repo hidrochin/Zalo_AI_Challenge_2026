@@ -15,7 +15,7 @@ from typing import Callable
 
 import duckdb
 
-SHOPVIEWS_VERSION = 1
+SHOPVIEWS_VERSION = 2
 MAX_VIEWS = 6
 
 SYSTEM = """You prepare one shop's database so that analysts can answer everyday questions with one SQL query.
@@ -88,7 +88,30 @@ def try_view(con, name: str, doc: str, sql: str) -> ShopView | str:
     if view.rows == 0:
         con.execute(f"drop view if exists temp.{name}")
         return "the view returns no rows"
+    same = _copy_of(con, view)
+    if same:
+        con.execute(f"drop view if exists temp.{name}")
+        return f"the view repeats the canonical table {same}"
     return view
+
+
+def _copy_of(con, view: ShopView) -> str | None:
+    """The canonical table this view repeats: the same number of rows and half of its columns there by name."""
+    try:
+        tables = [r[0] for r in con.execute("select table_name from duckdb_tables() where not temporary").fetchall()]
+    except duckdb.Error:
+        return None
+    cols = {c.lower() for c in view.columns}
+    for t in tables:
+        if t.startswith(("raw_", "dim_")) or t == "calendar":
+            continue
+        try:
+            have = {r[0].lower() for r in con.execute(f"select column_name from duckdb_columns() where table_name = '{t}'").fetchall()}
+            if 2 * len(cols & have) >= len(cols) and con.execute(f'select count(*) from "{t}"').fetchone()[0] == view.rows:
+                return t
+        except duckdb.Error:
+            continue
+    return None
 
 
 def shop_views(biz_id: str, card: str, readme: str, con, generate: Callable[[str, list[str], list[dict]], str],
