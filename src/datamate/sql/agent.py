@@ -226,15 +226,20 @@ _MACRO_RULE = ("- A macro in the schema card is the tested definition of its rul
                "logic from raw tables. Macros marked TABLE go after FROM.")
 
 
-def build_sql_system(rulebook: str, primitives: bool = False) -> str:
-    """primitives: the skeletons that call a rulebook macro are left out, and the model computes every term itself."""
+def build_sql_system(rulebook: str, primitives: bool = False, compiled: bool = False) -> str:
+    """primitives: the skeletons that call a rulebook macro are left out, and the model computes every term itself.
+    compiled: the same, but the card also lists the macros the model wrote from this rulebook (sql/compile.py)."""
     text = SYSTEM_TEMPLATE
     if primitives:
         rule_macros = [m for m in MACROS if m not in PRIMITIVES]
         text = _SKELETON.sub(lambda m: "" if any(re.search(rf"\b{n}\s*\(", m.group(0)) for n in rule_macros) else m.group(0), text)
-        text = text.replace(_MACRO_RULE, "- The macros in the schema card are generic helpers only. Compute every business term "
-                            "(revenue, debt, stock, profit, rankings...) yourself from the views and raw tables, as the RULEBOOK "
-                            "defines it. Macros marked TABLE go after FROM.")
+        text = text.replace(_MACRO_RULE, (
+            "- The schema card lists generic helpers and the macros written from this RULEBOOK: call one when its doc is the "
+            "term the question asks, with the question's own arguments. Compute any other business term yourself from the "
+            "views and raw tables, as the RULEBOOK defines it. Macros marked TABLE go after FROM." if compiled else
+            "- The macros in the schema card are generic helpers only. Compute every business term "
+            "(revenue, debt, stock, profit, rankings...) yourself from the views and raw tables, as the RULEBOOK "
+            "defines it. Macros marked TABLE go after FROM."))
     return text.format(rulebook=rulebook.strip())
 
 

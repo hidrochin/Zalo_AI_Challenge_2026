@@ -192,6 +192,38 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
+## Status (2026-11-12): agent pipeline (mentor's direction)
+
+Chosen by the user: the LLM reads the rulebook, writes the computations and decides (mentor's M1, M2, M4, M5);
+hand-written rule code leaves the answering path. Gemma 4 12B with thinking (Qwen3.5-9B if Kaggle cannot serve it).
+New run flags (SQL engine):
+- `--catalog compiled` ([src/datamate/sql/compile.py](src/datamate/sql/compile.py)): at the start of a run the model
+  reads the split's rulebook section by section and writes one DuckDB macro per definition. It gets the canonical
+  schema (facts only, no rule) and the macros it already wrote. Each macro is called on every store of the split; one
+  that runs nowhere goes back once with the error; a macro may not call the hand-written ones. Cached in
+  `cache/compiled/<split>/` by rulebook, prompt version and model. Per shop, the macros that run are temp macros
+  (they shadow stored ones of the same name); the hand-written rule macros are blocked, and the catalog advice, rule
+  rewrites/lints, contract shadow check and fast branch are off, as in `primitives`.
+- `--shop-views` ([src/datamate/sql/shopviews.py](src/datamate/sql/shopviews.py)): once per shop the model reads the
+  README and the schema card and writes up to 6 views for what the canonical views do not hold (a kind of record of
+  its own, a value packed in a text cell). A view must run and return rows; one repair round. Cached in
+  `cache/shopviews/<split>/`. The canonical sales_lines/orders/facts stay (the user chose "bổ sung").
+- `--judge unans|all` ([src/datamate/agent/judge.py](src/datamate/agent/judge.py)), the mentor's second agent: it
+  reads the question, the shop part and the rulebook with the solver's verdict and says whether the data can answer.
+  Agreement keeps the verdict; an answerable verdict on UNANSWERABLE gives the solver one more try with the judge's
+  pointer; a disagreement that stays abstains. `all` also checks answers (an answer the judge finds unsupported abstains).
+- `--prepare-only`: run the compiler and shop views, answer nothing; `--think-max-tokens` (8192): their budget.
+
+Validation (user's choice): `assets/holdout.txt`, 80 questions (16 per shop, every answer type) of five train shops
+of different export styles: biz_105 (hand-kept book), biz_110 (orders only), biz_123 (sqlite POS), biz_124 (mixed
+sources), biz_128 (pharmacy). They are never used to pick prompts or fixes. Public only measures; a fix needs a train case.
+
+Kaggle: `kaggle/run_kaggle.py` tries Gemma 4 12B first (AWQ build in fp16, then the full model, on a vLLM nightly:
+the 12B is not in a stable vLLM yet; T4 has no bf16 and no Marlin), then Qwen3.5-9B. Thinking is on for Gemma.
+`DM_STAGES=holdout,public DM_ENGINE=sql DM_ARGS="--catalog compiled --shop-views --judge unans" kaggle/push.sh update`.
+
+---
+
 ## Status (2026-11-11, late): public knowledge removed
 
 The organizers' answers (`description/QnA.txt`) say the public test is used neither to train nor at inference, "kể cả

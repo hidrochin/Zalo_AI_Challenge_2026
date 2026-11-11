@@ -18,15 +18,23 @@ import urllib.request
 W = "/kaggle/working"
 OUT = f"{W}/out"
 PROJ = "/tmp/zalo"  # outside /kaggle/working so it is not saved as kernel output
-ENV = "/tmp/vllm-env"
+ENV = "/tmp/vllm-env"  # stable vLLM
+ENV_NIGHTLY = "/tmp/vllm-nightly"  # Gemma 4 12B needs a vLLM nightly (2026-11); installed only when a Gemma model is tried
 PORT = 8000
-MODELS = [  # first one that starts and answers sanely is used
-    ("Qwen/Qwen3.5-9B", ["--dtype", "half", "--limit-mm-per-prompt", '{"image":0,"video":0}']),
-    ("Qwen/Qwen3-14B-AWQ", ["--dtype", "half", "--quantization", "awq"]),
+# (model, vLLM env, extra args, thinking): the first one that starts and answers sanely is used. Gemma 4 12B first, as the
+# final image will run it; T4 (sm_75) has no bf16 and no Marlin kernels, so a plain AWQ build in fp16, then the full model
+GEMMA = ["--dtype", "half", "--reasoning-parser", "gemma4"]
+MODELS = [
+    ("nicklas373/gemma-4-12B-it-AWQ", ENV_NIGHTLY, GEMMA + ["--quantization", "awq", "--max-model-len", "32768"], True),
+    ("google/gemma-4-12B-it", ENV_NIGHTLY, GEMMA + ["--max-model-len", "16384"], True),
+    ("Qwen/Qwen3.5-9B", ENV, ["--dtype", "half", "--limit-mm-per-prompt", '{"image":0,"video":0}', "--max-model-len", "32768"], True),
 ]
-STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | dev120 | dev120_oracle | train (all 3000, scored); push.sh sets it
+STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | holdout | dev120 | dev120_oracle | train; push.sh sets it
 ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql; push.sh sets it
+ARGS = os.environ.get("DM_ARGS", "")  # extra `datamate run` flags (--catalog compiled --shop-views --judge unans); push.sh sets it
+ONLY = os.environ.get("DM_MODEL", "")  # serve only this model (else the list in order); push.sh sets it
 BUILD = os.environ.get("DM_BUILD", "")  # sha1 of assets/BUILD.txt at push time; push.sh sets it
+THINKING = {}  # model -> thinking on, filled from MODELS
 
 
 def sh(cmd, **kw):
@@ -67,10 +75,25 @@ def setup():
             sys.exit(1)
     sh("pip install -q uv")
     sh(f"cd {PROJ} && uv sync --frozen --no-dev -q")
-    sh(f"uv venv -q --python 3.12 {ENV} && uv pip install -q --python {ENV}/bin/python vllm")
-    sh(f"set -o pipefail; {ENV}/bin/python -c 'import vllm, torch; print(vllm.__version__, torch.__version__)' | tee -a {OUT}/kaggle_run.txt",
-       executable="/bin/bash")
     sh("nvidia-smi | tee -a " + f"{OUT}/kaggle_run.txt")
+
+
+def install(env):
+    """The vLLM env a model needs, once; False when it cannot be installed."""
+    if os.path.exists(f"{env}/bin/vllm"):
+        return True
+    pip = f"uv venv -q --python 3.12 {env} && uv pip install -q --python {env}/bin/python"
+    cmd = (f"{pip} -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly/cu129 "
+           "--extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match"
+           if env == ENV_NIGHTLY else f"{pip} vllm")
+    try:
+        sh(cmd)
+        sh(f"set -o pipefail; {env}/bin/python -c 'import vllm, torch; print(vllm.__version__, torch.__version__)' | tee -a {OUT}/kaggle_run.txt",
+           executable="/bin/bash")
+        return True
+    except subprocess.CalledProcessError as e:
+        log(f"vLLM install in {env} failed: {e}")
+        return False
 
 
 def _get(path, data=None, timeout=10):
@@ -81,12 +104,15 @@ def _get(path, data=None, timeout=10):
 
 
 def start_server(only=None):
-    for model, extra in MODELS:
+    for model, env, extra, thinking in MODELS:
         if only and model != only:
             continue
+        if not install(env):
+            continue
+        THINKING[model] = thinking
         log(f"starting vLLM with {model}")
-        args = [f"{ENV}/bin/vllm", "serve", model, "--served-model-name", "qwen", "--port", str(PORT),
-                "--tensor-parallel-size", "2", "--max-model-len", "24576", "--gpu-memory-utilization", "0.92",
+        args = [f"{env}/bin/vllm", "serve", model, "--served-model-name", "llm", "--port", str(PORT),
+                "--tensor-parallel-size", "2", "--gpu-memory-utilization", "0.92",
                 "--max-num-seqs", "16", "--enable-prefix-caching", "--seed", "0", *extra]
         logf = open(f"{OUT}/vllm_{model.split('/')[-1]}.log", "a")  # append: keep the log of a crashed server
         proc = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT)
@@ -99,7 +125,7 @@ def start_server(only=None):
                 time.sleep(10)
         if proc.poll() is None:
             try:
-                r = _get("/v1/chat/completions", {"model": "qwen", "temperature": 0, "max_tokens": 20,
+                r = _get("/v1/chat/completions", {"model": "llm", "temperature": 0, "max_tokens": 20,
                                                    "messages": [{"role": "user", "content": "What is 17+25? Reply with the number only."}],
                                                    "chat_template_kwargs": {"enable_thinking": False}}, timeout=300)
                 text = r["choices"][0]["message"]["content"] or ""
@@ -139,8 +165,9 @@ def run_stage(name, args, n_expected, model, proc, max_restarts=3):
     for attempt in range(1 + max_restarts):
         log(f"stage {name}: start (attempt {attempt + 1})")
         t0 = time.time()
-        p = subprocess.run(f"cd {PROJ} && uv run --no-sync datamate run --base-url http://localhost:{PORT}/v1 --model qwen "
-                           f"--engine {ENGINE} --thinking off --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} 2>&1 "
+        think = "--thinking on --max-tokens 8192" if THINKING.get(model) else "--thinking off"
+        p = subprocess.run(f"cd {PROJ} && uv run --no-sync datamate run --base-url http://localhost:{PORT}/v1 --model llm "
+                           f"--engine {ENGINE} {think} --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} {ARGS} 2>&1 "
                            f"| grep -v -e sitecustomize -e \"No module named 'wrapt'\" | tail -60",
                            shell=True, capture_output=True, text=True)
         print(p.stdout, flush=True)
@@ -175,8 +202,12 @@ def sales_lines_report(split):
 
 def main():
     setup()
-    model, proc = start_server()
-    log(f"using {model}")
+    model, proc = start_server(ONLY or None)
+    log(f"using {model} (thinking {'on' if THINKING.get(model) else 'off'}); run flags: {ARGS or '-'}")
+    if "holdout" in STAGES:  # held-out train shops (assets/holdout.txt): never used to pick prompts or fixes
+        sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -5")
+        n = sum(1 for ln in open(f"{PROJ}/assets/holdout.txt") if ln.strip())
+        proc = run_stage("holdout", "--split train --ids-file assets/holdout.txt", n, model, proc)
     if "dev120" in STAGES:
         n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
         proc = run_stage("dev120", "--split train --ids-file assets/dev120.txt", n, model, proc)
