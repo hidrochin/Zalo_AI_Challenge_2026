@@ -192,7 +192,51 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
-## Status (2026-11-12, night): start here
+## Status (2026-11-13): start here: layers of docs/PLAN_LAYERS.md (all but L9)
+
+Code for the layers of [docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md), except Docker (L9). All new behaviour is behind flags,
+so a run without them behaves as before. 365 tests pass. Nothing new has run on Kaggle yet.
+
+| layer | what | flag / command |
+|---|---|---|
+| L1 | Rulebook diff against the train rulebook (`assets/rulebook_train.md`, allowed by QnA lines 29–30). `rules.rule_delta` keeps only new rules and rules the model reads as changed. `sql/compile.compile_delta` writes macros for those rules only. The tested macros of changed rules are blocked and their skeletons dropped. Lints, shadow and the fast branch stay as in `full`. The train delta is empty, so a train run makes no compile call; a public-style rulebook gives ≤ 28 rule lines. | `--catalog delta` |
+| L1/L10 | Invariants without gold (`sql/invariants.py`). Hand macros: revenue adds up over days, cancel_rate in 0..100, cancel_count ≤ orders, debt ≥ 0. Compiled macros: same call gives the same value, NULL/0 after the data, a rate stays in 0..100; a violation goes back to the model like an error. Train stores: 0 violations. | `datamate rule-check --split train` |
+| L5 | Thinking router. Thinking is off by default. A question goes deep with thinking (and the judge) when it reads a changed rule, the sales are suspect, the needed fact is suspect, it is unfamiliar (nearest train question of another shop < 0.75, about 12% of train), or it has ≥ 3 unexplained words. It escalates when the first answer abstained, was UNANSWERABLE, hedged, tripped a check or hit the token limit. `LocalLLM` returns `Reply` (str) with `.reasoning` and `.finish_reason`; both are logged per attempt (`thinking`, `finish_reason`). The log holds `route` {tier, reasons, agree, first}. | `--thinking route` (`--think-max-tokens` = deep budget, `--route-far`, `--route-residual`); Kaggle `DM_THINK=route` |
+| L0/L2 | Shop capabilities (`capabilities.py`): revenue, orders, customers, products, debt, deliveries, imports, expenses, stock, lots, cost → trusted / suspect / absent, each with its source. Value checks of the facts (payments ≤ order total, delivery ≥ order date, imports amount ≈ qty × price, stock ≥ 0, lots have an expiry, expenses > 0) fire on no train shop. "No fact, but a raw header names it" → suspect, never absent. On train every question that needs an absent capability is gold-unanswerable (13/13), and no answerable question needs one. Used by the card under `--context rich` (replaces `absent_part`), the router, the example filter and L8. Saved as `<out>/capabilities.json`. LLM column mapping now records every proposal with the reason it was kept or refused: `cache/ingest/<split>/<biz>.roles.decisions.json`. | always (card: `--context rich`) |
+| L4 | `agent/frame.py`: Frame (quantity from `lint.CATALOG` or a contract, periods, names, values, shape, capability, residual = words neither the slots nor the rulebook nor the shop's units explain). Logged as `frame` on every question. The example bank drops examples that need a capability the shop lacks. | `--frame` (block in the prompt) |
+| L6 | `frame.consistency`: a resolved period or a name that the final query does not use (deterministic round trip, no model call), logged as `consistency`. Executed queries log `rows` (5 first rows were already in `stdout`). | always |
+| L7 | `magnitude` = money answer / revenue over all the shop's data, logged as a soft feature. The contract kind gate was NOT added: in the train logs, 17/17 contract fallbacks were right (no train case; QnA rule). | always |
+| L8 | `agent/calibrate.py`: features from the log (tier, reasons, agreement, repairs, checks, judge, macro calls, near, capability state, residual, consistency, magnitude, type). Logistic regression, leave-business-out report (reliability bins; PA by business, tier, capability, type), JSON model. Answers below the threshold abstain. | `datamate calibrate <train runs> --out assets/calibrator.json`; `--calibrator assets/calibrator.json` |
+| L3 | Lexicon: entries kept only if they occur in train questions (29 words, 43 phrases; 109 words and 14 phrases dropped). External entries in `assets/lexicon_external.json` with their source: 16 from web pages (URL) and 67 from Gemini (train-only seed words, `preprocess/lexgen.py`, raw replies in `assets/lexicon_gemini_*.jsonl`). Every external entry passes `lexicon.accept` (no train word, no synonym of a business word), a Gemini check and a review list. They change no train question. LLM rewrite only when the rule-cleaned question leaves unexplained words (train: 1996 of 3000 would skip it, measured without the shop's name index). | `--rewrite residual`; rebuild: `uv run python -m datamate.preprocess.lexgen [--refilter\|--verify]` |
+
+**L8 data (the question of 2026-11-13).** The calibrator must be fitted on train logs of the configuration that will be
+submitted (same model, router, flags); public and private logs never. `hydrochii/datamate-sql-run` (SQL v4, code
+`249b031`, Qwen, no thinking: train PA 0.8727, 2727/109/164) is being downloaded to `outputs/kaggle/result_sql_run`
+(started 2026-11-13 ~00:55, about 1800/3000 logs at handoff; rerun the same command to resume). It can serve as a
+prototype only: it has no router, frame or capability fields. `debug/l8_v4.py` (local, gitignored) fills those fields
+from the old logs and runs the leave-business-out fit:
+```bash
+uvx --with six kaggle kernels output hydrochii/datamate-sql-run -p outputs/kaggle/result_sql_run --file-pattern "out/train/.*"
+uv run python debug/l8_v4.py outputs/kaggle/result_sql_run/out/train outputs/l8_v4   # report + outputs/l8_v4/calibrator.json
+uv run datamate export-examples outputs/kaggle/result_sql_run/out/train --out assets/examples_sql.jsonl  # L4 question → SQL bank
+```
+Check before using the bank: v4 queries may declare `-- type: number` for money; the run then picks it up automatically
+(`examples_sql.jsonl` next to `--examples`).
+
+**Next (user).** A Kaggle train run of the chosen configuration gives the real L8 data and measures the router. It runs
+on the train split (3000 gold answers); public is for measuring only. The model must be the one submitted (Qwen3.5-9B,
+or Gemma 4 12B after the A/B runs of 2026-11-12):
+```bash
+DM_KERNEL=datamate-route-train DM_STAGES=probe,train DM_ENGINE=sql DM_THINK=route DM_MODEL=Qwen/Qwen3.5-9B \
+  DM_ARGS="--catalog delta --judge unans --context rich --frame --rewrite residual" \
+  DM_DATA=datamate-bundle-combined DM_DATASET=datamate-code kaggle/push.sh update
+```
+Local checks: Ollama Qwen, 6 holdout questions, `--thinking route --catalog delta`: 5 right, 0 wrong, 1 abstain (the deep
+one). A run with every new flag was in progress at handoff (`real_layers` in the old session's scratchpad, lost).
+Not done: fixtures per rule (L1), code-generated SQL for contract macros (L4), self-consistency in the deep tier and
+per-shop skeletons (L5), checks turned from hard to soft (L7: needs the calibrator first), the `events` table (L0).
+
+## Status (2026-11-12, night)
 
 **Branches.**
 - `text2sql` holds the code now running on Kaggle A/B: `ee9f9fa`, on top of `d14db4f` (`d14db4f` adds
