@@ -227,7 +227,16 @@ profit uses the **cost recorded on the sale line**.
 - **Rule (2026-11-11, organizers' QnA in `description/QnA.txt`):** inference code holds nothing learned from the public
   test (rulebook wording, macros, headers, layouts, fixes chosen on public labels). Add a fix only when train has the
   case. Question preprocessing is exempt (user's choice). See README "Status (2026-11-11, late)".
-- **Status (2026-11-12, late):** read the README "Status (2026-11-12, late): start here" section first.
+- **Status (2026-11-12, night):** read the README section "Status (2026-11-12, night): start here" first.
+  - `text2sql` holds the exact code now running on Kaggle A/B. Branch `submission` (`3b6df4c`; Docker in `c27e90d`)
+    has the same fixes plus guideline log fields; merging the two will conflict.
+  - Per-layer plan: [docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md).
+  - The 0/1000 Kaggle A/B runs had two causes:
+    - `SqlPool.setup` without `as_of` (fixed);
+    - Triton attention on T4 needing 96 KB of shared memory for Gemma 4's head 512 (patched in `run_kaggle.py`).
+  - Kaggle A/B rerun on Gemma 4 12B W4A16 with thinking, stages `probe,smoke,public`. The smoke gate stops a broken
+    run. Estimated finish: 2026-11-13, 04:00–06:00 VN.
+- **Status (2026-11-12, late):** README "Status (2026-11-12, late)".
   - Direction (user, after the mentor): the LLM reads the rulebook and writes the computations. Flags:
     - `--catalog compiled`: the rulebook compiled to macros;
     - `--shop-views`;

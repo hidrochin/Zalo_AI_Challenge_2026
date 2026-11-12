@@ -192,7 +192,76 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
-## Status (2026-11-12, late): start here
+## Status (2026-11-12, night): start here
+
+**Branches.**
+- `text2sql` holds the code now running on Kaggle A/B: the fix commit right after `d14db4f` (`d14db4f` adds
+  [docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md), the per-layer plan). `src/` is byte-identical to the pushed bundle, and
+  `kaggle/run_kaggle.py` differs only in the values `push.sh` fills in.
+- `submission` (`3b6df4c`, Docker `c27e90d`: vLLM v0.32.0-cu129, Qwen3.5-9B, `predict.sh`) has the same fixes. It also
+  has the guideline log fields (`answer`, `elapsed_ms`, `thinking`, `code`, `output`) and no `--oracle`/`--keep-tables`
+  or `ground_truth.jsonl`. Merging the two branches will conflict in `pipeline.py`, `sql/agent.py`, `run_kaggle.py`
+  and the tests (`test_oracle.py` here, `test_pool_setup.py` there).
+
+**Why A/B of 2026-11-11 gave 0/1000.** Neither cause was Qwen:
+1. **Code.** A compiled macro, `date_trunc('month', as_of())`, crashed `SqlPool.setup`. DuckDB binds a table macro
+   when it is created, and the pool's cursors had no `as_of`; only `usable()` set it on the probe. Compile and the
+   first shop's views had already run for ~56 min. Fix: `setup` sets `as_of` to the data end on every cursor and
+   skips a statement that still fails. The pipeline's `probe` cursor gets `as_of` too, so shop views are not
+   rejected as empty without `--catalog compiled`.
+2. **Gemma 4 on T4.** Worker log: `triton OutOfResources: shared memory, Required: 98304, Hardware limit: 65536` in
+   `triton_unified_attention` during the cudagraph profiling run. The full-attention layers have head size 512, and the
+   prefill KV tile of 32 needs 96 KB. This was not RAM or the KV cache. Fix (Kaggle only, `patch_attention()` in
+   `kaggle/run_kaggle.py`, after the vLLM install): prefill tile 16 and `num_stages=1` for heads over 512 bytes;
+   heads of 256 (Gemma sliding layers, Qwen) keep vLLM's choice. The 5090 has about 99 KB of shared memory, so the
+   final image should not need it; untested.
+   Also: Gemma runs with `--limit-mm-per-prompt '{"image":0,"audio":0,"video":0}'`. Qwen gets
+   `--reasoning-parser qwen3`: without it, the 2026-11-11 probe had `reasoning 0 chars` and the thinking in `content`.
+
+**New `smoke` stage** (`run_kaggle.py`): the first 2 questions of each shop (28 public questions), with every stage
+of the run (compile, shop views, judge). A gate decides whether the long stages run: every line written, no
+traceback, < 25% of questions with only LLM errors, ≥ 25% answered. On a fail the kernel stops before `public`.
+`DM_MODEL` pins one model: no silent fall back to Qwen.
+
+**Kaggle runs in flight (pushed 2026-11-12 ~21:08 VN, same code, Gemma 4 12B W4A16 `nicklas373/gemma-4-12B-it-AWQ`,
+thinking on, `DM_STAGES=probe,smoke,public`):**
+
+| run | kernel (version 2) | flags |
+|---|---|---|
+| A | `hydrochii/datamate-agents-a` | `--catalog compiled --shop-views --judge unans` |
+| B | `hydrochiii/datamate-agents-b` | the same + `--context rich` |
+
+Gemma served: the A log reached `stage smoke: start` at 701 s; the user saw it on the Kaggle page, since
+`kaggle kernels logs` returns nothing while a kernel runs. Estimate (no Gemma throughput measured on T4 yet):
+- smoke ends about 1.5–2.5 h after the start. A kernel that ends then means the smoke gate failed;
+- public needs another 3.5–6 h, so A finishes about 04:00–06:00 VN on 2026-11-13;
+- the 12 h cap is about 09:00 VN. The submission is written as it goes, so a capped run keeps its answers.
+
+For scale, v5–v7 without thinking took 72–77 min per 1000 questions.
+
+Read the results (the `kaggle_run.txt` lines `attention patch`, `probe:`, `smoke:`, `stage public:`), then score:
+```bash
+uvx --with six kaggle kernels output hydrochii/datamate-agents-a -p outputs/kaggle/result_agents_a_gemma
+KAGGLE_API_TOKEN="$(grep '^KAGGLE_API_TOKEN_2=' .env | cut -d= -f2-)" \
+  uvx --with six kaggle kernels output hydrochiii/datamate-agents-b -p outputs/kaggle/result_agents_b_gemma
+```
+Score with the snippet in the section below. `ground_truth.jsonl` is tracked here but untracked on `submission`:
+keep a local copy before you check out `submission`. Check first: the `probe:` line shows reasoning chars > 0, and how long smoke and public took. That is the
+first measure of Gemma's speed on T4, and the 6 h budget of the final image depends on it. B−A now measures
+`--context rich` alone. Also look at the 13 public questions the "Not in" block risks (dev_014 debt/stock, dev_013
+deliveries), as described below.
+
+Push commands used (from `text2sql`):
+```bash
+DM_KERNEL=datamate-agents-a DM_STAGES=probe,smoke,public DM_ENGINE=sql DM_MODEL=nicklas373/gemma-4-12B-it-AWQ \
+  DM_ARGS="--catalog compiled --shop-views --judge unans" DM_DATA=datamate-bundle-combined DM_DATASET=datamate-code \
+  kaggle/push.sh update
+# B: KAGGLE_API_TOKEN=<token 2>, DM_KERNEL=datamate-agents-b, DM_ARGS="... --context rich"
+```
+
+Previous runs downloaded to `outputs/kaggle/result_agents_a`, `result_agents_b` (0/1000) and `gemma_probe`.
+
+## Status (2026-11-12, late)
 
 Commits on `text2sql` (not pushed): `49a3930` agent pipeline (section below), `a8ddbae` `--context rich`, `0009102` and
 `6064dfb` Kaggle runner fixes. `assets/oracle/` stays untracked (it was built from public errors).
