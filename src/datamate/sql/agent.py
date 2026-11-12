@@ -7,6 +7,7 @@ The pipeline around it (preprocess, checks, repair, vote, finalize) is the same 
 import datetime as dt
 import queue
 import re
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -856,17 +857,27 @@ class SqlPool:
         self.blocked = frozenset(names)
 
     def setup(self, statements: list[str]) -> None:
-        """Run temp-object statements on every cursor (each is its own session): the oracle experiment's views."""
+        """Run temp-object statements on every cursor (each is its own session): oracle views, compiled macros, shop views.
+        DuckDB binds a table macro when it is created, so as_of() needs a typed value first (run() sets the question's).
+        A statement that still fails is skipped: one lost macro beats a run with no answers."""
         if not statements:
             return
+        day = self.span[1] if self.span else "2000-01-01"
         curs = [self._free.get() for _ in range(self._free.qsize())]
+        failed: dict[str, str] = {}
         try:
             for cur in curs:
+                cur.execute(f"set variable as_of = date '{day}'")
                 for s in statements:
-                    cur.execute(s)
+                    try:
+                        cur.execute(s)
+                    except duckdb.Error as e:
+                        failed[s] = str(e).splitlines()[0]
         finally:
             for cur in curs:
                 self._free.put(cur)
+        for s, err in failed.items():
+            print(f"setup skipped: {s.splitlines()[0][:120]} ({err[:200]})", file=sys.stderr, flush=True)
 
     def run(self, code: str, as_of: str, shadow=None, periods: list[tuple[str | None, str]] = ()) -> dict:
         con = self._free.get()

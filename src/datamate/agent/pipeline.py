@@ -37,7 +37,7 @@ from datamate.rules import params_off, rule_gate, rule_note, rule_params
 from datamate.sql.agent import (MACROS, PRIMITIVES, SqlPool, absent_part, build_sql_system, extract_sql, hint_periods, sql_card,
                                 sql_check_message, sql_question_part, sql_repair_message, sql_shadow)
 from datamate.agent.evidence import pick_rules
-from datamate.sql.compile import compile_rulebook, usable
+from datamate.sql.compile import compile_rulebook, data_end, usable
 from datamate.sql.shopviews import card_part, shop_views
 from datamate.sql.store import STORE_VERSION, ensure_store
 from datamate.sql.values import subjective_note
@@ -465,6 +465,7 @@ def run(cfg: RunConfig) -> dict:
                 macros = [m for m in stored if m not in shop_off] if full else [m for m in stored if m in PRIMITIVES]
                 card = sql_card(biz, sales, sales_desc, macros, views=stored, rich=rich)
                 probe = pool.base.cursor()  # a session of its own, to find what runs on this store
+                probe.execute(f"set variable as_of = date '{data_end(probe)}'")  # its own variables: none set yet
                 ours = usable(probe, rule_macros, hidden) if compiled else []
                 pool.block([m for m in stored if m not in macros and m not in {r.name for r in ours}] if not full else [])
                 pool.setup(oracle["setup"].get(biz_id, []))  # after macros(): the card does not list the oracle's views
