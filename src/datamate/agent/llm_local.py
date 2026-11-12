@@ -5,9 +5,22 @@ This is the backend used in the competition: everything runs offline on our own 
 
 import copy
 import json
+import threading
 import urllib.request
 
 from openai import OpenAI
+
+_trace = threading.local()  # reasoning of each model call made on this thread, for the per-question log
+
+
+def start_trace() -> None:
+    _trace.calls = []
+
+
+def take_trace() -> list[str] | None:
+    """The reasoning of every call since start_trace(), in call order ("" for a call without any); None if none had any."""
+    calls, _trace.calls = getattr(_trace, "calls", None), None
+    return calls if calls and any(calls) else None
 
 
 def _is_ollama(base_url: str) -> bool:
@@ -51,4 +64,8 @@ class LocalLLM:
             model=self.model, messages=messages, temperature=temperature, seed=seed,
             max_tokens=max_tokens or self.max_tokens, extra_body=extra or None,
         )
-        return r.choices[0].message.content or ""
+        msg = r.choices[0].message
+        if getattr(_trace, "calls", None) is not None:  # vLLM's reasoning parser: `reasoning` (newer) or `reasoning_content`
+            extra_fields = msg.model_extra or {}
+            _trace.calls.append(extra_fields.get("reasoning") or extra_fields.get("reasoning_content") or "")
+        return msg.content or ""

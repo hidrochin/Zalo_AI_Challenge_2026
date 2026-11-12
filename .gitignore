@@ -19,3 +19,9 @@ result/
 .DS_Store
 .env
 assets/BUILD.txt
+
+# public-test labels: evaluation only, never in the submission
+ground_truth.jsonl
+assets/oracle/
+# docker build context (weights, staged code)
+build/
