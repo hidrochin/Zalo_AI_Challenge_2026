@@ -228,7 +228,7 @@ profit uses the **cost recorded on the sale line**.
   test (rulebook wording, macros, headers, layouts, fixes chosen on public labels). Add a fix only when train has the
   case. Question preprocessing is exempt (user's choice). See README "Status (2026-11-11, late)".
 - **Status (2026-11-12, night):** read the README section "Status (2026-11-12, night): start here" first.
-  - `text2sql` holds the exact code now running on Kaggle A/B. Branch `submission` (`3b6df4c`; Docker in `c27e90d`)
+  - `text2sql` `ee9f9fa` holds the exact code now running on Kaggle A/B. Branch `submission` (`3b6df4c`; Docker in `c27e90d`)
     has the same fixes plus guideline log fields; merging the two will conflict.
   - Per-layer plan: [docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md).
   - The 0/1000 Kaggle A/B runs had two causes:

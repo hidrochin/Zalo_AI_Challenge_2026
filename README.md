@@ -195,7 +195,7 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 ## Status (2026-11-12, night): start here
 
 **Branches.**
-- `text2sql` holds the code now running on Kaggle A/B: the fix commit right after `d14db4f` (`d14db4f` adds
+- `text2sql` holds the code now running on Kaggle A/B: `ee9f9fa`, on top of `d14db4f` (`d14db4f` adds
   [docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md), the per-layer plan). `src/` is byte-identical to the pushed bundle, and
   `kaggle/run_kaggle.py` differs only in the values `push.sh` fills in.
 - `submission` (`3b6df4c`, Docker `c27e90d`: vLLM v0.32.0-cu129, Qwen3.5-9B, `predict.sh`) has the same fixes. It also
