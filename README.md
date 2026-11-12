@@ -232,7 +232,10 @@ DM_KERNEL=datamate-route-train DM_STAGES=probe,train DM_ENGINE=sql DM_THINK=rout
   DM_DATA=datamate-bundle-combined DM_DATASET=datamate-code kaggle/push.sh update
 ```
 Local checks: Ollama Qwen, 6 holdout questions, `--thinking route --catalog delta`: 5 right, 0 wrong, 1 abstain (the deep
-one). A run with every new flag was in progress at handoff (`real_layers` in the old session's scratchpad, lost).
+one). With every new flag (`--context rich --frame --rewrite residual`, other 6 holdout questions, seed 1): 4 right, 1 wrong
+(`q_e4fe38fbebb9`, a table, normal tier), 1 abstain. The abstain went deep on "residual 3" (`quay, zalo, oa`: the
+channel values were not found by `values.hints`, so the frame could not explain them). 5 of 6 skipped the rewrite. Logs
+were in the old session's scratchpad (lost).
 Not done: fixtures per rule (L1), code-generated SQL for contract macros (L4), self-consistency in the deep tier and
 per-shop skeletons (L5), checks turned from hard to soft (L7: needs the calibrator first), the `events` table (L0).
 
