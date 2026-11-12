@@ -11,6 +11,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+from datamate.agent.evidence import rule_units
 from datamate.text import fold
 
 DEPENDS = {
@@ -193,6 +194,35 @@ def rule_gate(rulebook: str, cache_path: Path, generate: Callable[[str, list[str
     return frozenset(c for c, needs in DEPENDS.items() if broken & set(needs))
 
 
+TRAIN_RULEBOOK = Path(__file__).resolve().parents[2] / "assets" / "rulebook_train.md"  # organizers' QnA: the train
+# rulebook may be packaged to find what a test rulebook changed
+
+
+def rule_delta(rulebook: str, train_rulebook: str, cache_path: Path,
+               generate: Callable[[str, list[str]], str]) -> list[tuple[str, str, str]]:
+    """The rules of this rulebook that the train rulebook does not hold: (section, term, line) of every rule line that is
+    new, or whose term the train rulebook defines with another text that the model reads as a change (a "no" keeps it
+    out, as in rule_gate). The train rulebook gives [] by construction. Verdicts are saved in cache_path."""
+    old_lines = {_plain(line) for _, _, line in rule_units(train_rulebook)}
+    old_terms = {fold(t): line for _, t, line in rule_units(train_rulebook) if t}
+    path = Path(cache_path)
+    verdicts = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    out = []
+    for section, term, line in rule_units(rulebook):
+        if _plain(line) in old_lines:
+            continue
+        old = old_terms.get(fold(term)) if term else None
+        if old is not None:
+            if line not in verdicts:
+                verdicts[line] = unchanged(generate(SYSTEM, [f"Rule: {term}", f"Old text: {old}", f"New text: {line}"]))
+            if verdicts[line]:
+                continue
+        out.append((section, term, line))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(verdicts, ensure_ascii=False, indent=1), encoding="utf-8")
+    return out
+
+
 _SHIFT = re.compile(r"ca (sang|chieu)\D{0,12}?(\d{1,2})\s*[:h]?\s*(\d{2})?\s*(?:-|–|den|toi)\s*(\d{1,2})\s*[:h]?\s*(\d{2})?")
 SHIFT_MACROS = ("shift_revenue", "shift_orders")
 
@@ -217,9 +247,14 @@ def params_off(params: dict[str, int | None]) -> frozenset[str]:
     return frozenset(SHIFT_MACROS) if any(v is None for v in params.values()) else frozenset()
 
 
-def rule_note(off: frozenset[str]) -> str:
-    """Prompt text for the definitions that are off."""
+def rule_note(off: frozenset[str], replaced: bool = False) -> str:
+    """Prompt text for the definitions that are off. replaced: their macros are gone from the store (catalog "delta"), and
+    the card lists macros written for the changed rules."""
     if not off:
         return ""
+    if replaced:
+        return ("\n\n# Changed rules\nThis rulebook changed the rules behind: " + ", ".join(sorted(off)) + ". Those macros are not "
+                "offered, and the `counted` column still follows the old rule. For these quantities call a macro written for "
+                "the new rule (schema card) or compute from the raw columns as the rulebook above says.")
     return ("\n\n# Changed rules\nThis rulebook changed the rules behind: " + ", ".join(sorted(off)) + ". The helpers of those names and "
             "the `counted` column still follow the old rule. For these quantities compute from the raw columns as the rulebook above says.")

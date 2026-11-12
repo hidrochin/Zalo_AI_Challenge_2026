@@ -234,16 +234,21 @@ _PLAN = ("After the type line write three comment lines, then the query:\n"
          "If a term the question needs has nothing that holds it, reply UNANSWERABLE instead.\n")
 
 
-def build_sql_system(rulebook: str, primitives: bool = False, compiled: bool = False, plan: bool = False) -> str:
+def _drop_skeletons(text: str, names) -> str:
+    return _SKELETON.sub(lambda m: "" if any(re.search(rf"\b{n}\s*\(", m.group(0)) for n in names) else m.group(0), text)
+
+
+def build_sql_system(rulebook: str, primitives: bool = False, compiled: bool = False, plan: bool = False,
+                     drop: frozenset[str] = frozenset()) -> str:
     """primitives: the skeletons that call a rulebook macro are left out, and the model computes every term itself.
     compiled: the same, but the card also lists the macros the model wrote from this rulebook (sql/compile.py).
-    plan: the query starts with comment lines naming the terms, the rule and the columns it uses."""
-    text = SYSTEM_TEMPLATE
+    plan: the query starts with comment lines naming the terms, the rule and the columns it uses.
+    drop: tested macros this rulebook switched off (catalog "delta"): their skeletons are left out."""
+    text = _drop_skeletons(SYSTEM_TEMPLATE, drop) if drop else SYSTEM_TEMPLATE
     if plan:
         text = text.replace("If the data cannot support the question, reply", _PLAN + "If the data cannot support the question, reply")
     if primitives:
-        rule_macros = [m for m in MACROS if m not in PRIMITIVES]
-        text = _SKELETON.sub(lambda m: "" if any(re.search(rf"\b{n}\s*\(", m.group(0)) for n in rule_macros) else m.group(0), text)
+        text = _drop_skeletons(text, [m for m in MACROS if m not in PRIMITIVES])
         text = text.replace(_MACRO_RULE, (
             "- The schema card lists generic helpers and the macros written from this RULEBOOK: call one when its doc is the "
             "term the question asks, with the question's own arguments. Compute any other business term yourself from the "
@@ -382,6 +387,8 @@ def sql_question_part(question: str, as_of: str, examples: list[dict], hints: li
     if (norm or {}).get("rules"):
         out += ("\n\nRULEBOOK lines whose words the question uses (check that they are the rule it asks; the whole "
                 "RULEBOOK is in the system message):\n" + "\n".join(norm["rules"]))
+    if (norm or {}).get("frame"):
+        out += "\n\n" + norm["frame"]
     lines = sql_hints(hints or [])
     if lines:
         out += "\n\nTime expressions, already resolved by the rulebook (use exactly these dates):\n" + "\n".join(lines)
@@ -759,7 +766,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
     periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`.
     rules_code: the rewrites and lints that encode rulebook terms; blocked: stored macros this run does not offer."""
     m = _UNANSWERABLE.match(code)
-    preview, written = "", code
+    preview, written, n_rows = "", code, None
     if m:
         result = {"type": "unanswerable", "reason": m.group(1).strip(), "_src": "model"}
     else:
@@ -787,7 +794,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
                     if again is None or tries == 2:
                         raise
                     code = again
-            preview = repr(rows[:5])
+            preview, n_rows = repr(rows[:5]), len(rows)
             result = to_answer(declared.group(1).lower(), columns, rows)
         except (duckdb.Error, ValueError, TypeError) as e:  # ValueError covers SqlRejected and AnswerShape
             return {"result": None, "error": str(e)[:1500], "stdout": preview, **_ran(written, code)}
@@ -800,7 +807,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         if unit:
             warning, contract = _unit_warning(con, result, unit, shadow[1:], timeout)
     return {"result": result if error is None else None, "error": error, "warning": warning, "contract": contract, "stdout": preview,
-            **_ran(written, code)}
+            "rows": n_rows, **_ran(written, code)}
 
 
 def _ran(written: str, code: str) -> dict:

@@ -1,69 +1,100 @@
 """Word-level rewrites: abbreviations, teen-code, Central/Southern dialect and English business words.
 
-Each entry was read off the train/public questions (see DATA.md §2.4). Ambiguous short forms are only
-rewritten in a context that fixes their meaning ('k' after a number is 'nghìn' and is left to the amount
-rules; 'chi' is 'gì' only after 'hàng/món/cái/là'), and words inside a matched shop name are never touched.
+Sources, kept apart so none comes from the test splits (organizers' QnA 2026-11-11):
+- the entries written here occur in the TRAIN questions;
+- assets/lexicon_external.json: entries from public web pages (URL per entry) and from Gemini over train-only seed
+  words (preprocess/lexgen.py, raw replies kept), each passed through `accept`. An entry written here wins.
+Ambiguous short forms are only rewritten in a context that fixes their meaning ('k' after a number is 'nghìn' and is
+left to the amount rules; 'chi' is 'gì' only after 'hàng/món/cái/là'), and words inside a matched shop name are never
+touched.
 """
 
-# exact lowercase word (diacritics significant) -> replacement
+import json
+import re
+import unicodedata
+from pathlib import Path
+
+from datamate.text import fold
+
+EXTERNAL_PATH = Path(__file__).resolve().parents[3] / "assets" / "lexicon_external.json"
+
+# exact lowercase word (diacritics significant) -> replacement; every key occurs in the train questions
 WORDS: dict[str, str] = {
     # business abbreviations
-    "dthu": "doanh thu", "dthuu": "doanh thu", "doanhthu": "doanh thu", "dth": "doanh thu",
-    "sp": "sản phẩm", "sl": "số lượng", "slg": "số lượng", "nv": "nhân viên", "ncc": "nhà cung cấp",
-    "hsd": "hạn sử dụng", "ck": "chuyển khoản", "tm": "tiền mặt", "tb": "trung bình", "tbinh": "trung bình",
-    "đh": "đơn hàng", "dh": "đơn hàng", "hđ": "hoá đơn", "hd": "hoá đơn", "đt": "điện thoại", "lnhuan": "lợi nhuận",
-    "cty": "công ty", "tg": "thời gian", "kh": "khách hàng", "khg": "không", "ng": "người",
-    "hnay": "hôm nay", "hqua": "hôm qua", "hwa": "hôm qua", "hum": "hôm",
+    "dthu": "doanh thu", "sp": "sản phẩm", "ck": "chuyển khoản", "tm": "tiền mặt", "hd": "hoá đơn",
+    "hnay": "hôm nay", "hqua": "hôm qua",
     # question words and particles
-    "bnhiu": "bao nhiêu", "bnhieu": "bao nhiêu", "bnh": "bao nhiêu", "bn": "bao nhiêu", "baonhieu": "bao nhiêu",
-    "dc": "được", "đc": "được", "dk": "được", "đk": "được", "đươc": "được", "đượt": "được",
-    "ko": "không", "kô": "không", "hok": "không", "hông": "không", "hổng": "không", "khum": "không", "hem": "không",
-    "khoong": "không",
-    "j": "gì", "jì": "gì", "z": "vậy", "zậy": "vậy", "zạ": "vậy", "dzạ": "vậy", "dzậy": "vậy", "zị": "vậy",
-    "dzị": "vậy", "zay": "vậy", "dị": "vậy", "rứa": "vậy",
-    "trc": "trước", "trk": "trước", "trươc": "trước", "trog": "trong", "trg": "trong", "cko": "cho",
-    "mik": "mình", "mk": "mình", "mh": "mình", "mềnh": "mình", "mìn": "mình",
-    "bít": "biết", "bit": "biết", "mún": "muốn", "mun": "muốn", "nhut": "nhất", "nhứt": "nhất",
-    "kủa": "của", "jùm": "giùm", "jum": "giùm", "dùm": "giùm", "wán": "quán", "wa": "qua", "lun": "luôn",
-    "ròi": "rồi", "rùi": "rồi", "roài": "rồi", "gồi": "rồi", "mần": "làm", "dề": "về", "nớ": "đó",
-    "gium": "giùm", "giup": "giúp", "duoc": "được",
-    "chừ": "giờ", "sốp": "shop", "bná": "bán", "đươcj": "được", "zìa": "về", "dìa": "về", "dúp": "giúp",
-    # dropped or swapped letters (public questions): 'mí đơn tổg cộg', 'mấy nượt xe', 'kó mí ngừi'
-    "mí": "mấy", "tổg": "tổng", "cộg": "cộng", "đơng": "đơn", "nượt": "lượt", "xửa": "sửa", "kòn": "còn", "kó": "có",
-    "ngừi": "người",
+    "bnhiu": "bao nhiêu", "bn": "bao nhiêu", "dc": "được", "đc": "được", "đươc": "được", "duoc": "được",
+    "ko": "không", "hok": "không", "hông": "không", "khoong": "không", "j": "gì", "z": "vậy", "dị": "vậy",
+    "trc": "trước", "gium": "giùm", "giup": "giúp",
     # English business words
-    "revenue": "doanh thu", "total": "tổng", "bill": "đơn", "bills": "đơn", "order": "đơn", "orders": "đơn",
-    "check": "xem", "hot": "bán chạy", "ship": "giao hàng", "shipping": "giao hàng", "customer": "khách hàng",
-    "customers": "khách hàng", "product": "sản phẩm", "products": "sản phẩm", "item": "mặt hàng",
-    "items": "mặt hàng", "profit": "lợi nhuận", "stock": "tồn kho", "cancel": "huỷ", "refund": "trả hàng",
-    "discount": "giảm giá", "cash": "tiền mặt", "staff": "nhân viên", "debt": "nợ", "today": "hôm nay",
-    "yesterday": "hôm qua", "and": "và", "per": "mỗi",
+    "revenue": "doanh thu", "total": "tổng", "bill": "đơn", "order": "đơn", "check": "xem", "hot": "bán chạy",
 }
 # two-word phrases (lowercase) -> replacement
-PHRASES: dict[tuple[str, str], str] = {
-    ("best", "seller"): "bán chạy nhất", ("last", "week"): "tuần trước", ("this", "month"): "tháng này",
-    ("last", "month"): "tháng trước", ("this", "week"): "tuần này", ("bao", "nhiu"): "bao nhiêu",
-    ("bi", "nhiêu"): "bao nhiêu", ("bi", "nhiu"): "bao nhiêu", ("bây", "chừ"): "bây giờ",
-    ("cháy", "hàng"): "hết hàng",  # sold out, not burnt
-}
-# three-word phrases: COD spelled out ('trả xi ô đi')
-PHRASES3: dict[tuple[str, str, str], str] = {("xi", "ô", "đi"): "COD", ("xi", "o", "di"): "COD",
-                                            ("dang", "chay", "hang"): "đang hết hàng"}  # 'chay hang' alone may be chạy hàng
+PHRASES: dict[tuple[str, str], str] = {("best", "seller"): "bán chạy nhất", ("bao", "nhiu"): "bao nhiêu"}
+# three-word phrases
+PHRASES3: dict[tuple[str, str, str], str] = {}
 # frequent business phrases typed without diacritics (a 9B rewrite turned 'xem gium' into 'xem giảm' and
 # 'cua hang' into 'của hàng'); restored here, outside name spans, so the rewrite starts from the right words
 _ASCII_PHRASES = {
     "cua hang": "cửa hàng", "bao nhieu": "bao nhiêu", "hom nay": "hôm nay", "hom qua": "hôm qua", "ton kho": "tồn kho",
-    "don hang": "đơn hàng", "khach hang": "khách hàng", "doanh so": "doanh số", "ti le": "tỉ lệ", "ty le": "tỷ lệ",
-    "phan tram": "phần trăm", "trung binh": "trung bình", "binh quan": "bình quân", "gia tri": "giá trị",
-    "mat hang": "mặt hàng", "san pham": "sản phẩm", "nhan vien": "nhân viên", "tuan truoc": "tuần trước",
-    "thang truoc": "tháng trước", "thang nay": "tháng này", "tuan nay": "tuần này", "nam nay": "năm nay",
-    "nam ngoai": "năm ngoái", "ban duoc": "bán được", "ban ra": "bán ra", "tong cong": "tổng cộng", "cao nhat": "cao nhất",
-    "nhieu nhat": "nhiều nhất", "chay nhat": "chạy nhất", "lai gop": "lãi gộp", "loi nhuan": "lợi nhuận",
-    "cong no": "công nợ", "con no": "còn nợ", "tra no": "trả nợ", "bi huy": "bị huỷ", "huy don": "huỷ đơn",
-    "ca sang": "ca sáng", "ca chieu": "ca chiều", "ca toi": "ca tối", "gan nhat": "gần nhất", "han dung": "hạn dùng",
-    "het han": "hết hạn", "nhap hang": "nhập hàng", "tang hay": "tăng hay", "hay giam": "hay giảm",
+    "don hang": "đơn hàng", "khach hang": "khách hàng", "ti le": "tỉ lệ", "phan tram": "phần trăm", "trung binh": "trung bình",
+    "binh quan": "bình quân", "gia tri": "giá trị", "mat hang": "mặt hàng", "san pham": "sản phẩm", "nhan vien": "nhân viên",
+    "tuan truoc": "tuần trước", "thang truoc": "tháng trước", "thang nay": "tháng này", "tuan nay": "tuần này",
+    "nam nay": "năm nay", "nam ngoai": "năm ngoái", "ban duoc": "bán được", "ban ra": "bán ra", "tong cong": "tổng cộng",
+    "cao nhat": "cao nhất", "nhieu nhat": "nhiều nhất", "chay nhat": "chạy nhất", "lai gop": "lãi gộp", "cong no": "công nợ",
+    "con no": "còn nợ", "tra no": "trả nợ", "bi huy": "bị huỷ", "huy don": "huỷ đơn", "ca sang": "ca sáng",
+    "ca chieu": "ca chiều", "gan nhat": "gần nhất", "han dung": "hạn dùng", "het han": "hết hạn", "nhap hang": "nhập hàng",
+    "tang hay": "tăng hay", "hay giam": "hay giảm",
 }
 PHRASES.update({tuple(k.split()): v for k, v in _ASCII_PHRASES.items()})
+
+
+def train_vocab(train: Path) -> set[str]:
+    """Words of the train split (rulebook, READMEs, questions): a variant equal to one of them, or to one of them without
+    its diacritics, can be a real word, so an external entry may not rewrite it (the train forms that are variants are
+    already entries here)."""
+    words: set[str] = set()
+    texts = [f.read_text(encoding="utf-8") for f in [train / "rulebook.md", *sorted((train / "data").glob("*/README.md"))]
+             if f.exists()]
+    qs = train / "questions.jsonl"
+    texts += [json.loads(line)["question"] for line in qs.read_text(encoding="utf-8").splitlines() if line.strip()] if qs.exists() else []
+    for t in texts:
+        words |= set(re.findall(r"[^\W\d_]+", unicodedata.normalize("NFC", t.lower())))
+    return words | {fold(w) for w in words}
+
+
+def accept(variant: str, standard: str, vocab: set[str], standards: set[str] | None = None) -> str | None:
+    """Why an external entry is refused, or None. The variant is one to three words of letters, not the standard form
+    with or without diacritics, and not standard text itself: a single word may not be a train word (or one letter: those
+    need context), and a phrase may not be made of train words only (a synonym would change a business word, and
+    normalization keeps the content). standards: the forms a variant may map to (the seeds a generator was given)."""
+    toks = variant.split()
+    if not 1 <= len(toks) <= 3 or not all(re.fullmatch(r"[^\W\d_]+", t) for t in toks):
+        return "shape"
+    if standards is not None and standard not in standards:
+        return "not a seed"
+    if fold(variant) == fold(standard):
+        return "same word"
+    if len(toks) == 1 and (len(variant) < 2 or variant in vocab):
+        return "a word of its own"
+    if len(toks) > 1 and all(t in vocab for t in toks):
+        return "standard words"
+    if standards is not None and variant in standards:
+        return "a seed itself"
+    return None
+
+
+def _load_external() -> None:
+    if not EXTERNAL_PATH.exists():
+        return
+    for e in json.loads(EXTERNAL_PATH.read_text(encoding="utf-8")):
+        toks = tuple(e["from"].split())
+        table = {1: WORDS, 2: PHRASES, 3: PHRASES3}[len(toks)]
+        table.setdefault(toks[0] if len(toks) == 1 else toks, e["to"])
+
+
+_load_external()
 
 # 'k' / 'v' / 'th' / 'nhiu' / 'mô' / 'chi' / 'ni' / 'răng' / 'nhiêu' / 'vs' need their neighbours
 _TH_NEXT = {"trước", "trc", "này", "nay", "rồi", "roi", "sau", "liền", "lien", "vừa", "vua", "qua"}
@@ -92,7 +123,7 @@ def contextual(prev: str | None, word: str, nxt: str | None, nxt2: str | None, i
         return "nhiêu" if prev == "bao" else "bao nhiêu"
     if word == "nhiêu" and prev not in ("bao", "bi"):
         return "bao nhiêu"
-    if word == "mô":
+    if word == "mô":  # Central dialect (mytour.vn, ngonngu.net: mô = đâu); 'chi' = gì, 'ni' = này, 'răng' = sao, 'ri' = thế này
         return "đâu" if prev in ("ở", "o") else "nào"
     if word == "chi" and prev in _CHI_PREV and nxt not in _CHI_NEXT_KEEP:
         return "gì"

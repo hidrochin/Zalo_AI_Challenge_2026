@@ -61,7 +61,7 @@ def cmd_run(a) -> None:
     from datamate.agent.pipeline import LLMUnavailable, RunConfig, run
 
     out = a.out or f"outputs/{a.split}_{a.backend}_{time.strftime('%m%d_%H%M%S')}"
-    think = {"on": True, "off": False, "default": None}[a.thinking]
+    think = {"on": True, "off": False, "route": False, "default": None}[a.thinking]
     ids = list(a.ids or [])
     if a.ids_file:
         ids += [ln.strip() for ln in Path(a.ids_file).read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -75,6 +75,8 @@ def cmd_run(a) -> None:
         llm_retries=a.llm_retries, normalize=a.normalize, fast=a.fast, keep_tables=Path(a.keep_tables) if a.keep_tables else None,
         oracle=Path(a.oracle) if a.oracle else None, catalog=a.catalog, think_rewrite=a.think_rewrite,
         shop_views=a.shop_views, context=a.context, judge=a.judge, think_max_tokens=a.think_max_tokens, prepare_only=a.prepare_only,
+        think_route=a.thinking == "route", route_far=a.route_far, calibrator=Path(a.calibrator) if a.calibrator else None,
+        route_residual=a.route_residual, frame=a.frame, rewrite=a.rewrite,
     )
     try:
         summary = run(cfg)
@@ -149,6 +151,46 @@ def cmd_make_dev(a) -> None:
     print(f"{len(ids)} ids -> {a.out}")
     print("types:", dict(Counter(types[i] for i in ids).most_common()))
     print("businesses:", len({bizs[i] for i in ids}))
+
+
+def cmd_rule_check(a) -> None:
+    import duckdb
+
+    from datamate.sql.compile import data_end
+    from datamate.sql.invariants import hand_problems
+    from datamate.sql.store import ensure_store
+
+    split = Path(a.data_root if hasattr(a, "data_root") else "data") / a.split
+    bad = 0
+    for b in sorted(p.name for p in (split / "data").iterdir() if p.is_dir()):
+        con = duckdb.connect(str(ensure_store(split, b, Path("cache"))), read_only=True)
+        try:
+            end = data_end(con)
+            con.execute(f"set variable as_of = date '{end}'")
+            for p in hand_problems(con, end):
+                bad += 1
+                print(f"{b}: {p}")
+        finally:
+            con.close()
+    print(f"{bad} violations")
+
+
+def cmd_calibrate(a) -> None:
+    from datamate.agent.calibrate import calibrate
+
+    rep = calibrate([Path(r) for r in a.runs], Path("data/train"), Path(a.out), a.threshold, a.c)
+    n = rep["answered"]
+    print(f"answered {n}: right {rep['right']}, wrong {rep['wrong']}")
+    print(f"sum of +1/-1 over answered: {rep['sum_before']} -> {rep['sum_after_lobo']} (leave-business-out, "
+          f"{rep['dropped']} dropped, {rep['dropped_right']} of them right)")
+    print("reliability:", ", ".join(f"{b['p']}: {b['right']:.2f} (n={b['n']})" for b in rep["bins"]))
+    for b, v in rep["by_business"].items():
+        if v["after"] != v["before"]:
+            print(f"  {b:9} n={v['n']:4d} {v['before']:+5d} -> {v['after']:+5d}")
+    for name, g in rep["groups"].items():
+        print(f"by {name}:", "; ".join(f"{k} n={v['n']} right={v['right']:.2f} {v['before']:+d}->{v['after']:+d}" for k, v in g.items()))
+    print("weights:", rep["weights"])
+    print(f"saved {a.out}")
 
 
 def cmd_export(a) -> None:
@@ -235,7 +277,16 @@ def main(argv=None) -> None:
     s.add_argument("--samples", type=int, default=1, help="1 greedy + (samples-1) seeded samples, then vote")
     s.add_argument("--temperature", type=float, default=0.6)
     s.add_argument("--max-tokens", type=int, default=1024)
-    s.add_argument("--thinking", choices=["on", "off", "default"], default="default", help="Qwen3 chat-template switch (vLLM)")
+    s.add_argument("--thinking", choices=["on", "off", "route", "default"], default="default",
+                   help="Qwen3 chat-template switch (vLLM); route = off, on (with --think-max-tokens) for the hard questions")
+    s.add_argument("--route-far", type=float, default=0.75,
+                   help="router: a question whose nearest train question of another shop is less similar goes deep")
+    s.add_argument("--route-residual", type=int, default=3, help="router: this many unexplained words send a question deep")
+    s.add_argument("--frame", action="store_true", help="print the question's frame (quantity, periods, names, shape, "
+                   "capability, unexplained words) in the prompt")
+    s.add_argument("--rewrite", choices=["always", "residual"], default="always",
+                   help="residual: the LLM rewrite only when the rule-cleaned question leaves unexplained words")
+    s.add_argument("--calibrator", help="JSON from `datamate calibrate`: answers below its p_correct threshold abstain")
     s.add_argument("--effort", default="medium", help="Claude effort level; Ollama reasoning_effort when --thinking on")
     s.add_argument("--concurrency", type=int, default=4)
     s.add_argument("--exec-workers", type=int, default=2)
@@ -258,9 +309,10 @@ def main(argv=None) -> None:
     s.add_argument("--keep-tables", help="experiment: JSON of question id -> raw tables shown to the model (SQL engine)")
     s.add_argument("--oracle", help="experiment: JSON of notes per question and SQL setup per business (debug/oracle)")
     s.add_argument("--fast", action="store_true", help="answer questions a closed frame explains in full without the model")
-    s.add_argument("--catalog", choices=["full", "primitives", "compiled"], default="full",
+    s.add_argument("--catalog", choices=["full", "primitives", "compiled", "delta"], default="full",
                    help="SQL: full = hand-written rulebook macros; primitives = generic helpers only; compiled = generic helpers "
-                        "+ macros the model writes from the split's rulebook at the start of the run")
+                        "+ macros the model writes from the split's rulebook at the start of the run; delta = full + macros "
+                        "the model writes for the rules this rulebook adds or changes against the train rulebook")
     s.add_argument("--shop-views", action="store_true", help="SQL: the model writes views per shop from its README and raw tables")
     s.add_argument("--context", choices=["base", "rich"], default="base",
                    help="SQL: rich = keys, missing facts and macro SQL in the card, rulebook lines per question, plan lines")
@@ -313,6 +365,17 @@ def main(argv=None) -> None:
     s.add_argument("runs", nargs="+")
     s.add_argument("--out", default="assets/examples.jsonl")
     s.set_defaults(func=cmd_export)
+
+    s = sub.add_parser("rule-check", help="invariants of the hand-written rule macros on every store of a split (no gold)")
+    s.add_argument("--split", default="train")
+    s.set_defaults(func=cmd_rule_check)
+
+    s = sub.add_parser("calibrate", help="fit p_correct on train run logs (leave-business-out report) and save it")
+    s.add_argument("runs", nargs="+", help="train run directories made with the flags of the submission run")
+    s.add_argument("--out", default="assets/calibrator.json")
+    s.add_argument("--threshold", type=float, default=0.5)
+    s.add_argument("--c", type=float, default=1.0, help="inverse L2 strength of the logistic regression")
+    s.set_defaults(func=cmd_calibrate)
 
     s = sub.add_parser("build-lexicon", help="rebuild assets/vi_rhymes.txt (Telex decoder) from train text")
     s.set_defaults(func=cmd_build_lexicon)
