@@ -26,7 +26,7 @@ VERIFY_PATH = EXTERNAL_PATH.with_name("lexicon_gemini_verify.jsonl")
 _JSON = re.compile(r"\[.*\]", re.S)
 
 PROMPT = """Bạn là chuyên gia ngôn ngữ chat tiếng Việt. Chủ cửa hàng nhỏ (tạp hoá, quán cà phê, nhà thuốc, cửa hàng vật liệu,
-cửa hàng điện thoại, tiệm sửa xe...) nhắn tin hỏi trợ lý về số liệu bán hàng. Với mỗi từ hoặc cụm từ chuẩn dưới đây, liệt kê
+nhà hàng...) nhắn tin hỏi trợ lý về số liệu bán hàng. Với mỗi từ hoặc cụm từ chuẩn dưới đây, liệt kê
 các cách người Việt THỰC SỰ gõ nó khi nhắn tin: viết tắt, teencode, gõ sai/thiếu chữ phổ biến, từ địa phương (Bắc, Trung, Nam)
 cùng nghĩa, từ tiếng Anh hay dùng. Không liệt kê dạng chỉ bỏ dấu (ví dụ "doanh thu" -> "doanh thu" không dấu). Chỉ liệt kê dạng
 có thật và phổ biến; dạng có thể đọc thành một từ thông dụng khác nghĩa thì bỏ.

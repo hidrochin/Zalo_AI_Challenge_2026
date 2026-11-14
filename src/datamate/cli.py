@@ -77,7 +77,7 @@ def cmd_run(a) -> None:
         shop_views=a.shop_views, context=a.context, judge=a.judge, think_max_tokens=a.think_max_tokens, prepare_only=a.prepare_only,
         think_route=a.thinking == "route", route_far=a.route_far, calibrator=Path(a.calibrator) if a.calibrator else None,
         route_residual=a.route_residual, frame=a.frame, rewrite=a.rewrite, compile_delta=a.compile_delta,
-        gates=not a.no_gates, deadline=a.deadline, deep_margin=a.deep_margin,
+        gates=not a.no_gates, deadline=a.deadline, deep_margin=a.deep_margin, slots=a.slots,
     )
     try:
         summary = run(cfg)
@@ -224,8 +224,52 @@ def cmd_audit(a) -> None:
         print(f"saved {KNOWN_DESCS}")
     known = load_known()
     for b, biz in loaded.items():
-        res = audit(biz, build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})[0], known)
+        res = audit(biz, build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()}, biz.slots)[0], known)
         print(f"{b} {res.level:7s} {res.note()}")
+
+
+def cmd_slots(a) -> None:
+    from datamate.ingest import load_business
+    from datamate.slots.base import ORDER, disk_rebuild, resolve_slots, run_slots
+
+    split_dir = Path(a.data_root) / a.split
+    rulebook = (split_dir / "rulebook.md").read_text(encoding="utf-8")
+    shops = a.biz or sorted(p.name for p in (split_dir / "data").iterdir() if p.is_dir())
+    enabled = ORDER if a.slots == "all" else tuple(a.slots.split(","))
+    gen = None
+    if not a.dry_run:
+        from datamate.agent.llm_local import LocalLLM
+
+        llm = LocalLLM(a.base_url, a.model, max_tokens=a.think_max_tokens, enable_thinking=a.thinking == "on")
+
+        def gen(system, parts):  # thinking cut empty: the same question with thinking off (as pipeline._think)
+            r = llm.generate(system, parts, [], temperature=0.0, seed=0)
+            if not r.strip() and getattr(r, "finish_reason", None) == "length":
+                r = llm.without_thinking().generate(system, parts, [], temperature=0.0, seed=0)
+            return r
+    if a.mutate:
+        from datamate.eval.mutate import SLOT_MODES, run_mutations, slot_steps
+
+        if a.split != "train" or gen is None:
+            raise SystemExit("--mutate needs the train split and a model (no --dry-run)")
+        modes = SLOT_MODES if a.mutate == "all" else a.mutate.split(",")
+        rep = run_mutations(Path(a.data_root), modes, a.biz or None, after=slot_steps(gen, rulebook, enabled))
+        print(json.dumps({m: {k: r[k] for k in ("exact", "matched", "names_kept", "by_check", "skipped", "misses")} for m, r in rep.items()},
+                         ensure_ascii=False, indent=1))
+        return
+    for b in shops:
+        biz = load_business(split_dir, b, Path(a.cache_dir))
+        if gen is None:
+            _, record = run_slots(biz, rulebook, None, disk_rebuild(split_dir, b, Path(a.cache_dir)), enabled)
+        else:
+            resolve_slots(biz, split_dir, Path(a.cache_dir), rulebook, gen, a.model, enabled)
+            from datamate.ingest.business import slots_path
+
+            record = json.loads(slots_path(Path(a.cache_dir), a.split, b).read_text(encoding="utf-8"))["record"]
+        fired = {k: r for k, r in record.items() if r.get("trigger")}
+        print(f"{b}: " + ("no gap" if not fired else ""))
+        for k, r in fired.items():
+            print(f"  {k}: {r['result']}  trigger: {r['trigger'][:160]}" + (f"\n    fill: {json.dumps(r['fill'], ensure_ascii=False)}" if r.get("fill") else ""))
 
 
 def cmd_gate(a) -> None:
@@ -331,6 +375,8 @@ def main(argv=None) -> None:
     s.add_argument("--deep-margin", type=float, default=3600.0,
                    help="seconds before --deadline from which no question goes to the deep tier")
     s.add_argument("--no-gates", action="store_true", help="switch off the per-question decision gates (agent/gates.py)")
+    s.add_argument("--slots", default="all", help="shop conventions the model fills before the store is built (slots/): "
+                   "all | none | comma-separated names (order_key,status_text,name_map,line_amount)")
     s.add_argument("--calibrator", help="JSON from `datamate calibrate`: answers below its p_correct threshold abstain")
     s.add_argument("--effort", default="medium", help="Claude effort level; Ollama reasoning_effort when --thinking on")
     s.add_argument("--concurrency", type=int, default=4)
@@ -440,6 +486,17 @@ def main(argv=None) -> None:
     s.add_argument("--fit", action="store_true", help="train only: rebuild assets/readme_roles.json from the train READMEs")
     s.set_defaults(func=cmd_audit)
 
+    s = sub.add_parser("slots", help="shop conventions the model fills (slots/): triggers, fills and checks per shop")
+    s.add_argument("--split", default="public_test")
+    s.add_argument("--biz", nargs="*")
+    s.add_argument("--dry-run", action="store_true", help="triggers only, no model")
+    s.add_argument("--slots", default="all")
+    s.add_argument("--base-url", default="http://localhost:11434/v1")
+    s.add_argument("--model", default="qwen3.5-9b-24k")
+    s.add_argument("--thinking", choices=["on", "off"], default="off")
+    s.add_argument("--think-max-tokens", type=int, default=8192)
+    s.add_argument("--mutate", help="train only: all | comma-separated slot modes of eval/mutate.py; contracts with the slots on")
+    s.set_defaults(func=cmd_slots)
     s = sub.add_parser("gate", help="replay the per-question decision gates on a run's logs against gold (measure only)")
     s.add_argument("run", help="run directory (logs/)")
     s.add_argument("--gold", default="data/train/answers.jsonl")

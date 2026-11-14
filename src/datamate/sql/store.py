@@ -18,11 +18,11 @@ import pandas as pd
 from datamate.canon import build_orders, build_sales
 from datamate.facts import Facts, build_facts
 from datamate.ingest import load_business, load_calendar
-from datamate.ingest.business import INGEST_VERSION, roles_path, status_path
+from datamate.ingest.business import INGEST_VERSION, roles_path, slots_path, status_path
 from datamate.sql.dims import entity_dims
 from datamate.text import fold
 
-STORE_VERSION = 14
+STORE_VERSION = 15
 
 BASE_MACROS = [
     "create macro round_half_up(x, n) as cast(round(cast(x as decimal(38, 10)), n) as double)",
@@ -308,7 +308,7 @@ def _write_facts(con, f: Facts, sales: pd.DataFrame) -> None:
 
 
 def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, dict[str, str]],
-                calendar: pd.DataFrame | None = None, facts: Facts | None = None) -> None:
+                calendar: pd.DataFrame | None = None, facts: Facts | None = None, slots: dict | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.unlink(missing_ok=True)
@@ -319,7 +319,7 @@ def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, di
         _write(con, "calendar", calendar, "date")
     for name, df in tables.items():
         _write(con, f"raw_{_slug(name)}", df)
-    sales, _ = build_sales(tables, roles)
+    sales, _ = build_sales(tables, roles, slots)
     if sales is not None:
         _write(con, "sales_all", sales, "date")
         con.execute(SALES_VIEW)
@@ -368,7 +368,8 @@ def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, di
 def _labels_tag(cache_dir: Path, split: str, biz_id: str) -> str:
     """Saved model answers change the tables, so they name the store too."""
     ingest = Path(cache_dir) / "ingest"
-    saved = [p.read_bytes() for p in (status_path(ingest, split, biz_id), roles_path(ingest, split, biz_id)) if p.exists()]
+    saved = [p.read_bytes() for p in (status_path(ingest, split, biz_id), roles_path(ingest, split, biz_id),
+                                      slots_path(ingest, split, biz_id)) if p.exists()]
     return f"_{hashlib.sha1(b''.join(saved)).hexdigest()[:8]}" if saved else ""
 
 
@@ -382,7 +383,8 @@ def ensure_store(split_dir: Path, biz_id: str, cache_dir: Path, rebuild: bool = 
     if rebuild or not path.exists():
         biz = load_business(split_dir, biz_id, Path(cache_dir) / "ingest")
         roles = {n: ti.roles for n, ti in biz.info.items()}
-        build_store(path, biz.tables, roles, load_calendar(split_dir), build_facts(biz, build_sales(biz.tables, roles)[0]))
+        build_store(path, biz.tables, roles, load_calendar(split_dir), build_facts(biz, build_sales(biz.tables, roles, biz.slots)[0]),
+                    biz.slots)
     return path
 
 

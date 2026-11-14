@@ -26,6 +26,7 @@ from datamate.agent.judge import doubt, judge_messages, parse_verdict, retry_not
 from datamate.agent.lint import frame_advice, grain_advice, ready_terms, term_advice
 from datamate.agent.sandbox import ExecPool, name_index
 from datamate.agent.statuses import resolve_statuses
+from datamate.slots.base import ORDER as SLOT_ORDER, resolve_slots
 from datamate.agent.vote import answer_key, decide
 from datamate.canon import build_sales
 from datamate.facts import build_facts
@@ -33,6 +34,7 @@ from datamate.eval.scorer import read_jsonl, score
 from datamate.eval.semantic import CHECKS, is_gated
 from datamate.fast import fast_answer
 from datamate.ingest import load_business, load_calendar
+from datamate.ingest.business import slots_path
 from datamate.ingest.trust import assess
 from datamate.ingest.schema_card import schema_card
 from datamate.postprocess import Expect, check_answer, date_window, expect_answer, finalize, fit_money, fit_month, invariants
@@ -109,6 +111,7 @@ class RunConfig:
     deep_margin: float = 3600.0
     frame: bool = False  # print the question's frame (agent/frame.py) in the prompt
     rewrite: str = "always"  # always | residual: the LLM rewrite only when the rule-cleaned question leaves unexplained words
+    slots: str = "all"  # shop conventions the model fills before the store is built (slots/): all | none | a,b (slot names)
 
 
 def _pandas_shadow(text: str, hints: list[str]) -> tuple[str, str] | None:
@@ -436,7 +439,9 @@ def _samples(llm, q: dict, pool, system: str, user_parts: list[str], text: str, 
         sample = {"seed": cfg.seed + s, "temperature": temperature, "attempts": []}
         out = {"result": None, "error": "not run", "stdout": ""}
         contract = None  # the primitive's answer, when a check found the query disagrees with it
-        for attempt in range(1 + cfg.repair):
+        tries = 1 + cfg.repair
+        attempt = 0
+        while attempt < tries:
             try:
                 text_reply = _generate(llm, cfg, system, user_parts, history, temperature=temperature, seed=cfg.seed + s)
             except LLMUnavailable:
@@ -471,8 +476,11 @@ def _samples(llm, q: dict, pool, system: str, user_parts: list[str], text: str, 
             contract = out.get("contract") or contract
             if out["error"] is None and not (out.get("warning") and attempt < cfg.repair):
                 break
+            attempt += 1
             if code is None and not text_reply.strip() and getattr(text_reply, "finish_reason", None) == "length" \
                     and hasattr(llm, "without_thinking"):
+                if attempt == tries and tries == 1 + cfg.repair:  # the repair round was the cut one: one more, once (train: 8)
+                    tries += 1
                 llm = llm.without_thinking()  # thinking ate the budget: the same budget again would be cut again
                 continue
             msg = engine.repair_message(out) if out["error"] else engine.check_message(out["warning"])
@@ -610,6 +618,8 @@ def run(cfg: RunConfig) -> dict:
     by_biz: dict[str, list[dict]] = {}
     capabilities: dict[str, dict] = {}
     audits: dict[str, dict] = {}
+    slot_fills: dict[str, dict] = {}
+    enabled = SLOT_ORDER if cfg.slots == "all" else () if cfg.slots == "none" else tuple(cfg.slots.split(","))
     known_descs = load_known()
     for q in todo:
         by_biz.setdefault(q["business_id"], []).append(q)
@@ -618,6 +628,7 @@ def run(cfg: RunConfig) -> dict:
         def save(rec: dict) -> None:
             with lock:
                 final = {k: v for k, v in rec["final"].items() if not k.startswith("_")}
+                rec["slots"] = slot_fills.get(rec["business_id"])
                 sub.write(json.dumps({"id": rec["id"], **final}, ensure_ascii=False) + "\n")
                 sub.flush()
                 (out_dir / "logs" / f"{rec['id']}.json").write_text(
@@ -630,8 +641,14 @@ def run(cfg: RunConfig) -> dict:
                 biz = load_business(split_dir, biz_id, cfg.cache_dir)
             if resolve_statuses(biz, cfg.cache_dir, ask):
                 biz = load_business(split_dir, biz_id, cfg.cache_dir)
+            if resolve_slots(biz, split_dir, cfg.cache_dir, rulebook, lambda system, parts: think(system, parts, []),
+                             cfg.model, enabled):
+                biz = load_business(split_dir, biz_id, cfg.cache_dir)
+            saved = slots_path(cfg.cache_dir, split_dir.name, biz_id)
+            slot_fills[biz_id] = json.loads(saved.read_text(encoding="utf-8")).get("applied", {}) if saved.exists() else {}
+            (out_dir / "slots.json").write_text(json.dumps(slot_fills, ensure_ascii=False, indent=1), encoding="utf-8")
             roles = {n: ti.roles for n, ti in biz.info.items()}
-            sales, sales_desc = build_sales(biz.tables, roles)
+            sales, sales_desc = build_sales(biz.tables, roles, biz.slots)
             trust = assess(biz, sales)
             sales_desc += f"\n{trust.note()}" if trust.problems else ""
             shop_off = frozenset(c.name for c in CHECKS) if trust.states["revenue"] == "suspect" else off

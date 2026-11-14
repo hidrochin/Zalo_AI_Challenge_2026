@@ -14,6 +14,7 @@ from datamate.ingest.parsers import _is_null, is_explicit_date, parse_date, pars
 from datamate.ingest.readme import Readme, parse_readme, unit_rules
 from datamate.ingest.roles import assign_roles, is_known_status, normalize_status
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
+from datamate.slots.apply import order_key_roles
 from datamate.text import fold
 
 INGEST_VERSION = 23  # 23: rulebook §8 fill of first-row-only order columns and dated blocks; 22: README role order_goods
@@ -50,6 +51,7 @@ class Business:
     load_seconds: float = 0.0
     version: int = INGEST_VERSION
     extra_roles: dict[str, dict[str, str]] = field(default_factory=dict)  # table -> column -> role, from the model
+    slots: dict[str, dict] = field(default_factory=dict)  # shop conventions the model filled (slots/), applied by canon
 
 
 def load_calendar(split_dir: Path) -> pd.DataFrame:
@@ -63,6 +65,10 @@ def load_business(split_dir: Path, biz_id: str, cache_dir: Path | None = None, r
     cache = Path(cache_dir) / split_dir.name / f"{biz_id}.pkl" if cache_dir else None
     roles = roles_path(cache_dir, split_dir.name, biz_id) if cache_dir else None
     extra = json.loads(roles.read_text(encoding="utf-8")) if roles and roles.exists() else {}
+    saved = slots_path(cache_dir, split_dir.name, biz_id) if cache_dir else None
+    slots = json.loads(saved.read_text(encoding="utf-8")).get("applied", {}) if saved and saved.exists() else {}
+    for t, r in order_key_roles(slots).items():  # the order code the model named is a role like any other
+        extra = {**extra, t: {**extra.get(t, {}), **r}}
     biz = None
     if cache and cache.exists() and not rebuild:
         with cache.open("rb") as f:
@@ -78,11 +84,16 @@ def load_business(split_dir: Path, biz_id: str, cache_dir: Path | None = None, r
     labels = status_path(cache_dir, split_dir.name, biz_id) if cache_dir else None
     if labels and labels.exists():
         apply_status(biz, json.loads(labels.read_text(encoding="utf-8")))
+    biz.slots = {k: v for k, v in slots.items() if k != "order_key"}
     return biz
 
 
 def status_path(cache_dir: Path, split: str, biz_id: str) -> Path:
     return Path(cache_dir) / split / f"{biz_id}.status.json"
+
+
+def slots_path(cache_dir: Path, split: str, biz_id: str) -> Path:
+    return Path(cache_dir) / split / f"{biz_id}.slots.json"
 
 
 def roles_path(cache_dir: Path, split: str, biz_id: str) -> Path:

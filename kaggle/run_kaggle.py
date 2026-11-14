@@ -32,7 +32,7 @@ MODELS = [
     ("Qwen/Qwen3.5-9B", ENV, ["--dtype", "half", "--reasoning-parser", "qwen3", "--limit-mm-per-prompt", '{"image":0,"video":0}',
                               "--max-model-len", "32768"], True),
 ]
-STAGES = os.environ.get("DM_STAGES", "public").split(",")  # probe | smoke | public | holdout | dev120 | dev120_oracle | train; push.sh sets it
+STAGES = os.environ.get("DM_STAGES", "public").split(",")  # probe | smoke | public | holdout | train_check | dev120 | dev120_oracle | train; push.sh sets it
 ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql; push.sh sets it
 ARGS = os.environ.get("DM_ARGS", "")  # extra `datamate run` flags (--catalog compiled --shop-views --judge unans); push.sh sets it
 ONLY = os.environ.get("DM_MODEL", "")  # serve only this model (else the list in order); push.sh sets it
@@ -210,6 +210,8 @@ def run_stage(name, args, n_expected, model, proc, max_restarts=3):
             f.write(p.stdout)
         n = sum(1 for _ in open(sub)) if os.path.exists(sub) else 0
         log(f"stage {name}: {n}/{n_expected} answered after {time.time() - t0:.0f}s")
+        # each shop's slot fills with their triggers, model replies and checks (the run dir keeps only the applied ones)
+        subprocess.run(f"mkdir -p {OUT}/slots && cp {PROJ}/cache/ingest/*/*.slots.json {OUT}/slots/ 2>/dev/null", shell=True)
         if n >= n_expected:
             return proc
         log_host_state(f"stage {name} stopped early")
@@ -281,6 +283,10 @@ def main():
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -5")
         n = sum(1 for ln in open(f"{PROJ}/assets/holdout.txt") if ln.strip())
         proc = run_stage("holdout", "--split train --ids-file assets/holdout.txt", n, model, proc)
+    if "train_check" in STAGES:  # 106 train ids (lint and table cases + controls): no right answer may turn wrong
+        sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -5")
+        n = sum(1 for ln in open(f"{PROJ}/assets/train_check.txt") if ln.strip())
+        proc = run_stage("train_check", "--split train --ids-file assets/train_check.txt", n, model, proc)
     if "dev120" in STAGES:
         n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
         proc = run_stage("dev120", "--split train --ids-file assets/dev120.txt", n, model, proc)

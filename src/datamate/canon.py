@@ -12,6 +12,7 @@ import re
 import pandas as pd
 
 from datamate.ingest.roles import header_key
+from datamate.slots.apply import apply_lines, apply_tables
 from datamate.sql.dims import with_entity_keys
 from datamate.text import fold
 
@@ -62,12 +63,15 @@ def _role_cols(roles: dict[str, str]) -> dict[str, str]:
 _PLAIN_ROLES = (None, "order_goods", "order_total", "pay_method", "channel", "line_cost")
 _JUNK = re.compile(r"hinh anh|barcode|ma vach|vi tri|trong luong|mo ta|mau ghi chu|url|dinh muc|ton (lon|nho) nhat"
                    r"|lien quan|thuoc tinh|^stt$|^so thu tu$|id cua hang|ma chi nhanh|^tao luc$|ban truc tiep|bao hanh")
+# the sales and order tables keep every column but pictures and links: in a shop of an unseen trade, warranty or an
+# attribute is data (a catalogue's description, row number or store id is noise only in the catalogue)
+_LINE_JUNK = re.compile(r"hinh anh|barcode|ma vach|url")
 
 
-def _extra_cols(df: pd.DataFrame, roles: dict[str, str], taken) -> list[str]:
+def _extra_cols(df: pd.DataFrame, roles: dict[str, str], taken, junk: re.Pattern = _JUNK) -> list[str]:
     """Columns of df that carry no canonical role, are not already present and are not catalogue noise."""
     return [c for c in df.columns if roles.get(c) in _PLAIN_ROLES and not str(c).endswith("__norm") and c not in taken
-            and not str(c).startswith("_") and not _JUNK.search(header_key(c))]
+            and not str(c).startswith("_") and not junk.search(header_key(c))]
 
 
 def _has_time(s: pd.Series) -> bool:
@@ -213,10 +217,26 @@ def _order_level(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict
     return None
 
 
-def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]]) -> tuple[pd.DataFrame | None, str]:
-    """Return (sales_lines frame or None, one-paragraph description for the prompt)."""
-    cands = [n for n, r in roles_by_table.items()
-             if "line_amount" in r.values() and n in tables and not re.search(r"nhap|import|ncc", fold(n))]
+def _sales_candidates(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]]) -> list[str]:
+    return [n for n, r in roles_by_table.items()
+            if "line_amount" in r.values() and n in tables and not re.search(r"nhap|import|ncc", fold(n))]
+
+
+def line_table(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]]) -> str | None:
+    """The table build_sales reads its lines from (the order table itself for a shop without line items)."""
+    cands = _sales_candidates(tables, roles_by_table)
+    if not cands:
+        level = _order_level(tables, roles_by_table)
+        return level[2] if level else None
+    return max(cands, key=lambda n: (("product_name" in roles_by_table[n].values()) or ("product_id" in roles_by_table[n].values()), len(tables[n])))
+
+
+def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]],
+                slots: dict | None = None) -> tuple[pd.DataFrame | None, str]:
+    """Return (sales_lines frame or None, one-paragraph description for the prompt). `slots`: the shop's conventions the
+    model filled (slots/apply.py), applied on the way."""
+    tables, slot_notes = apply_tables(tables, slots)
+    cands = _sales_candidates(tables, roles_by_table)
     level = None if cands else _order_level(tables, roles_by_table)
     if level:
         tables, roles_by_table, name = level
@@ -224,7 +244,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     if not cands:
         return None, ("sales_lines(): not built for this shop (no table with line amounts). Compute sales from the T tables directly; "
                       "this does not make sales questions unanswerable.")
-    line_t = max(cands, key=lambda n: (("product_name" in roles_by_table[n].values()) or ("product_id" in roles_by_table[n].values()), len(tables[n])))
+    line_t = line_table(tables, roles_by_table)
     lroles = roles_by_table[line_t]
     lr = _role_cols(lroles)
     L = tables[line_t]
@@ -232,7 +252,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     sources = [f"T['{line_t}']"]
     if "status" in lr and f"{lr['status']}__norm" in L.columns:
         out["status"] = L[f"{lr['status']}__norm"]
-    extras = _extra_cols(L, lroles, out.columns)
+    extras = _extra_cols(L, lroles, out.columns, _LINE_JUNK)
     for c in extras:
         out[c] = L[c]
 
@@ -259,7 +279,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             for m in missing:
                 if m in rc:
                     cols[m] = H[f"{rc[m]}__norm"] if m == "status" and f"{rc[m]}__norm" in H.columns else H[rc[m]]
-            for c in _extra_cols(H, hroles, set(out.columns) | set(cols)):
+            for c in _extra_cols(H, hroles, set(out.columns) | set(cols), _LINE_JUNK):
                 cols[c] = H[c]
             hdr = pd.DataFrame(cols).drop_duplicates("order_id")
             out = out.merge(hdr, on="order_id", how="left")
@@ -348,6 +368,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     out["date"] = pd.to_datetime(out["order_date"], errors="coerce").dt.normalize()
     if "status" not in out.columns:  # no status column: every order is completed
         out["status"] = "hoàn thành"
+    slot_notes += apply_lines(out, slots)
     bad = out["status"].isin(["huỷ", "trả hàng"])
     qty_col = "qty" if "qty" in out.columns else ("qty_base" if "qty_base" in out.columns else None)
     if qty_col:  # returns are negative quantities; a line without a quantity is no goods (a discount or fee line)
@@ -423,6 +444,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             "`unit` = the unit the line was sold in; `base_unit` = the product's base unit, the unit of `qty_base` "
             "('bán được bao nhiêu lon' = sum(qty_base) of goods whose base_unit is lon, also lines sold by the case). "
             "orders() rolls these lines up to one row per order.")
+    if slot_notes:
+        desc += "\nShop conventions applied (read from the README and the rulebook): " + "; ".join(slot_notes) + "."
     if flagged:
         desc += f"\nCheck before ranking customers: {', '.join(flagged)} hold(s) over 5% of orders, unusual for one customer."
     return out, desc

@@ -150,6 +150,38 @@ def test_cut_thinking_retries_without_thinking():
     assert llm.plain.calls == [[]]  # the empty cut reply is not sent back as a turn
 
 
+def test_cut_repair_round_gets_one_more_try_without_thinking():
+    """Train route run: 8 abstains whose first SQL failed and whose repair thinking was cut empty."""
+    from datamate.agent.llm_local import Reply
+    from datamate.agent.pipeline import _samples
+    from datamate.postprocess import Expect
+
+    class FakeLLM:
+        def __init__(self, thinking, script):
+            self.enable_thinking, self.script = thinking, script
+
+        def without_thinking(self):
+            return FakeLLM(False, self.script)
+
+        def generate(self, system, parts, history, temperature, seed, max_tokens=None):
+            text, finish = self.script.pop(0)
+            r = Reply(text)
+            r.finish_reason = finish
+            return r
+
+    class Pool:
+        def run(self, code, as_of, shadow, **kw):
+            if "bad" in code:
+                return {"result": None, "error": "Binder Error: no column bad", "stdout": ""}
+            return {"result": {"type": "number", "answer": 7}, "error": None, "stdout": ""}
+
+    script = [("```sql\nselect bad\n```", "stop"), ("", "length"), ("```sql\nselect 7 as answer\n```", "stop")]
+    s = _samples(FakeLLM(True, script), {"as_of_date": "2025-01-31"}, Pool(), "sys", ["q"], "q", Expect(), None, {},
+                 frozenset(), [], False, RunConfig(engine="sql"))
+    assert [a["finish_reason"] for a in s[0]["attempts"]] == ["stop", "length", "stop"]
+    assert s[0]["result"] == {"type": "number", "answer": 7}
+
+
 def test_think_retries_a_cut_compile_reply_without_thinking():
     from datamate.agent.llm_local import Reply
     from datamate.agent.pipeline import _think
