@@ -1,0 +1,10 @@
+{
+ "max": {
+  "abstain": 0.0423728813559322,
+  "reads_raw": 0.1440677966101695
+ },
+ "shops": 30,
+ "runs": [
+  "outputs/kaggle/result_route_train/out/train"
+ ]
+}

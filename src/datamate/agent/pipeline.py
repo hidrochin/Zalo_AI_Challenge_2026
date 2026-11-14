@@ -13,15 +13,17 @@ from typing import NamedTuple
 
 from tqdm import tqdm
 
+from datamate.agent import gates
 from datamate.agent.hints import time_hints
 from datamate.agent.prompt import build_system, business_part, check_message, extract_code, question_part, repair_message
 from datamate.agent.retrieve import ExampleBank
+from datamate.audit import audit, load_known
 from datamate.agent.calibrate import features, load as load_calibrator, p_correct, tested_names
 from datamate.agent.columns import resolve_columns
 from datamate.agent.frame import Frame, build_frame, consistency, rulebook_words
 from datamate.capabilities import Capabilities, capability_of, card_part as caps_card, profile
 from datamate.agent.judge import doubt, judge_messages, parse_verdict, retry_note, solver_text
-from datamate.agent.lint import grain_advice, ready_terms, term_advice
+from datamate.agent.lint import frame_advice, grain_advice, ready_terms, term_advice
 from datamate.agent.sandbox import ExecPool, name_index
 from datamate.agent.statuses import resolve_statuses
 from datamate.agent.vote import answer_key, decide
@@ -85,6 +87,9 @@ class RunConfig:
     # catalog advice, contract checks or rulebook lints: the model computes every business term from the rulebook itself;
     # "compiled" = primitives plus the macros the model writes from the split's rulebook at the start of the run (sql/compile.py)
     catalog: str = "full"
+    # catalog "delta": also compile macros for the new/changed rules. Off by default: on public 4/176 answers called one,
+    # none right, for 21-28 min of prepare; the delta lines still drive the router and the per-question rulebook lines
+    compile_delta: bool = False
     shop_views: bool = False  # SQL engine: the model writes views per shop from its README and raw tables (sql/shopviews.py)
     context: str = "base"  # base | rich (SQL): card with keys, missing facts and macro SQL; rulebook lines per question; plan lines
     judge: str = "off"  # off | unans | all: a second agent checks UNANSWERABLE verdicts (unans) or every verdict (all)
@@ -96,7 +101,12 @@ class RunConfig:
     think_route: bool = False
     route_far: float = 0.75  # nearest train question of another shop below this similarity = unfamiliar (~12% of train, LOBO)
     calibrator: Path | None = None  # JSON from `datamate calibrate`: answers whose p_correct is below its threshold abstain
+    gates: bool = True  # per-question decision gates measured on train (agent/gates.py)
     route_residual: int = 3  # router: this many unexplained question words (frame residual) send a question deep
+    # wall clock (epoch seconds; the organizers' 6 h include model loading): after `deadline` questions are not solved
+    # (a missing answer is an abstain), after `deadline - deep_margin` no question goes to the deep tier
+    deadline: float | None = None
+    deep_margin: float = 3600.0
     frame: bool = False  # print the question's frame (agent/frame.py) in the prompt
     rewrite: str = "always"  # always | residual: the LLM rewrite only when the rule-cleaned question leaves unexplained words
 
@@ -151,6 +161,18 @@ def _generate(llm, cfg: "RunConfig", *args, **kw) -> str:
             time.sleep(delay)
             delay = min(delay * 2, 120)
     raise AssertionError("unreachable")
+
+
+def _think(llm, cfg: "RunConfig", system: str, parts: list[str], history: list[dict]) -> str:
+    """A one-off agent step (rulebook macros, shop views), greedy with the deep budget. A reply that thinking cut empty
+    (finish 'length') is asked again with thinking off: the public rulebook's 9 compile sections all came back empty."""
+    reply = _generate(llm, cfg, system, parts, history, temperature=0.0, seed=cfg.seed, max_tokens=cfg.think_max_tokens)
+    if not reply.strip() and getattr(reply, "finish_reason", None) == "length" and hasattr(llm, "without_thinking"):
+        cut = reply
+        reply = _generate(llm.without_thinking(), cfg, system, parts, history, temperature=0.0, seed=cfg.seed,
+                          max_tokens=cfg.think_max_tokens)
+        reply.cut = cut  # the compile record keeps why the first reply was empty
+    return reply
 
 
 class DummyLLM:
@@ -260,7 +282,8 @@ def route_reasons(text: str, rules: list[str], off: frozenset[str], delta: froze
     rules: the rulebook lines the question's words point to; delta: the lines this rulebook adds or changes;
     frame: its capability state (suspect: ingest may have missed the fact) and its unexplained words."""
     out = []
-    if is_gated(text, off) or set(rules) & delta:
+    lines = {r.split("] ", 1)[1] if r.startswith("[") and "] " in r else r for r in rules}  # pick_rules: "[section] line"
+    if is_gated(text, off) or lines & delta:
         out.append("changed rule")
     if suspect:
         out.append("suspect sales")
@@ -291,8 +314,14 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
                    cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset(),
                    macros=(), rulebook: str = "", oracle_note: str | None = None, deep_llm=None,
                    delta: frozenset[str] = frozenset(), suspect: bool = False, calibrator: dict | None = None,
-                   caps: Capabilities | None = None, revenue_total: float | None = None) -> dict:
+                   caps: Capabilities | None = None, revenue_total: float | None = None, shop: str = "clean") -> dict:
     t0 = time.time()
+    if cfg.deadline and t0 > cfg.deadline:
+        return {"id": q["id"], "business_id": q["business_id"], "question": q["question"], "as_of_date": q["as_of_date"],
+                "final": {"type": "abstain"}, "skipped": "deadline", "samples": [], "elapsed": 0.0}
+    late = bool(cfg.deadline and t0 > cfg.deadline - cfg.deep_margin)
+    if late:
+        deep_llm = None  # late in the run: the normal tier only (no deep route, escalation or judge)
     engine = ENGINES[cfg.engine]
     vocab = rulebook_words(rulebook) | rulebook_words(" ".join(getattr(pool, "units", ())))  # and the shop's units
 
@@ -332,7 +361,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
         route = {"tier": "deep" if reasons else "normal", "reasons": reasons}
 
     def attempt(model) -> tuple[list[dict], dict, dict, str | None]:
-        samples = _samples(model, q, pool, system, user_parts, text, expect, shadow, extra, terms, macros, full, cfg)
+        samples = _samples(model, q, pool, system, user_parts, text, expect, shadow, extra, terms, macros, full, cfg, frame)
         final, vote = decide([s["result"] for s in samples], cfg.min_share, cfg.unans_share)
         hedge = next((h for s in samples for a in s["attempts"] for h in [doubt(a.get("reply"))] if h), None)
         return samples, final, vote, None if final["type"] in ("unanswerable", "abstain") else hedge
@@ -346,7 +375,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
             route = {"tier": "escalated", "reasons": why, "agree": answer_key(final) == answer_key(first["final"])
                      if "abstain" not in (final["type"], first["final"]["type"]) else None, "first": first}
     judged = None
-    deep = route is None or route["tier"] != "normal"  # the judge is part of the deep tier
+    deep = not late and (route is None or route["tier"] != "normal")  # the judge is part of the deep tier
     if deep and cfg.judge != "off" and (final["type"] == "unanswerable" or hedge
                                         or (cfg.judge == "all" and final["type"] != "abstain")):
         final, judged = _judge(q, final, samples, deep_llm or llm, pool, system, user_parts, text, expect, rulebook, cfg,
@@ -356,14 +385,31 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
         "final": finalize(final), "vote": vote, "pre": pre, "expect": vars(expect), "examples": [e["id"] for e in examples],
         "near": round(near, 3), "hints": hints, "samples": samples, "judge": judged, "route": route,
         "frame": frame.to_json(), "consistency": consistency(frame, final_code(samples)),
-        "magnitude": magnitude(final, expect, revenue_total),
+        "magnitude": magnitude(final, expect, revenue_total), "audit": shop,
     }
     if calibrator and rec["final"]["type"] != "abstain":
         rec["p_correct"] = p = p_correct(calibrator, features(rec, tested_names()))
         if p < calibrator["threshold"]:
             rec["calibrated_from"], rec["final"] = rec["final"], {"type": "abstain"}
+    if cfg.gates:
+        gates.apply(rec, shop)
     rec["elapsed"] = round(time.time() - t0, 2)
     return rec
+
+
+def log_summary(rec: dict) -> dict:
+    """The fields the organizers' Docker guideline asks of each question's log (section 3.3), first in the file: the final
+    answer, elapsed_ms, and every executed query with its output, in order (the full attempts, with the model's
+    thinking, follow under `samples`)."""
+    runs = [a for s in rec.get("samples") or [] for a in s.get("attempts") or [] if a.get("code")]
+    retry = (rec.get("judge") or {}).get("retry") or {}
+    if retry.get("code"):
+        runs.append(retry)
+    final = {k: v for k, v in rec["final"].items() if not k.startswith("_")}
+    thinking = [a.get("thinking") or "" for s in rec.get("samples") or [] for a in s.get("attempts") or []]
+    return {"id": rec["id"], "answer": final, "elapsed_ms": int(round(rec.get("elapsed", 0) * 1000)),
+            "thinking": thinking if any(thinking) else None, "code": [a["code"] for a in runs],
+            "output": [a.get("result") if a.get("error") is None else {"error": a["error"]} for a in runs]}
 
 
 def final_code(samples: list[dict]) -> str | None:
@@ -380,7 +426,7 @@ def magnitude(final: dict, expect: Expect, revenue_total: float | None) -> float
 
 
 def _samples(llm, q: dict, pool, system: str, user_parts: list[str], text: str, expect: Expect, shadow, extra: dict,
-             terms: frozenset[str], macros, full: bool, cfg: RunConfig) -> list[dict]:
+             terms: frozenset[str], macros, full: bool, cfg: RunConfig, frame: Frame | None = None) -> list[dict]:
     """cfg.samples executed samples of one model (greedy first), each with its repair round."""
     engine = ENGINES[cfg.engine]
     samples = []
@@ -402,7 +448,8 @@ def _samples(llm, q: dict, pool, system: str, user_parts: list[str], text: str, 
             code = engine.extract(text_reply)
             advice = None
             if code and attempt == 0 and cfg.repair and full:
-                advice = term_advice(text, code, terms, cfg.engine, macros) or (grain_advice(text, code) if cfg.engine == "pandas" else None)
+                advice = term_advice(text, code, terms, cfg.engine, macros) or (grain_advice(text, code) if cfg.engine == "pandas" else None) \
+                    or (frame_advice(text, code, frame) if cfg.engine == "sql" else None)
             if code is None:
                 out = {"result": None, "error": engine.no_code, "stdout": ""}
             elif advice:  # one rewrite, never a block: the second attempt runs as written
@@ -424,6 +471,10 @@ def _samples(llm, q: dict, pool, system: str, user_parts: list[str], text: str, 
             contract = out.get("contract") or contract
             if out["error"] is None and not (out.get("warning") and attempt < cfg.repair):
                 break
+            if code is None and not text_reply.strip() and getattr(text_reply, "finish_reason", None) == "length" \
+                    and hasattr(llm, "without_thinking"):
+                llm = llm.without_thinking()  # thinking ate the budget: the same budget again would be cut again
+                continue
             msg = engine.repair_message(out) if out["error"] else engine.check_message(out["warning"])
             history += [{"role": "assistant", "content": text_reply}, {"role": "user", "content": msg}]
         if out["result"] is not None and out.get("warning") and out.get("sticky", True):
@@ -521,7 +572,7 @@ def run(cfg: RunConfig) -> dict:
     rich = cfg.context == "rich" and cfg.engine == "sql"
 
     def think(system, parts, history):  # the one-off agent steps: rulebook macros, shop views
-        return _generate(deep_llm or llm, cfg, system, parts, history, temperature=0.0, seed=cfg.seed, max_tokens=cfg.think_max_tokens)
+        return _think(deep_llm or llm, cfg, system, parts, history)
 
     tested = frozenset(m for m in MACROS if m not in PRIMITIVES)  # the hand-written rule macros of the stores
     hidden = off & tested if delta else tested  # what a compiled macro may not call
@@ -539,7 +590,7 @@ def run(cfg: RunConfig) -> dict:
     elif delta:
         changes = rule_delta(rulebook, TRAIN_RULEBOOK.read_text(encoding="utf-8"),
                              Path(cfg.cache_dir) / split_dir.name / "rule_delta.json", ask)
-        if changes:
+        if changes and cfg.compile_delta:
             rule_macros = compile_delta(rulebook, changes, {m: MACROS[m] for m in sorted(tested)}, hidden, stores(), think,
                                         compile_cache, model=cfg.model)
         system = build_sql_system(rulebook, plan=rich, drop=hidden) + rule_note(off, replaced=True)
@@ -558,6 +609,8 @@ def run(cfg: RunConfig) -> dict:
     oracle = json.loads(Path(cfg.oracle).read_text(encoding="utf-8")) if cfg.oracle else {"notes": {}, "setup": {}}
     by_biz: dict[str, list[dict]] = {}
     capabilities: dict[str, dict] = {}
+    audits: dict[str, dict] = {}
+    known_descs = load_known()
     for q in todo:
         by_biz.setdefault(q["business_id"], []).append(q)
 
@@ -568,7 +621,7 @@ def run(cfg: RunConfig) -> dict:
                 sub.write(json.dumps({"id": rec["id"], **final}, ensure_ascii=False) + "\n")
                 sub.flush()
                 (out_dir / "logs" / f"{rec['id']}.json").write_text(
-                    json.dumps(rec, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+                    json.dumps({**log_summary(rec), **rec}, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
             bar.update(1)
 
         for biz_id in sorted(by_biz):
@@ -587,6 +640,9 @@ def run(cfg: RunConfig) -> dict:
             caps = profile(biz, trust, facts)
             capabilities[biz_id] = caps.to_json()
             (out_dir / "capabilities.json").write_text(json.dumps(capabilities, ensure_ascii=False, indent=1), encoding="utf-8")
+            shop_audit = audit(biz, sales, known_descs)
+            audits[biz_id] = shop_audit.to_json()
+            (out_dir / "audit.json").write_text(json.dumps(audits, ensure_ascii=False, indent=1, default=float), encoding="utf-8")
             revenue_total = float(sales["amount"].abs().sum()) if sales is not None and "amount" in sales else None
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
             left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
@@ -637,7 +693,7 @@ def run(cfg: RunConfig) -> dict:
                     futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook,
                                       oracle["notes"].get(q["id"]), deep_llm=deep_llm, delta=delta_lines,
                                       suspect=trust.states["revenue"] == "suspect", calibrator=calibrator, caps=caps,
-                                      revenue_total=revenue_total)
+                                      revenue_total=revenue_total, shop=shop_audit.level)
                             for q in left]
                     for f in as_completed(futs):
                         try:

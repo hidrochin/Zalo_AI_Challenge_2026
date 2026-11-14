@@ -76,7 +76,8 @@ def cmd_run(a) -> None:
         oracle=Path(a.oracle) if a.oracle else None, catalog=a.catalog, think_rewrite=a.think_rewrite,
         shop_views=a.shop_views, context=a.context, judge=a.judge, think_max_tokens=a.think_max_tokens, prepare_only=a.prepare_only,
         think_route=a.thinking == "route", route_far=a.route_far, calibrator=Path(a.calibrator) if a.calibrator else None,
-        route_residual=a.route_residual, frame=a.frame, rewrite=a.rewrite,
+        route_residual=a.route_residual, frame=a.frame, rewrite=a.rewrite, compile_delta=a.compile_delta,
+        gates=not a.no_gates, deadline=a.deadline, deep_margin=a.deep_margin,
     )
     try:
         summary = run(cfg)
@@ -193,6 +194,46 @@ def cmd_calibrate(a) -> None:
     print(f"saved {a.out}")
 
 
+def cmd_shop_gate_fit(a) -> None:
+    from datamate.agent.calibrate import fit_shop_gate
+
+    gate = fit_shop_gate([Path(r) for r in a.runs], Path(a.out))
+    print(f"{gate['shops']} train shops, highest rates {gate['max']}; saved {a.out}")
+
+
+def cmd_shop_gate(a) -> None:
+    from datamate.agent.calibrate import apply_shop_gate
+
+    flagged = apply_shop_gate(Path(a.run), json.loads(Path(a.gate).read_text(encoding="utf-8")))
+    print(f"shops whose answers now abstain: {flagged or 'none'} (rates in {Path(a.run) / 'shop_gate.json'})")
+
+
+def cmd_audit(a) -> None:
+    from datamate.audit import KNOWN_DESCS, audit, load_known, readme_roles
+    from datamate.canon import build_sales
+    from datamate.ingest import load_business
+
+    split_dir = Path(a.data_root) / a.split
+    shops = sorted(p.name for p in (split_dir / "data").iterdir() if p.is_dir())
+    loaded = {b: load_business(split_dir, b, Path(a.cache_dir)) for b in shops}
+    if a.fit:
+        if a.split != "train":
+            raise SystemExit("--fit reads the train split only")
+        KNOWN_DESCS.write_text(json.dumps(readme_roles(list(loaded.values())), ensure_ascii=False, indent=1, sort_keys=True),
+                               encoding="utf-8")
+        print(f"saved {KNOWN_DESCS}")
+    known = load_known()
+    for b, biz in loaded.items():
+        res = audit(biz, build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})[0], known)
+        print(f"{b} {res.level:7s} {res.note()}")
+
+
+def cmd_gate(a) -> None:
+    from datamate.agent.gates import measure
+
+    print(json.dumps(measure(Path(a.run), Path(a.gold)), ensure_ascii=False, indent=1))
+
+
 def cmd_export(a) -> None:
     from datamate.agent.pipeline import export_examples
 
@@ -286,6 +327,10 @@ def main(argv=None) -> None:
                    "capability, unexplained words) in the prompt")
     s.add_argument("--rewrite", choices=["always", "residual"], default="always",
                    help="residual: the LLM rewrite only when the rule-cleaned question leaves unexplained words")
+    s.add_argument("--deadline", type=float, help="epoch seconds: questions not started by then are left unanswered (abstain)")
+    s.add_argument("--deep-margin", type=float, default=3600.0,
+                   help="seconds before --deadline from which no question goes to the deep tier")
+    s.add_argument("--no-gates", action="store_true", help="switch off the per-question decision gates (agent/gates.py)")
     s.add_argument("--calibrator", help="JSON from `datamate calibrate`: answers below its p_correct threshold abstain")
     s.add_argument("--effort", default="medium", help="Claude effort level; Ollama reasoning_effort when --thinking on")
     s.add_argument("--concurrency", type=int, default=4)
@@ -312,7 +357,10 @@ def main(argv=None) -> None:
     s.add_argument("--catalog", choices=["full", "primitives", "compiled", "delta"], default="full",
                    help="SQL: full = hand-written rulebook macros; primitives = generic helpers only; compiled = generic helpers "
                         "+ macros the model writes from the split's rulebook at the start of the run; delta = full + macros "
-                        "the model writes for the rules this rulebook adds or changes against the train rulebook")
+                        "the model writes for the rules this rulebook adds or changes against the train rulebook (only with "
+                        "--compile-delta; without it delta only routes and shows those rules)")
+    s.add_argument("--compile-delta", action="store_true",
+                   help="catalog delta: compile macros for the new/changed rules (off: 0 right answers, 21-28 min prepare)")
     s.add_argument("--shop-views", action="store_true", help="SQL: the model writes views per shop from its README and raw tables")
     s.add_argument("--context", choices=["base", "rich"], default="base",
                    help="SQL: rich = keys, missing facts and macro SQL in the card, rulebook lines per question, plan lines")
@@ -376,6 +424,26 @@ def main(argv=None) -> None:
     s.add_argument("--threshold", type=float, default=0.5)
     s.add_argument("--c", type=float, default=1.0, help="inverse L2 strength of the logistic regression")
     s.set_defaults(func=cmd_calibrate)
+
+    s = sub.add_parser("shop-gate-fit", help="highest abstain / raw-table rates over the train shops of train runs")
+    s.add_argument("runs", nargs="+", help="train run directories made with the flags of the submission run")
+    s.add_argument("--out", default="assets/shop_gate.json")
+    s.set_defaults(func=cmd_shop_gate_fit)
+
+    s = sub.add_parser("shop-gate", help="abstain every answer of a shop whose rates exceed the train gate (after the run)")
+    s.add_argument("run", help="run directory (submission.jsonl + logs/)")
+    s.add_argument("--gate", default="assets/shop_gate.json")
+    s.set_defaults(func=cmd_shop_gate)
+
+    s = sub.add_parser("audit", help="gold-free shop audit (audit.py): flags and level of every shop of a split")
+    s.add_argument("--split", default="train")
+    s.add_argument("--fit", action="store_true", help="train only: rebuild assets/readme_roles.json from the train READMEs")
+    s.set_defaults(func=cmd_audit)
+
+    s = sub.add_parser("gate", help="replay the per-question decision gates on a run's logs against gold (measure only)")
+    s.add_argument("run", help="run directory (logs/)")
+    s.add_argument("--gold", default="data/train/answers.jsonl")
+    s.set_defaults(func=cmd_gate)
 
     s = sub.add_parser("build-lexicon", help="rebuild assets/vi_rhymes.txt (Telex decoder) from train text")
     s.set_defaults(func=cmd_build_lexicon)

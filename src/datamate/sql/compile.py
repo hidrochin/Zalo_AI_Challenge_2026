@@ -18,7 +18,7 @@ import duckdb
 
 from datamate.sql.invariants import compiled_problem
 
-COMPILE_VERSION = 2
+COMPILE_VERSION = 3  # 3: an empty reply cut by thinking is asked again without thinking (no cached empty compile)
 
 # What every store holds when the shop has the data (sql/store.py, facts.py). Facts only, no rule: the compiler decides
 # how the rulebook combines them.
@@ -124,8 +124,10 @@ def sections(rulebook: str) -> list[tuple[str, str]]:
 
 
 def parse_macros(reply: str, section: str = "") -> list[Macro]:
-    """Every `create macro` of the reply; a block may hold several, each after its own `-- doc:` / `-- args:` lines."""
+    """Every `create macro` of the reply; a block may hold several, each after its own `-- doc:` / `-- args:` lines.
+    A name the reply already used is dropped: a looping model wrote `phone_model_lines` 12 times in one reply."""
     out = []
+    seen = set()
     for block in _BLOCK.findall(reply):
         heads = list(_HEAD.finditer(block))
         ends = [m.start() for m in heads[1:]] + [len(block)]
@@ -145,6 +147,9 @@ def parse_macros(reply: str, section: str = "") -> list[Macro]:
                     if len(words) >= 2:
                         types[words[0]] = words[1].lower()
             doc = _DOC.search(head)
+            if m.group(1).lower() in seen:
+                continue
+            seen.add(m.group(1).lower())
             out.append(Macro(m.group(1).lower(), args, types, bool(m.group(3)), doc.group(1).strip() if doc else "",
                              body.strip().rstrip(";").strip(), section))
     return out
@@ -331,7 +336,12 @@ def _compile(asks: list[tuple[str, Callable[[list[Macro]], list[str]]]], system:
             errors = _check(new, stores, macros, hidden, taken)
         kept = [m for m in new if m.name not in errors]
         macros += kept
-        record.append({"section": title, "reply": reply, "kept": [m.name for m in kept], "failed": errors})
+        cut = getattr(reply, "cut", None)
+        record.append({"section": title, "reply": reply, "finish_reason": getattr(reply, "finish_reason", None),
+                       "thinking_chars": len(getattr(reply, "reasoning", None) or ""),
+                       "cut": None if cut is None else {"finish_reason": cut.finish_reason,
+                                                        "thinking_chars": len(cut.reasoning or "")},
+                       "kept": [m.name for m in kept], "failed": errors})
         log(f"compile: {title}: {len(kept)} macros{f', {len(errors)} failed' if errors else ''}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"macros": [asdict(m) for m in macros], "sections": record}, ensure_ascii=False, indent=1),

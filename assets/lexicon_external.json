@@ -413,5 +413,15 @@
 "from": "tổg",
 "to": "tổng",
 "source": "gemini:gemini-3-flash-preview"
+},
+{
+"from": "đh",
+"to": "đơn hàng",
+"source": "initials of the train phrase 'đơn hàng' (as 'hd' -> 'hoá đơn' in WORDS); no web page defines it: question preprocessing is exempt from the train-only rule (user decision 2026-11-11)"
+},
+{
+"from": "dh",
+"to": "đơn hàng",
+"source": "initials of the train phrase 'đơn hàng' (as 'hd' -> 'hoá đơn' in WORDS); no web page defines it: question preprocessing is exempt from the train-only rule (user decision 2026-11-11)"
 }
 ]

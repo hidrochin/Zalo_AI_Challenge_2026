@@ -437,6 +437,21 @@ def _plain(v):
     return v.isoformat() if isinstance(v, dt.date) else v
 
 
+_CODE_VALUE = re.compile(r"[A-Za-z]{1,6}[-_.]?\d{2,}")
+
+
+def drop_code_column(columns: list[str], rows: list[list]) -> tuple[list[str], list[list]]:
+    """A code column right before the name column of the same rows (debt_by_customer gives customer, customer_name, debt):
+    the reference tables name each row once (train: 19/19 tables are name, amount), so the code goes."""
+    if len(columns) < 3 or not rows:
+        return columns, rows
+    first, second = [r[0] for r in rows], [r[1] for r in rows]
+    if all(isinstance(v, str) and _CODE_VALUE.fullmatch(v.strip()) for v in first) \
+            and all(isinstance(v, str) and not _CODE_VALUE.fullmatch(v.strip()) for v in second):
+        return columns[1:], [r[1:] for r in rows]
+    return columns, rows
+
+
 def to_answer(kind: str, columns: list[str], rows: list[tuple]) -> dict:
     """The typed answer read off a query result. Rounding and formats are those of the dm answer functions."""
     rows = [tuple(_plain(v) for v in r) for r in rows]
@@ -470,7 +485,7 @@ def to_answer(kind: str, columns: list[str], rows: list[tuple]) -> dict:
             return dm.answer_list(list(rows[0]))
         raise AnswerShape(f"`-- type: list` needs one column, or one row: got {len(rows)} rows and {len(columns)} columns.")
     if kind == "table":
-        return dm.answer_table(columns, [list(r) for r in rows])
+        return dm.answer_table(*drop_code_column(columns, [list(r) for r in rows]))
     raise AnswerShape(f"Unknown answer type {kind!r} in the `-- type:` line.")
 
 

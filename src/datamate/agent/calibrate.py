@@ -153,6 +153,57 @@ def calibrate(run_dirs: list[Path], split_dir: Path, out: Path, threshold: float
     return report
 
 
+SHOP_SIGNALS = ("abstain", "reads_raw")  # per-shop rates that need no gold answer
+
+
+def shop_rates(run_dir: Path) -> dict[str, dict[str, float]]:
+    """Per shop of a run: the share of its questions that abstained and that read a raw_ table, from the logs."""
+    tested = tested_names()
+    acc: dict[str, dict[str, float]] = {}
+    for log in sorted((Path(run_dir) / "logs").glob("*.json")):
+        rec = json.loads(log.read_text(encoding="utf-8"))
+        final = rec.get("calibrated_from") or rec.get("final") or {}
+        a = acc.setdefault(rec["business_id"], {"n": 0.0, **{s: 0.0 for s in SHOP_SIGNALS}})
+        a["n"] += 1
+        a["abstain"] += final.get("type", "abstain") == "abstain"
+        a["reads_raw"] += features({**rec, "final": final}, tested)["reads_raw"]
+    return {b: {s: a[s] / a["n"] for s in SHOP_SIGNALS} | {"n": a["n"]} for b, a in acc.items()}
+
+
+def fit_shop_gate(run_dirs: list[Path], out: Path) -> dict:
+    """The highest rate of each signal over the train shops of these runs: a shop above any of them is unlike every train
+    shop (public run of 2026-11-14: the 6 shops above were the 6 worst, PA -0.68..+0.14; no train shop is above)."""
+    rates = {f"{Path(r)}:{b}": v for r in run_dirs for b, v in shop_rates(Path(r)).items()}
+    gate = {"max": {s: max(v[s] for v in rates.values()) for s in SHOP_SIGNALS}, "shops": len(rates),
+            "runs": [str(r) for r in run_dirs]}
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(json.dumps(gate, ensure_ascii=False, indent=1), encoding="utf-8")
+    return gate
+
+
+def apply_shop_gate(run_dir: Path, gate: dict) -> list[str]:
+    """Every answer of a shop above the gate abstains. The run's own file is kept as submission.ungated.jsonl, the shops
+    and their rates go to shop_gate.json. Run it once the shops are answered (a shop's rate needs all its questions)."""
+    run_dir = Path(run_dir)
+    rates = shop_rates(run_dir)
+    flagged = sorted(b for b, v in rates.items() if any(v[s] > gate["max"][s] for s in SHOP_SIGNALS))
+    sub = run_dir / "submission.jsonl"
+    raw = run_dir / "submission.ungated.jsonl"
+    if not raw.exists():
+        raw.write_text(sub.read_text(encoding="utf-8"), encoding="utf-8")
+    biz = {json.loads(p.read_text(encoding="utf-8"))["id"]: json.loads(p.read_text(encoding="utf-8"))["business_id"]
+           for p in (run_dir / "logs").glob("*.json")}
+    lines = []
+    for line in raw.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            p = json.loads(line)
+            lines.append(json.dumps({"id": p["id"], "type": "abstain"} if biz.get(p["id"]) in flagged else p, ensure_ascii=False))
+    sub.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (run_dir / "shop_gate.json").write_text(json.dumps({"gate": gate["max"], "flagged": flagged, "rates": rates},
+                                                       ensure_ascii=False, indent=1), encoding="utf-8")
+    return flagged
+
+
 def const_logit(p: float) -> float:
     p = min(max(p, 1e-6), 1 - 1e-6)
     return math.log(p / (1 - p))

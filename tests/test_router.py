@@ -65,6 +65,18 @@ def test_route_reasons():
     assert route_reasons("doanh thu tháng 7", [], frozenset(), frozenset(), False, 0.95, cfg) == []
     assert route_reasons("x", ["| A | b |"], frozenset(), frozenset({"| A | b |"}), True, 0.5, cfg) == [
         "changed rule", "suspect sales", "unfamiliar (0.50)"]
+    # pick_rules prefixes the section; the delta holds bare lines (public run: 0/1000 questions matched before)
+    assert route_reasons("x", ["[Sửa xe] | A | b |"], frozenset(), frozenset({"| A | b |"}), False, 0.95, cfg) == [
+        "changed rule"]
+
+
+def test_route_reasons_sees_pick_rules_lines():
+    from datamate.agent.evidence import pick_rules, rule_units
+
+    book = "# Sửa xe\n| Thuật ngữ | Định nghĩa |\n|---|---|\n| Phiếu bảo hành | phiếu sửa lại miễn phí trong 30 ngày |\n"
+    delta = frozenset(line for _, _, line in rule_units(book))
+    rules = pick_rules(book, "tháng 5 có bao nhiêu phiếu bảo hành")
+    assert rules and route_reasons("x", rules, frozenset(), delta, False, 0.95, RunConfig(think_route=True)) == ["changed rule"]
 
 
 def test_escalate_reasons():
@@ -105,3 +117,82 @@ def test_calibrate_learns_a_wrong_tier(tmp_path):
     assert p_correct(model, features(rec, rule_macros())) < 0.5
     rec["route"]["tier"] = "normal"
     assert p_correct(model, features(rec, rule_macros())) > 0.5
+
+
+def test_cut_thinking_retries_without_thinking():
+    from datamate.agent.llm_local import Reply
+    from datamate.agent.pipeline import _samples
+    from datamate.postprocess import Expect
+
+    class FakeLLM:
+        def __init__(self, thinking):
+            self.enable_thinking, self.calls = thinking, []
+
+        def without_thinking(self):
+            self.plain = FakeLLM(False)
+            return self.plain
+
+        def generate(self, system, parts, history, temperature, seed, max_tokens=None):
+            self.calls.append(history)
+            r = Reply("" if self.enable_thinking else "```sql\nselect 7 as answer\n```")
+            r.finish_reason = "length" if self.enable_thinking else "stop"
+            return r
+
+    class Pool:
+        def run(self, code, as_of, shadow, **kw):
+            return {"result": {"type": "number", "answer": 7}, "error": None, "stdout": ""}
+
+    llm = FakeLLM(True)
+    s = _samples(llm, {"as_of_date": "2025-01-31"}, Pool(), "sys", ["q"], "q", Expect(), None, {}, frozenset(), [], False,
+                 RunConfig(engine="sql"))
+    assert s[0]["result"] == {"type": "number", "answer": 7}
+    assert [a["finish_reason"] for a in s[0]["attempts"]] == ["length", "stop"]
+    assert llm.plain.calls == [[]]  # the empty cut reply is not sent back as a turn
+
+
+def test_think_retries_a_cut_compile_reply_without_thinking():
+    from datamate.agent.llm_local import Reply
+    from datamate.agent.pipeline import _think
+
+    class FakeLLM:
+        def __init__(self, thinking):
+            self.enable_thinking = thinking
+
+        def without_thinking(self):
+            return FakeLLM(False)
+
+        def generate(self, system, parts, history, temperature, seed, max_tokens=None):
+            r = Reply("" if self.enable_thinking else "```sql\ncreate macro m() as 1;\n```")
+            r.finish_reason, r.reasoning = ("length", "x" * 9) if self.enable_thinking else ("stop", None)
+            return r
+
+    reply = _think(FakeLLM(True), RunConfig(), "sys", ["section"], [])
+    assert reply.startswith("```sql") and reply.cut.finish_reason == "length"
+    assert not hasattr(_think(FakeLLM(False), RunConfig(), "sys", ["s"], []), "cut")
+
+
+def test_shop_gate_abstains_a_shop_unlike_train(tmp_path):
+    import json
+
+    from datamate.agent.calibrate import apply_shop_gate, fit_shop_gate
+
+    def run(d, answers):  # answers: {biz: [final, ...]}
+        (d / "logs").mkdir(parents=True)
+        lines = []
+        for b, finals in answers.items():
+            for i, f in enumerate(finals):
+                qid = f"{b}_{i}"
+                (d / "logs" / f"{qid}.json").write_text(json.dumps({"id": qid, "business_id": b, "final": f}))
+                lines.append(json.dumps({"id": qid, **f}))
+        (d / "submission.jsonl").write_text("\n".join(lines) + "\n")
+        return d
+
+    num, abst = {"type": "number", "answer": 1}, {"type": "abstain"}
+    gate = fit_shop_gate([run(tmp_path / "train", {"a": [num] * 19 + [abst], "b": [num] * 20})], tmp_path / "g.json")
+    assert gate["max"]["abstain"] == 0.05
+    test = run(tmp_path / "test", {"c": [num] * 19 + [abst], "d": [num] * 17 + [abst] * 3})
+    assert apply_shop_gate(test, gate) == ["d"]
+    sub = [json.loads(x) for x in (test / "submission.jsonl").read_text().splitlines()]
+    assert all(p["type"] == "abstain" for p in sub if p["id"].startswith("d_"))
+    assert sum(p["type"] == "number" for p in sub if p["id"].startswith("c_")) == 19
+    assert apply_shop_gate(test, gate) == ["d"]  # rerun reads the ungated file, not its own output

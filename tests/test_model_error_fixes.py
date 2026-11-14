@@ -47,3 +47,44 @@ def test_rewrite_keeps_business_words():
     assert lost_markers("Xem giùm doanh thu ca chiều tuần trước", "Xem giúp doanh thu của chiều tuần trước?") == ["ca chieu"]
     assert lost_markers("Số ly size M bán được, cộng mọi món", "Số ly size M bán được của mỗi món") == ["cong", "mọi"]
     assert lost_markers("dthu ca chiều tuần trước", "Doanh thu ca chiều tuần trước là bao nhiêu?") == []
+
+
+def test_frame_advice_train_errors_of_the_route_run():
+    from datamate.agent.frame import Frame
+    from datamate.agent.lint import frame_advice
+
+    f = Frame()
+    shift = "-- type: percent\nselect pct_change(shift_revenue('chiều', date '2025-12-01', date '2025-12-31'), shift_revenue('sáng', date '2025-12-01', date '2025-12-31'))"
+    assert "shift_orders" in frame_advice("tháng 12/2025, số đơn ca chiều tăng hay giảm bao nhiêu % so với ca sáng", shift, f)
+    assert frame_advice("tháng 12/2025, doanh thu ca chiều tăng hay giảm bao nhiêu % so với ca sáng", shift, f) is None
+    one = "-- type: percent\nselect shift_orders('chiều', date '2025-10-06', date '2025-10-12')"
+    assert "pct_change" in frame_advice("tuần rồi, số đơn ca chiều tăng hay giảm bao nhiêu % so với ca sáng", one, f)
+    lines = "-- type: string\nselect customer_name from sales_lines group by 1 order by count(*) desc, 1 limit 1"
+    assert "distinct order_id" in frame_advice("khách nào mua nhiều đơn nhất", lines, f)
+    stock = Frame(entities=["Povidine 10% chai 90ml"], capability=("stock", "trusted"))
+    raw = "-- type: number\nselect \"Tồn cuối kỳ\" from raw_baocaotonkho where \"Mã hàng\" = 'SP0001'"
+    assert "SP0001" in frame_advice("tồn kho povidine 10% chai 90ml cuối ngày hôm nay", raw, stock)
+    by_name = "-- type: number\nselect \"Tồn cuối kỳ\" from raw_baocaotonkho where \"Tên hàng\" = 'Povidine 10% chai 90ml'"
+    assert frame_advice("tồn kho povidine 10% chai 90ml cuối ngày hôm nay", by_name, stock) is None
+    split = "-- type: list\nselect whole, loose from stock_split('Amoxicillin hộp 10 vỉ x 10 viên', 'hộp', date '2026-09-20')"
+    assert "'vi'" in frame_advice("tồn của amoxicillin hộp 10 vỉ x 10 viên là mấy vỉ chẵn, mấy viên lẻ", split, f)
+    assert frame_advice("tồn của amoxicillin là mấy hộp chẵn, mấy viên lẻ", split, f) is None
+    group = Frame(values=["- \"nhóm sỉ\" -> \"customer_group\" = 'sỉ'"])
+    assert "customer_group" in frame_advice("tháng này doanh thu từ khách nhóm sỉ", "-- type: money\nselect revenue(date '2026-06-01', date '2026-06-28')", group)
+    day = Frame(periods=[("hom qua", "2026-07-07", "2026-07-07")])
+    assert "2026-07-07" in frame_advice("doanh thu hôm qua", "-- type: money\nselect revenue(date '2026-07-06', date '2026-07-06')", day)
+    assert frame_advice("doanh thu hôm qua", "-- type: money\nselect revenue(date '2026-07-07', date '2026-07-07')", day) is None
+
+
+def test_table_drops_the_code_column_before_the_name():
+    from datamate.sql.agent import to_answer
+
+    got = to_answer("table", ["customer", "customer_name", "debt"], [("KH0027", "Lâm Bảo Ngọc", 632000), ("KH0097", "Nghiêm Duy Linh", 620000)])
+    assert got["answer"]["columns"] == ["customer_name", "debt"] and got["answer"]["rows"][0] == ["Lâm Bảo Ngọc", 632000]
+    kept = to_answer("table", ["a", "b", "c"], [("X", "Y", 1)])
+    assert kept["answer"]["columns"] == ["a", "b", "c"]
+
+
+def test_dh_is_the_initials_of_don_hang():
+    assert rules_normalize("30 ngày gần nhất được bnhiu đh nhỉ?").text == "30 ngày gần nhất được bao nhiêu đơn hàng nhỉ?"
+    assert "đơn hàng" in rules_normalize("Tong so dh trong 30 ngay gan nhat la bnhiu?").text
