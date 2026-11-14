@@ -98,6 +98,21 @@ def test_order_only_shop_reads_each_order_as_one_line():
     assert s.loc[s["counted"], "amount"].sum() == 100
 
 
+def test_order_only_shop_finds_the_goods_value_by_its_readme_description():
+    from datamate.ingest.roles import assign_roles
+
+    # biz_110's README sentence for `Tien hang`, under a header no rule knows
+    descs = {"Giá trị đơn": "tiền hàng của đơn: cộng thành tiền các mặt hàng, trước giảm giá của đơn, chưa gồm phí giao",
+             "Mã": "mã đơn", "Ngày": "ngày bán", "TT": "trạng thái đơn"}
+    roles = assign_roles(["Mã", "Ngày", "Giá trị đơn", "Tổng", "TT"], descs)
+    assert roles["Giá trị đơn"] == "order_goods"
+    orders = pd.DataFrame({"Mã": ["A", "B"], "Ngày": pd.to_datetime(["2025-01-01", "2025-01-02"]),
+                           "Giá trị đơn": [100, 200], "Tổng": [110, 220], "TT": ["xong", "xong"],
+                           "TT__norm": ["hoàn thành", "hoàn thành"]})
+    s, _ = build_sales({"o": orders}, {"o": roles})
+    assert s["amount"].sum() == 300
+
+
 def test_boolean_cells_stay_boolean():
     from datamate.ingest.business import TableInfo, _type_columns
     df = pd.DataFrame({"Tên": ["A", "B", "C"], "Kê đơn": [True, "False", "TRUE"], "Ghi chú": ["True", "khác", None],

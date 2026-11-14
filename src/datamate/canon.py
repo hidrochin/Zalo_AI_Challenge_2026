@@ -59,7 +59,7 @@ def _role_cols(roles: dict[str, str]) -> dict[str, str]:
 
 
 # Roles that only say what a column is: it stays in the lines.
-_PLAIN_ROLES = (None, "order_total", "pay_method", "channel", "line_cost")
+_PLAIN_ROLES = (None, "order_goods", "order_total", "pay_method", "channel", "line_cost")
 _JUNK = re.compile(r"hinh anh|barcode|ma vach|vi tri|trong luong|mo ta|mau ghi chu|url|dinh muc|ton (lon|nho) nhat"
                    r"|lien quan|thuoc tinh|^stt$|^so thu tu$|id cua hang|ma chi nhanh|^tao luc$|ban truc tiep|bao hanh")
 
@@ -205,7 +205,8 @@ def _order_level(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict
             continue
         t = tables[n]
         role_of = {v: c for c, v in r.items()}
-        amount = next((c for c in t.columns if "order_id" in role_of and _ORDER_GOODS_HEAD.match(header_key(c))), None)
+        amount = role_of.get("order_goods") if "order_id" in role_of else None  # the README's description, then the header
+        amount = amount or next((c for c in t.columns if "order_id" in role_of and _ORDER_GOODS_HEAD.match(header_key(c))), None)
         if amount is None:
             continue
         return tables, {**roles_by_table, n: {**r, amount: "line_amount"}}, n

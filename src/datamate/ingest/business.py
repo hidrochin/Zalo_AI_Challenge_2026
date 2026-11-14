@@ -16,8 +16,10 @@ from datamate.ingest.roles import assign_roles, is_known_status, normalize_statu
 from datamate.ingest.tables import DATA_SUFFIXES, RawSheet, extract_table, read_file
 from datamate.text import fold
 
-INGEST_VERSION = 21
+INGEST_VERSION = 23  # 23: rulebook §8 fill of first-row-only order columns and dated blocks; 22: README role order_goods
 META_COLS = ("_file", "_sheet")
+LINE_ROLES = frozenset({"qty", "qty_base", "line_amount", "unit_price", "product_name", "product_id", "unit", "base_unit",
+                        "line_cost"})  # one value per line, never filled from another line
 README_UNITS = "README.QuyDoi"
 
 _DATE_NAME = re.compile(r"\b(ngay|date|thoi gian|time|thoi diem|hsd|han su dung|han dung|han tra|han thanh toan|gio|sinh nhat|ngay sinh)\b")
@@ -247,13 +249,24 @@ def _clean(df: pd.DataFrame, ti: TableInfo) -> pd.DataFrame:
         filled = _forward_fill(df, id_col, data_cols)
     df = _type_columns(df, data_cols, ti)
     if id_col:
-        filled += _group_fill(df, id_col, data_cols, skip=set(filled))
+        line_cols = frozenset(c for c, r in ti.roles.items() if r in LINE_ROLES)
+        more, first_only = _group_fill(df, id_col, data_cols, skip=set(filled), line_cols=line_cols)
+        filled += more
         if filled:
             ti.notes.append(f"forward-filled order-level columns on continuation rows: {', '.join(filled)}")
+        if first_only:
+            ti.notes.append(f"{FIRST_ROW_NOTE}: {', '.join(first_only)} (one value per `{id_col}`, repeated on its every "
+                            "row now: count an order's amount once, not once per row)")
         n = len(df)
         df = df.drop_duplicates(subset=data_cols).reset_index(drop=True)
         if len(df) < n:
             ti.notes.append(f"removed {n - len(df)} exact-duplicate rows within the same `{id_col}` (rulebook §8)")
+    else:
+        day = next((c for c, r in ti.roles.items() if r in ("order_date", "order_ts") and c in df.columns), None)
+        got = _block_fill(df, day, data_cols) if day else None
+        if got:
+            ti.notes.append(f"{FIRST_ROW_NOTE}: {', '.join(got[1])} filled down each block of rows under a dated row "
+                            f"(one block per `{got[0]}`; count a block's amount once, not once per row)")
     for c, r in ti.roles.items():
         if r == "status" and c in df.columns:
             df[f"{c}__norm"] = df[c].map(lambda v: None if _is_null(v) else normalize_status(v))
@@ -275,24 +288,75 @@ def _forward_fill(df: pd.DataFrame, id_col: str, data_cols: list[str]) -> list[s
     return filled
 
 
-def _group_fill(df: pd.DataFrame, id_col: str, data_cols: list[str], skip: set[str]) -> list[str]:
-    """Order-level columns left blank on some rows of an order get the order's value (in place, after typing)."""
+FIRST_ROW_NOTE = "rulebook §8 fill of values given on the first row only"  # audit.py: a layout no train shop has
+
+
+def _group_fill(df: pd.DataFrame, id_col: str, data_cols: list[str], skip: set[str],
+                line_cols: frozenset[str] = frozenset()) -> tuple[list[str], list[str]]:
+    """Order-level columns left blank on some rows of an order get the order's value (in place, after typing).
+    (filled, first_only): first_only are the columns written on the first row of each order only (one value per order,
+    blank on every later row: rulebook §8), which the consistency test cannot see; line columns are never filled."""
     filled: list[str] = []
+    first_only: list[str] = []
     grp = df.groupby(id_col, sort=False)
+    size = grp[id_col].transform("size")
+    is_first = grp.cumcount() == 0
+    n_multi = df.loc[is_first & (size > 1)].shape[0]
     for c in data_cols:
         if c == id_col or c in skip or not df[c].isna().any():
             continue
         nn = grp[c].count()
         multi = nn[nn >= 2]
-        if len(multi) < 30:
-            continue
-        nun = grp[c].nunique()
-        if (nun.loc[multi.index] <= 1).mean() >= 0.99:
+        if len(multi) >= 30 and (grp[c].nunique().loc[multi.index] <= 1).mean() >= 0.99:
             before = df[c].isna().sum()
             df[c] = df[c].fillna(grp[c].transform("first"))
             if df[c].isna().sum() < before:
                 filled.append(c)
-    return filled
+            continue
+        if c in line_cols or n_multi < 30:
+            continue
+        # multi-row orders whose only value of c is on the first row
+        only_first = (df[c].notna() & is_first & (size > 1) & (grp[c].transform("count") == 1)).sum()
+        if only_first >= 0.95 * n_multi:
+            df[c] = df[c].fillna(grp[c].transform("first"))
+            first_only.append(c)
+    return filled, first_only
+
+
+def _block_fill(df: pd.DataFrame, day: str, data_cols: list[str]) -> tuple[str, list[str]] | None:
+    """A table without an order key, kept in blocks: a dated first row, then rows with a blank date (one per payment,
+    instalment...). Only when a column holds one value per block that tells blocks apart (an `STT`, a note 'STT 34')
+    does a block read as one group; the columns given on its first row only are filled down it (rulebook §8)."""
+    if df.empty or pd.isna(df[day].iloc[0]):
+        return None
+    blank = df[day].isna()
+    if not 0.05 < blank.mean() < 0.95:
+        return None
+    block = df[day].notna().cumsum()
+    n_blocks = int(block.max())
+    multi = block.map(block.value_counts()) > 1
+    if multi.sum() < 20:
+        return None
+    key = None
+    for c in data_cols:
+        if c == day or df[c].notna().mean() < 0.99:
+            continue
+        g = df[c].groupby(block)
+        if (g.nunique() <= 1).mean() >= 0.99 and df[c].nunique() >= 0.9 * n_blocks:
+            key = c
+            break
+    if key is None:
+        return None
+    grp = df.groupby(block, sort=False)
+    is_first = grp.cumcount() == 0
+    firsts = int((is_first & multi).sum())
+    filled = []
+    for c in [day] + [c for c in data_cols if c not in (day, key)]:
+        only_first = (df[c].notna() & is_first & multi & (grp[c].transform("count") == 1)).sum()
+        if only_first >= 0.95 * firsts:
+            df[c] = df[c].fillna(grp[c].transform("first"))
+            filled.append(c)
+    return (key, filled) if filled else None
 
 
 def _type_columns(df: pd.DataFrame, data_cols: list[str], ti: TableInfo) -> pd.DataFrame:
