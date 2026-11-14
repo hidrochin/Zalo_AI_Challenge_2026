@@ -192,7 +192,144 @@ datamate run --backend local --base-url http://localhost:8000/v1 --model Qwen/Qw
 
 ---
 
-## Status (2026-11-14, late night): start here: first Docker image built, public_c 0.577, train-backed lints
+## Status (2026-11-15, evening): start here: typed slots 0–3 in code, Kaggle run with Qwen + thinking
+
+Code (uncommitted, on `text2sql`), measurements and the user's decisions are in
+[docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md) section 9.6 (Vietnamese). In short:
+
+- `src/datamate/slots/`: `apply.py` (pure applies) and `base.py` (trigger, prompt, parse, check per slot;
+  `resolve_slots` caches `cache/ingest/<split>/<biz>.slots.json`). Slots: `order_key` (added by the user's choice),
+  `status_text`, `name_map`, `line_amount`; `non_goods` deferred (no real case in train or public).
+- Wired through `canon.build_sales(..., slots)`, `sql/store.build_store(..., slots)` (`STORE_VERSION` 15), the pipeline
+  (`--slots all|none|names`, default all; `slots.json` per run, `slots` in each log) and `datamate slots`.
+- `_JUNK` applies to catalogues only. `sql-check` is unchanged against a control run.
+- A cut repair round now gets one more try with thinking off (8 such abstains in the train route run).
+- Train is a strict no-op: no slot fires on any of the 30 train shops. On public, slots fire on exactly the four
+  suspect shops.
+- Replay of public_d's SQL on the new stores (latent, before gates):
+  - dev_013: 7/48 → 34/19;
+  - dev_003: 15/85 → 65/9, and the shop is now clean;
+  - dev_011: 14/25 → 35/1, still gated by `fill_gap`, kept by the user's choice;
+  - dev_014: 10/38 → 27/14, still gated.
+- Train mutates with gold (`datamate slots --split train --mutate ...`; baseline 826/859 contracts): `rename_order_key`
+  826, `status_in_notes` 802 (97.1%), `abbrev_names` 826 with every product name back, `amount_before_discount` 826
+  (718 without the slot). All four pass the 95% bar.
+- Kaggle (pushed this session, Qwen3.5-9B, `DM_THINK=route`, public_d flags):
+  - `hydrochii/datamate-slots-public` (stages `smoke,public`);
+  - `hydrochiii/datamate-slots-train-check` (stage `train_check`, 106 ids: right → wrong must be 0);
+  - `hydrochii/datamate-slots-public2` (stages `smoke,public`): the committed code, with the status fixes found by the
+    mutates. The first public kernel ran the code from before them.
+  - Fetch results with `kaggle/fetch_output.py`. Compare per shop with public_d, using `ground_truth.jsonl` only to
+    measure.
+
+## Status (2026-11-15): decision made, plan for typed slots (docs/PLAN_LAYERS.md section 9)
+
+No code change in this session. The user chose **option 2 of 8.6**: the model fills typed slots, code applies them
+deterministically. The plan, with slot list, code changes and acceptance order, is
+[docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md) section 9 (Vietnamese). Start the next session there.
+
+What was checked before writing it (public stores `cache/duckdb/public_test/*_i21_s14*.duckdb`):
+
+- `sales_all` **already carries every unroled column** of the line and header tables, with the shop's own names
+  (`canon._extra_cols`): dev_003 `Trạng thái giao`, `Tiền giảm`, `Phí ship`; dev_011/014 `Ghi chú`, `Ghi tắt`, `Bớt`,
+  `Thu máy cũ`; dev_013 `Ghi chú`, `Kênh`, `Nhóm`, `Hãng`, `Số / Size`. The data is there; the **meaning** is not:
+  `status`, `counted`, `amount`, `is_goods` are computed by role regexes that ignore those columns, and the SQL model
+  queries macros over `counted`.
+- Real data gaps: `canon._JUNK` drops `thuộc tính`, `bảo hành`, `mô tả`, `STT` by name; side tables stay `raw_*`
+  without a fact (dev_014 debt, installment, warranty, trade-in; dev_013 promotions); dev_012 has no `sales_all` at all
+  (repair log, no column matches `line_amount`).
+- The model already intervenes at two narrow points (`agent/statuses.py`, `agent/columns.py`), but both run only when
+  the rules know they are missing something. dev_013's status in `Ghi chú` is never asked about because the status
+  column "exists" (default `hoàn thành`). Slot triggers therefore fire on *gaps in the data*, not on rule failures.
+- Abstains of public_d re-checked per gated answer against gold: gate `shop_suspect` blocked 212 answers, 181 of them
+  wrong (dev_003 6/87 right, dev_011 12/32, dev_013 5/50, dev_014 8/43). The gate is right; the store is the cause.
+
+Seven slots in order: status in a text column (from the probe), abbreviation name map, line discount, non-goods lines,
+attribute roles, side tables, sales from a log table. Each has a trigger, a narrow JSON schema, a pure apply, a
+physical check, a train no-op condition and a gold check by a train mutate (`eval/mutate.py`). Fallback is always the
+current store plus the gate, so no step can score below public_d.
+
+## Status (2026-11-14, night 2): public_d 0.595, train_check 0.953, store repair probe (P3)
+
+Code in the repo is unchanged since `291d1bf`; this session only measured. Measurements in Vietnamese:
+[docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md) section 8.6. Docker image #1, the server and the run commands are in the
+section below ("late night").
+
+| run | code | PA | right / wrong / abstain |
+|---|---|---|---|
+| public_d (`outputs/rented/public_d`; public by `ground_truth.jsonl`, measure only) | `291d1bf` | **0.595** (public_c 0.577) | 649 / 54 / 297 |
+| train_check (`outputs/rented/train_check`, 106 train ids) | `291d1bf` | **0.9528** (0.9151 before the gates) | 101 / 0 / 5 |
+
+- train_check vs the route-train run on the same 106 ids (88 / 18 / 0): W→R 13, W→A 5 (`table_words` 4), **R→W 0**.
+  The late-night lints hold on train, so `291d1bf` is fit for image #2 (in-sample: the lints come from these errors).
+- `datamate gate` needs a run-root `audit.json`: merge `part*/audit.json` first (done for public_c, public_d,
+  train_check).
+- public_d per shop: known families +0.76..+1.00 (dev_009 1.000); dev_003 +0.054, dev_011 −0.025, dev_012 −0.020,
+  dev_013 +0.018, dev_014 +0.016.
+- public_d abstains by layer (297):
+  - gate `shop_suspect` 212, of which 181 would have been wrong and 31 right;
+  - SQL error 56;
+  - reply cut by `length` 15: with `--repair 1` the no-thinking retry in `_samples` has no attempt left;
+  - unconfirmed 7, judge 3, other gates 3, finalize 1.
+
+**Why new industries fail** (replay of public_d's logged SQL on rebuilt stores, `debug/p3_slot/replay.py`; the
+control reproduces 230/230 answers). Before the gate, the four suspect shops answer 40 right / 189 wrong. The model's
+SQL is mostly right; the store misses the shop's own conventions. For example, dev_013's August 2025 revenue equals
+gold exactly once the orders marked `cancel`/`Huỷ` in `Ghi chú` are dropped. A better question-side model would query
+the same wrong store.
+
+**P3 probe with Qwen3.5-9B** (scratch code in `debug/p3_slot/`, gitignored; nothing in `src/`):
+- The model rewrites the whole `sales_all` as one SELECT (`p3_probe.py`): **fails**.
+  - Thinking is cut at 12k and at 20k tokens.
+  - Without thinking the SQL runs but is wrong: inverted `is_goods`, `Huỷ` missed, tables that do not exist.
+  - dev_003 and dev_014 never produced a SELECT that runs.
+- The model fills a typed slot and code applies it (`slot_probe.py` + `patches/generic_slot.py`): **works**.
+  - Slot: `{status_column, status_map → the rulebook's 4 statuses, order_column}`.
+  - Prompt input: the README, the rulebook rows on status, and the values of the unroled columns.
+  - About 100 s per shop; code applies the worst status per order.
+
+| shop | before (right / wrong) | after | W→R | R→W | slot |
+|---|---|---|---|---|---|
+| dev_013 | 5 / 48 | 34 / 19 | 30 | 1 | `Ghi chú`: cancel, Huỷ → huỷ |
+| dev_003 | 13 / 81 | 25 / 69 | 13 | 1 | `Trạng thái giao` (4 values), `Đơn số` as the order key |
+| dev_011 | 14 / 22 | 20 / 16 | 6 | 0 | return notes in `Ghi chú` (the audit's 0.5% threshold missed them) |
+| dev_014 | 8 / 38 | 8 / 38 | 0 | 0 | no status problem |
+
+- The model's `order_column` is unreliable: it proposed `STT`, a row number. Use it only when the store has no
+  `order_id`.
+- After the repair, dev_013's audit flag clears, so its gate opens: 34/53 latent right, about +15 public answers.
+  dev_003 (`discount_unapplied`) and dev_011 (`fill_gap`) stay gated, correctly: 27% and 56% right.
+- Still wrong after the status slot: 142 of 229. Each remaining cause is another convention:
+  - abbreviation sheet `Ghi tắt`: `name_gap` 0.80–0.90 on dev_011/014;
+  - line discount (dev_003);
+  - product group and size attributes (dev_013);
+  - ship, voucher and points lines (sign, zero).
+
+**Next.**
+1. User decision, compliance of the status slot:
+   - in the train rulebook: rows 109/110 (four statuses; an order's status applies to all its lines);
+   - public rulebook only: row 143 ("no status column → status in Ghi chú"); the model reads it at run time, the
+     code does not encode it;
+   - the slot idea came from analysing public.
+   - If integrated, drop "ghi chú" from `slot_probe.rule_rows`'s regex (row 143 matches "trạng thái" anyway).
+2. If yes, make it a prepare step:
+   - run only when every canonical status is `hoàn thành`;
+   - validate on train: shops without a status column must get no harmful mapping; `sql-check` and a replay of the
+     route-train logs must not change a right answer;
+   - bump `STORE_VERSION`, then a live public run.
+3. Same slot pattern for the next conventions, in order of public loss: `Ghi tắt` names, line discount, product
+   attributes, non-goods lines.
+4. Image #2 from `291d1bf` (or later) with `docker/build_remote.sh BUILD=1` once #1 is uploaded.
+5. Gemma 4 12B is not tested. Test it on the slot task only, which needs stopping Qwen; server vLLM is 0.32.0 and
+   `run_kaggle` notes 0.33.0 for Gemma 4.
+6. Optional: the `length`-cut retry with `--repair 1` (15 public abstains); measure on train logs first.
+
+Server at handoff: Qwen still served on `ssh -p 10102 root@45.143.122.52`, GPUs idle, no run in progress. Tunnel for
+the probes:
+`ssh -f -N -o ServerAliveInterval=15 -L 18000:127.0.0.1:18000 -p 10102 root@45.143.122.52`. It dropped twice during
+the session, so check `curl 127.0.0.1:18000/v1/models` before a probe.
+
+## Status (2026-11-14, late night): first Docker image built, public_c 0.577, train-backed lints
 
 Plan and measurements: [docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md) sections 6.5, 8 and 8.5 (Vietnamese). Pipeline
 walkthrough: [docs/PIPELINE.md](docs/PIPELINE.md).

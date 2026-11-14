@@ -963,3 +963,256 @@ MD5 `2992a15d5d4f8c29d75a7f885fa97de5`. Code của image là code public_c, đã
 đúng nghĩa: ví dụ `count(*)` đếm dòng nhưng tình cờ xếp hạng đúng. Lượt `train_check` (106 câu: 46 câu dính lint hoặc
 trả lời dạng bảng, 60 câu đối chứng) và `public_d` đang chạy để đo bằng model thật. Chỉ giữ một lint khi kết quả train
 ủng hộ nó.
+
+### 8.6 Kết quả public_d, train_check và thử nghiệm P3 (2026-11-14, khuya)
+
+**Hai lượt chạy** (code `291d1bf`):
+
+| lượt | PA | đúng / sai / abstain | ghi chú |
+|---|---|---|---|
+| public_d (gold `ground_truth.jsonl`, chỉ để đo) | 0.595 | 649 / 54 / 297 | public_c 0.577; phần tăng chủ yếu nhờ `đh` |
+| train_check (106 câu train) | 0.9528 (trước cổng 0.9151) | 101 / 0 / 5 | so với route-train trên cùng 106 câu (88 / 18 / 0): W→R 13, W→A 5, **R→W 0** |
+
+Các lint của mục 8.5 giữ được trên train. Đây là số in-sample, vì lint được viết từ chính các lỗi này.
+
+**Abstain của public_d theo lớp** (297 câu):
+- cổng `shop_suspect` 212: nếu không chặn thì 181 câu sai, 31 câu đúng;
+- lỗi SQL 56;
+- reply bị cắt `length` 15: với `--repair 1`, lượt thử lại không thinking trong `_samples` không còn lượt nào;
+- còn lại 15.
+
+Cổng không phải nguyên nhân. Nó chặn đúng những câu đáng lẽ đã sai.
+
+**Nguyên nhân ở ngành mới: store, không phải model.**
+- Cách đo: phát lại SQL trong log public_d trên store dựng lại (`debug/p3_slot/replay.py`; bản đối chứng tái tạo
+  230/230 đáp án).
+- Bốn shop `suspect` trước cổng có 40 đúng / 189 sai. SQL của model phần lớn đã đúng; store bỏ sót quy ước riêng của
+  shop.
+- Ví dụ dev_013: chỉ cần bỏ các đơn có `cancel` hoặc `Huỷ` trong `Ghi chú`, doanh thu tháng 8/2025 ra đúng 466 616 500,
+  khớp gold. Store hiện tại cho 486 110 000.
+- Vì vậy đổi model trả lời câu hỏi không chữa được: model nào cũng truy vấn đúng store sai đó.
+
+**P3 với Qwen3.5-9B, hai cách** (code nháp trong `debug/p3_slot/`, gitignored; không có gì trong `src/`):
+
+| cách | kết quả |
+|---|---|
+| Model viết lại cả `sales_all` thành một SELECT 25–45 cột (`p3_probe.py`, kèm một vòng tự kiểm) | **hỏng**: thinking bị cắt ở 12k và 20k token. Không thinking thì SQL chạy được nhưng sai: đảo `is_goods`, sót `Huỷ`, gọi bảng không tồn tại. dev_003 và dev_014 không ra SELECT nào chạy được |
+| Model điền một ô có kiểu, code áp tất định (`slot_probe.py` + `patches/generic_slot.py`) | **được**: ô là `{status_column, status_map → 4 trạng thái của rulebook, order_column}`; prompt gồm README, các dòng rulebook về trạng thái và giá trị các cột chưa có role; khoảng 100 s/shop; code áp trạng thái xấu nhất cho cả đơn |
+
+Kết quả cách điền ô (đáp án tiềm ẩn, trước cổng):
+
+| shop | trước (đúng / sai) | sau | W→R | R→W | model điền |
+|---|---|---|---|---|---|
+| dev_013 | 5 / 48 | 34 / 19 | 30 | 1 | `Ghi chú`: cancel, Huỷ → huỷ |
+| dev_003 | 13 / 81 | 25 / 69 | 13 | 1 | `Trạng thái giao` (4 giá trị) + `Đơn số` làm mã đơn |
+| dev_011 | 14 / 22 | 20 / 16 | 6 | 0 | ghi chú trả hàng; audit bỏ sót vì 0,1% < ngưỡng 0,5% |
+| dev_014 | 8 / 38 | 8 / 38 | 0 | 0 | không có lỗi trạng thái |
+
+- `order_column` model chọn không đáng tin: nó chọn `STT`, là số dòng. Chỉ dùng khi store chưa có `order_id`.
+- Sau khi sửa, cờ của dev_013 hết nên cổng mở: 34/53 câu đúng tiềm ẩn, khoảng +15 câu public.
+- dev_003 (`discount_unapplied`) và dev_011 (`fill_gap`) vẫn bị chặn, và chặn là đúng: tỉ lệ đúng 27% và 56%.
+- Còn 142/229 câu sai, mỗi nhóm là một quy ước khác, cần một ô điền riêng theo cùng khuôn:
+  - sheet viết tắt `Ghi tắt`: `name_gap` 0,80–0,90 ở dev_011/014;
+  - chiết khấu dòng (dev_003);
+  - thuộc tính nhóm hàng và size (dev_013, chỉ khớp 58–90%);
+  - dòng ship, voucher, điểm.
+
+**Bạn quyết.**
+- Tuân thủ của ô trạng thái:
+  - rulebook train có dòng 109/110 (4 trạng thái; trạng thái áp cho mọi dòng của đơn);
+  - dòng 143 ("sổ không có cột trạng thái → trạng thái ở Ghi chú") chỉ có ở public; model đọc nó lúc chạy, code không
+    ghi cứng;
+  - ý tưởng ô điền đến từ phân tích public.
+- Có tích hợp hay không. Nếu có:
+  - làm một bước prepare, chỉ chạy khi mọi trạng thái chuẩn là `hoàn thành`;
+  - kiểm trên train: không câu đúng nào đổi;
+  - rồi chạy live public.
+- Gemma 4 12B chưa thử. Nếu thử thì thử trên đúng bài điền ô, và phải dừng Qwen.
+
+## 9. Lớp ngữ nghĩa shop bằng ô điền có kiểu (quyết định 2026-11-15)
+
+Bạn chọn **cách 2**: model điền ô có kiểu, code áp tất định. Hai mục tiêu đi cùng: (a) không để một output model
+làm sai hàng loạt; (b) tổng quát cho ngành lạ và luật mới, kể cả luật chỉ có ở rulebook của split lúc chạy (ví dụ
+"sổ không có cột trạng thái thì trạng thái ở Ghi chú"). Mục này thay P3 ở 7.3 và là kế hoạch cho phiên tiếp theo.
+
+### 9.1 Hiện trạng đã kiểm (store `i21_s14` của public, 15/11)
+
+**`sales_all` đã giữ nguyên mọi cột chưa có role** của bảng dòng và bảng đầu đơn (`canon._extra_cols`, cột được chép
+không đổi, tên gốc). Bằng chứng trên store:
+
+| shop | cột chưa role đang nằm trong `sales_all` |
+|---|---|
+| dev_003 | `Trạng thái giao`, `Tiền giảm`, `Giảm (đ)`, `Tiền hàng trước giảm`, `Phí ship`, `Công nợ`, `Nguồn`, `Nhóm hàng`, `Giá vốn lúc bán` |
+| dev_011 / dev_014 | `Ghi chú`, `Ghi tắt`, `Loại`, `Bớt`, `Thu máy cũ`, `Khách trả`, `IMEI` |
+| dev_013 | `Ghi chú`, `Kênh`, `Nhóm`, `Hãng`, `Số / Size`, `Tên gọi khác`, `Quy đổi` |
+
+Vậy "sales lines chứa toàn bộ thông tin" phần lớn đã có. Cái **thiếu là nghĩa**: `status`, `counted`, `amount`,
+`is_goods`, `qty_base`, `product_name` chuẩn do code tính theo role regex, không nhìn các cột trên. Model SQL gọi macro
+trên `counted` nên sai hàng loạt dù dữ liệu nằm ngay cạnh. Ba lỗ hổng thật sự về dữ liệu:
+
+1. `canon._JUNK` (canon.py:63) bỏ cột theo tên: `thuoc tinh`, `bao hanh`, `mo ta`, `stt`, `so thu tu`. Với ngành lạ
+   đó là dữ liệu (bảo hành ở điện thoại, thuộc tính ở mẹ và bé).
+2. Bảng không nối được vào dòng bán chỉ tồn tại dạng `raw_*`, không thành fact: dev_014 `sono_so_no`, `sono_tra_gop`,
+   `sono_bao_hanh`, `thumaycu`; dev_013 `quanly_khuyenmai`, điểm khách. Model thấy tên bảng, không thấy nghĩa.
+3. Shop không dựng được `sales_all`: dev_012 (`raw_sosuaxe` có `Tiền`, `Làm gì`, `Thợ` nhưng không cột nào khớp regex
+   `line_amount`). Mọi câu đọc `raw_` và 17/18 câu sai.
+
+Model hiện can thiệp ở hai điểm hẹp: `agent/statuses.py` (giá trị lạ **trong cột đã có role status**) và
+`agent/columns.py` (cột chưa role **khi thiếu role bán hàng**). Cả hai chỉ chạy khi rule tự biết mình thiếu. dev_013
+có cột status "đủ" (mặc định `hoàn thành`, canon.py:349) nên không ai hỏi về `Ghi chú`. Đó là cơ chế hỏng chung:
+**rule không biết mình đang sai**, nên điểm kích hoạt phải là "có khoảng trống" chứ không phải "rule báo thiếu".
+
+### 9.2 Khuôn chung của một ô
+
+Mỗi ô (`Slot`) gồm 5 phần, tất cả tất định trừ phần điền:
+
+| phần | nội dung |
+|---|---|
+| `trigger(biz, sales, audit)` | điều kiện có khoảng trống, tính từ dữ liệu, không cần cờ audit. Trên 30 shop train phải không bắn, hoặc bắn mà áp là no-op (đo bằng `datamate slots --split train --dry-run`) |
+| `prompt(biz, sales, rulebook)` | README của shop; các dòng rulebook **của split lúc chạy** lọc theo từ khoá của ô; card các cột chưa role kèm giá trị (≤ 30 giá trị distinct liệt kê hết, còn lại 4 ví dụ) như `slot_probe.py`; 3 dòng mẫu |
+| `schema` | JSON kiểu hẹp: tên cột phải có thật, giá trị phải có thật trong dữ liệu, nhãn thuộc enum của rulebook. Code từ chối mọi thứ ngoài danh sách |
+| `apply(sales, tables, slot)` | hàm thuần, ghi cột canonical, giữ cột gốc (`*_raw`), ghi `slot_<name>` vào store để log |
+| `check(before, after)` | bất biến vật lý không cần gold (xem từng ô), chạy lại audit: cờ cũ tắt, không cờ mới, số dòng không đổi |
+
+Đường lùi: ô không điền được, JSON hỏng, hoặc rớt `check` → giữ store cũ, audit giữ `suspect`, cổng chặn như hiện nay.
+Không bao giờ âm hơn public_d.
+
+Chạy trong `prepare`, mỗi shop một lần, các ô theo thứ tự 9.3, ô sau thấy kết quả ô trước. Cache
+`cache/ingest/<split>/<biz>.slots.json` khoá theo (ô, băm README, băm rulebook, model, phiên bản prompt). Thinking bật,
+greedy, seed 0; bị cắt `length` thì thử lại không thinking (đã có trong probe). Khoảng 100 s mỗi ô mỗi shop, song song
+theo shop, nằm trong ngân sách.
+
+**Hạn chế sai hàng loạt**, bốn tầng:
+1. Một ô là một quyết định nhỏ (cột nào, giá trị nào ứng nhãn nào). Không SQL tự do, không viết lại `sales_all`
+   (đã đo là hỏng, 8.6).
+2. `check` vật lý per ô; rớt là bỏ ô, không bỏ shop.
+3. **Mutate train có gold** (`eval/mutate.py`, đã có `propose_roles`): sinh biến thể của shop train đúng theo lỗi mà ô
+   chữa, chạy contract `sql-check` trên store mutate có áp ô; nhận khi ≥ 95% và shop train gốc không đổi (no-op). Đây
+   là phép đo gold duy nhất không chạm public.
+4. `train_check` (106 id) sau mỗi ô: R→W phải là 0.
+
+**Tuân thủ.** Cơ chế là chung: model đọc README và rulebook của split lúc chạy; code không ghi layout, từ, hay ngưỡng
+học từ public. Ý tưởng các ô 2, 4, 6, 7 đến từ phân tích public (P), bạn đã quyết làm (15/11); điều kiện nhận chỉ bằng
+train và mutate. Bỏ "ghi chú" khỏi regex lọc dòng rulebook của ô status (dòng 143 public vẫn khớp "trạng thái").
+
+### 9.3 Danh sách ô, theo thứ tự làm
+
+| # | ô | trigger | schema (model điền) | apply | check | gold |
+|---|---|---|---|---|---|---|
+| 1 | `status_text` | mọi `status` = hoàn thành và có cột text chưa role | `{status_column, status_map: giá trị → 4 trạng thái, order_column?}` | như `debug/p3_slot/patches/generic_slot.py`: xấu nhất theo đơn; `order_column` chỉ khi store không có `order_id` | audit `status_in_text` tắt; tỉ lệ đơn huỷ sau áp trong (0, 30%] | rulebook train dòng 109/110; mutate `status_in_notes` (chuyển cột trạng thái của biz train vào Ghi chú, xoá cột) |
+| 2 | `name_map` | `name_gap` ≥ 0.3 và có bảng ≤ 4 cột với hai cột tên, hoặc README nói viết tắt | `{table, short_col, full_col}` | `product_name` = map(short → full), giữ `product_name_raw`; `dim_product` dựng lại | `name_gap` giảm; không tên tắt nào ứng 2 tên đầy đủ; số dòng không đổi | mutate `abbrev_names` trên biz train có danh mục (viết tắt tên trong sổ bán, thêm sheet 2 cột) |
+| 3 | `line_amount` | cột giảm dòng tồn tại và amount = qty × giá (audit `discount_unapplied`) | `{discount_col, kind: amount∣percent, level: line∣order}` | `line`: amount = qty × giá − giảm; `order`: giữ (rulebook: không trừ giảm đơn) | amount ≤ qty × giá trên ≥ 95% dòng có giảm; audit tắt | mutate `amount_before_discount` |
+| 4 | `non_goods` | cột tên hàng hoặc loại hàng có giá trị kiểu phí ship, voucher, điểm, thu máy cũ, trả góp | `{column, values: [{value, kind: fee∣discount∣tradein∣points∣installment}]}` | `is_goods` = False cho các dòng đó; dấu tiền theo rulebook của split (ship không vào doanh thu; thu máy cũ là trừ tiền khách trả, không trừ doanh thu) | doanh thu tổng đổi < 20%; các dòng bị loại không có `qty` hoặc tên khớp đúng giá trị model nêu | `drop_fee_items` đã có ca train phí phục vụ; mutate thêm dòng ship vào biz train |
+| 5 | `attributes` | cột text chưa role, ≤ 50 giá trị distinct, phủ ≥ 50% dòng hàng | `{column → role: product_group∣brand∣size∣channel∣staff∣pay_method}` | chỉ gắn nhãn role vào card và `dim_product` (không đổi số) | giá trị khớp mẫu của role | train có nhóm hàng và kênh (biz_108/123/124): no-op vì đã có role |
+| 6 | `side_tables` | `raw_*` chưa thành fact, có cột ngày và tiền | `{table → kind: debt∣payment∣installment∣tradein∣warranty∣promo∣expense, columns: {...}}` | `debt`/`payment`/`expense`: dựng fact bằng `facts.py` hiện có; kind lạ: gắn mô tả có kiểu vào card để SQL đọc đúng cột | contract debt/expense trên train không đổi; fact dựng được có ≥ 1 dòng | mutate đổi header sổ nợ của biz_105/117 |
+| 7 | `sales_from_log` | không dựng được `sales_all`, có bảng có ngày + tiền + tên việc/hàng | `{table, date_col, amount_col, item_col, staff_col?, customer_col?}` | qua `propose_roles` (khuôn đã có) rồi `build_sales` | số dòng > 0, tổng tiền > 0, mọi ngày trong khoảng README | mutate đổi header `ban_hang.csv` biz_101 thành từ lạ |
+
+Kỳ vọng public (chỉ để báo, từ 8.6): ô 1 mở dev_013 (+15), ô 2–4 mở dần dev_003/011/014 (trần 229 câu), ô 7 cho
+dev_012 (18 sai hiện nay). Ngành lạ ở private: ô nào bắn thì có cơ hội; không bắn thì như hôm nay.
+
+### 9.4 Thay đổi code
+
+- `src/datamate/slots/`: `base.py` (`Slot` với 5 phần trên, `run_slots(biz, sales, tables, rulebook, generate, log)`),
+  một file mỗi ô, `cache.py`. Ô 1 chuyển từ `debug/p3_slot/` (prompt, parse, apply đã chạy được).
+- `canon.py`: `_JUNK` chỉ áp cho bảng danh mục; bảng dòng giữ mọi cột trừ `hinh anh`, `url`, `barcode`. Kiểm
+  `sql-check` 139/139 và card không phình quá 10%.
+- `sql/store.py`: `build_sales` → `run_slots` → `build_facts` → ghi; bảng `slots(name, json)`; card thêm đoạn
+  "Quy ước của shop đã áp: ..."; bump `STORE_VERSION`.
+- `audit.py`: thêm feature `unroled_text_cols`, `raw_without_fact`, `no_sales`; audit chạy lại sau slots, cổng
+  `gates.py` giữ nguyên và đọc audit mới.
+- `cli.py`: `datamate slots --split X [--biz B] [--dry-run]` in trigger, JSON, check của từng ô; `sql-check` và
+  `audit` chạy trên store có slots.
+- `eval/mutate.py`: `status_in_notes`, `abbrev_names`, `amount_before_discount`, `rename_debt_headers`,
+  `rename_sales_headers`.
+- Log mỗi câu: thêm `slots` (JSON đã áp của shop) cạnh `audit`.
+- Test: mỗi ô một fixture nhỏ (apply + check); một test trigger trên cache ingest train: không shop nào đổi
+  `sales_all`.
+
+### 9.5 Thứ tự và điều kiện nhận
+
+| bước | việc | nhận khi |
+|---|---|---|
+| 1 | khung `slots/` + ô 1 từ probe + mutate `status_in_notes` | train dry-run no-op; mutate ≥ 95%; `train_check` R→W 0; `sql-check` 139/139 |
+| 2 | `_JUNK` + card "quy ước đã áp" + log | `sql-check` không đổi; 388 test xanh |
+| 3 | ô 2 + mutate `abbrev_names` | như bước 1 |
+| 4 | ô 3 + mutate `amount_before_discount` | như bước 1 |
+| 5 | ô 4, ô 5 | như bước 1; ô 5 train no-op |
+| 6 | ô 6, ô 7 | contract debt train không đổi; mutate header |
+| 7 | chạy live public theo shop; image #2 | đo PA theo shop, so với public_d; không shop quen nào giảm |
+
+Mỗi bước là một commit riêng, bật được tắt được bằng `--slots none|1|1,2,...` để đo tách.
+
+### 9.6 Đã làm 15/11 (chưa commit)
+
+Bạn duyệt trong phiên: ô 0 `order_key` (thêm, không có trong 7 ô ở trên), ô 1–3, hoãn ô 4 (không có ca thật ở train
+lẫn public), giữ cổng `fill_gap`, retry khi lượt sửa bị cắt `length`, bỏ "điện thoại, sửa xe" khỏi prompt `lexgen.py`.
+
+**Code.**
+- `src/datamate/slots/apply.py`: phần áp tất định, hàm thuần.
+  - `order_key` thành role `order_id` khi ingest (`load_business` gộp vào `extra_roles`), nên fill §8 và bỏ dòng trùng
+    chạy trên nó;
+  - `name_map` đổi tên tắt trong bảng dòng trước khi `build_sales` nối danh mục;
+  - `status_text` và `line_amount` sửa dòng trước khi tính `order_ok`/`counted`.
+- `src/datamate/slots/base.py`: mỗi ô có trigger, prompt, parse, check.
+  - `run_slots` chạy theo thứ tự; `resolve_slots` lưu `cache/ingest/<split>/<biz>.slots.json`.
+  - Khoá gồm README, rulebook, model, ô bật, nội dung prompt. Reply của model được dùng lại khi prompt không đổi.
+- `canon.build_sales(tables, roles, slots)` và `sql/store.build_store(..., slots)`; `STORE_VERSION` 15; tag store gồm
+  file slots. Card thêm dòng "Shop conventions applied ...".
+- `_JUNK` chỉ áp cho bảng danh mục. Bảng dòng và bảng đầu đơn chỉ bỏ `hình ảnh`, `barcode`, `mã vạch`, `url`.
+- Pipeline gọi `resolve_slots` sau `resolve_statuses`, dùng `think` (thinking, cắt `length` thì hỏi lại không thinking).
+  Cờ `--slots all|none|tên,...`, mặc định `all`. Có `slots.json` theo run và trường `slots` trong log mỗi câu.
+- `datamate slots --split X [--biz] [--dry-run] [--mutate all]`.
+- Mutate mới: `status_in_notes`, `rename_order_key` (đổi header và bỏ dòng README của cột), `amount_before_discount`.
+- `_samples`: khi lượt sửa bị cắt trống thì thêm đúng một lượt không thinking (train route có 8 ca).
+- `kaggle/run_kaggle.py`: stage `train_check` (`assets/train_check.txt`, 106 id); chép `*.slots.json` vào output.
+
+**Điều kiện nhận đã đo.**
+
+| điều kiện | kết quả |
+|---|---|
+| train no-op (`datamate slots --split train --dry-run`) | 30/30 shop không ô nào bắn: các ô không đổi được câu train nào |
+| public: trigger | chỉ bắn ở dev_003, dev_011, dev_013, dev_014 (4 shop `suspect`); 10 shop clean không bắn |
+| `sql-check` train sau `_JUNK` | giống hệt bản đối chứng: order_count 147/162, revenue 273/291, cancel_count 100/100, avg_order_value 167/167, cancel_rate 139/139 |
+| test | 400 xanh (9 test mới) |
+
+Qwen3.5-9B local (Ollama, không thinking) điền 4 shop public, mọi ô qua check:
+- dev_003: `order_key` = `Đơn số`; `status_text` = `Trạng thái giao` (4 giá trị);
+- dev_011: `status_text` = `Ghi chú` (3 cách ghi trả hàng); `name_map` = sheet `Ghi tắt`;
+- dev_013: `status_text` = `Ghi chú` (cancel, Huỷ, đang giao);
+- dev_014: `order_key` = `STT`; `status_text` = `Ghi chú`; `name_map` = `Ghi tắt`.
+
+Sửa sau lần chạy đầu, đều là sửa chung: khi model bỏ trống tên cột hoặc bảng mà giá trị nó liệt kê chỉ khớp một ứng
+viên thì code suy ra; khuôn JSON của `name_map` nói rõ cần tên cột; ứng viên `order_key` không gồm cột ngày; bảng viết
+tắt phải có một dòng mỗi tên tắt và một cột tên dài hơn (loại `README.QuyDoi` của biz_101/107).
+
+**Phát lại SQL của public_d trên store có ô** (đáp án tiềm ẩn, trước cổng; public chỉ để đo):
+
+| shop | trước (đúng / sai) | sau | W→R | R→W | audit sau |
+|---|---|---|---|---|---|
+| dev_013 | 7 / 48 | 34 / 19 | 30 | 1 | clean |
+| dev_003 | 15 / 85 | 65 / 9 | 53 | 0 | clean (`order_key` làm cờ `discount_unapplied` giả tự tắt: `Tiền giảm` là giảm của đơn) |
+| dev_011 | 14 / 25 | 35 / 1 | 21 | 0 | suspect (`fill_gap`, cột `Thu máy cũ`): cổng giữ theo quyết định của bạn |
+| dev_014 | 10 / 38 | 27 / 14 | 19 | 0 | suspect (`fill_gap`, sổ nợ) |
+
+25 câu thành lỗi SQL khi phát lại vì SQL cũ gọi cột `"Đơn số"`, giờ đã là `order_id`. Chạy live thì model thấy cột mới.
+Chạy đầu-cuối local 6 câu (dev_003 ×3, dev_013 ×3, không thinking): 6/6 đúng.
+
+**Mutate train có gold** (`datamate slots --split train --mutate ...`, Qwen3.5-9B Ollama không thinking; contract của
+`eval/semantic.py`; baseline không mutate 826/859):
+
+| ô | mode | contract khớp | ghi chú |
+|---|---|---|---|
+| 0 `order_key` | `rename_order_key` (đổi header mã đơn, bỏ dòng README) | **826** (100% baseline) | cần nhận mã đơn chỉ ghi ở dòng đầu (§8, kiểu Sapo): lượt đầu 750 |
+| 1 `status_text` | `status_in_notes` (bỏ cột trạng thái, ghi vào Ghi chú) | **802** (97.1%) | phần lệch ở biz_116; lượt đầu 738 (model bỏ sót giá trị trả hàng) |
+| 2 `name_map` | `abbrev_names` (4/5 dòng ghi tên tắt, thêm sheet 2 cột) | **826**; tên hàng đúng 2 309 211 / 2 309 211 dòng | không ô: 21% dòng đúng tên (biz_101/105) |
+| 3 `line_amount` | `amount_before_discount` | **826** | không ô: 718 |
+
+Sửa ô 1 sau mutate, đều chung và đều giữ train no-op:
+- giá trị model bỏ sót mà bộ chuẩn hoá trạng thái của train (`normalize_status`) nhận ra thì code điền;
+- model trả null mà đúng một cột có mọi giá trị là trạng thái train biết, ít nhất một giá trị không phải hoàn thành, thì
+  dùng cột đó (bạn duyệt). dev_011 có `khách mang trả` nên cách lùi này không bắn, phần đó vẫn do model.
+- câu prompt "map EVERY value" làm Qwen không thinking trả null ở 10 shop (596/859), nên đã bỏ.
+
+Kaggle (tài khoản 1 public chạy code lúc đẩy, chưa có các sửa sau mutate; tài khoản 2 train_check chờ máy):
+`hydrochii/datamate-slots-public`, `hydrochiii/datamate-slots-train-check`. Sau commit, đẩy thêm
+`hydrochii/datamate-slots-public2` với code mới.

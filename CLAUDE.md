@@ -227,7 +227,25 @@ profit uses the **cost recorded on the sale line**.
 - **Rule (2026-11-11, organizers' QnA in `description/QnA.txt`):** inference code holds nothing learned from the public
   test (rulebook wording, macros, headers, layouts, fixes chosen on public labels). Add a fix only when train has the
   case. Question preprocessing is exempt (user's choice). See README "Status (2026-11-11, late)".
-- **Status (2026-11-14, late night):** read the README section "Status (2026-11-14, late night): start here" first;
+- **Status (2026-11-15, evening):** slots 0–3 in `src/datamate/slots/` (uncommitted); README "Status (2026-11-15,
+  evening): start here"; measurements in docs/PLAN_LAYERS.md section 9.6. Train no-op (no slot fires on train); public
+  replay dev_003 15/85 → 65/9, dev_013 7/48 → 34/19. Kaggle: `hydrochii/datamate-slots-public`,
+  `hydrochiii/datamate-slots-train-check`.
+- **Status (2026-11-15):** decision: typed slots (model fills a narrow JSON per shop convention, code applies it).
+  Plan: docs/PLAN_LAYERS.md section 9; README "Status (2026-11-15): start here". No code change yet.
+  - `sales_all` already keeps every unroled column (`Ghi chú`, `Ghi tắt`, `Tiền giảm`, ...); the missing part is the
+    meaning (`status`, `counted`, `amount`, `is_goods`), computed by role regexes that ignore those columns.
+  - Slot triggers fire on data gaps, not on rule failures; fallback is the current store plus the gate.
+- **Status (2026-11-14, night 2):** read the README section "Status (2026-11-14, night 2): start here" first, then
+  docs/PLAN_LAYERS.md section 8.6. The repo code is unchanged since `291d1bf`; this session only measured.
+  - public_d 0.595 (649/54/297). train_check 0.9528 on 106 train ids, with no right answer lost against route-train.
+  - New industries fail on the store, not on the model: the model's SQL is mostly right, but the store misses each
+    shop's own conventions.
+  - P3 probe with Qwen: rewriting the whole `sales_all` fails. A typed slot (status column, status map, order key)
+    filled by the model and applied by code works: replay W→R 49, R→W 2.
+  - Scratch code and the server's stores of the four shops are in `debug/p3_slot/` (gitignored).
+  - Waiting on the user: compliance of the slot, integration, image #2.
+- **Status (2026-11-14, late night):** README section "Status (2026-11-14, late night)";
   plan and measurements in docs/PLAN_LAYERS.md sections 6.5, 8, 8.5; pipeline walkthrough in docs/PIPELINE.md.
   - public_c 0.577 (shop audit + gates); Docker image #1 built daemonless on the server (`docker/assemble.py`,
     `docker/build_remote.sh`), MD5 `2992a15d5d4f8c29d75a7f885fa97de5`, never run; being uploaded by the user.
