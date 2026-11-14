@@ -19,3 +19,6 @@ result/
 .DS_Store
 .env
 assets/BUILD.txt
+
+# debug oracle notes keyed by question id (some public)
+assets/oracle/

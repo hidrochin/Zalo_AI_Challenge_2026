@@ -227,7 +227,27 @@ profit uses the **cost recorded on the sale line**.
 - **Rule (2026-11-11, organizers' QnA in `description/QnA.txt`):** inference code holds nothing learned from the public
   test (rulebook wording, macros, headers, layouts, fixes chosen on public labels). Add a fix only when train has the
   case. Question preprocessing is exempt (user's choice). See README "Status (2026-11-11, late)".
-- **Status (2026-11-12, night):** read the README section "Status (2026-11-12, night): start here" first.
+- **Status (2026-11-14, late night):** read the README section "Status (2026-11-14, late night): start here" first;
+  plan and measurements in docs/PLAN_LAYERS.md sections 6.5, 8, 8.5; pipeline walkthrough in docs/PIPELINE.md.
+  - public_c 0.577 (shop audit + gates); Docker image #1 built daemonless on the server (`docker/assemble.py`,
+    `docker/build_remote.sh`), MD5 `2992a15d5d4f8c29d75a7f885fa97de5`, never run; being uploaded by the user.
+  - Train-backed lints `lint.frame_advice`, table code-column drop, lexicon `đh` committed; runs `public_d` and
+    `train_check` were still on the server at handoff.
+- **Status (2026-11-14, evening):** README section "Status (2026-11-14, evening)"; measured
+  results per layer are in docs/PLAN_LAYERS.md section 6.
+  - Public on a rented vast.ai 2×4090 (`remote/serve_vllm.sh`, `remote/run_parallel.sh`): PA 0.406 vs v5 0.751. Cause:
+    ingest removed by the compliance commit `7ca2324`. Train route run: 0.9707 in-sample; a learned L8 drops nothing.
+  - Uncommitted: compile retry without thinking (`COMPILE_VERSION` 3), router "changed rule" fix, shop gate
+    (`shop-gate-fit`, `shop-gate`; public 0.406 → 0.553 but fragile), run scripts. 369 tests pass.
+- **Status (2026-11-14):** README section "Status (2026-11-14)".
+  - The Gemma 4 A/B of 2026-11-12 ran only smoke (28 public questions) in about 7 h and answered 6/28 and 4/28.
+    - Causes: thinking used up `max_tokens` 8192; parallelism only within one shop.
+    - Fix (uncommitted): after an empty `length`-cut reply, the next attempt runs with thinking off.
+  - Running on Kaggle (Qwen3.5-9B, `DM_THINK=route`, code `1e9b3cf` + fix):
+    - `hydrochii/datamate-agents-a`, `hydrochii/datamate-agents-b` (public);
+    - `hydrochiii/datamate-route-train` (train, B flags, for L8).
+- **Status (2026-11-13):** README "Status (2026-11-13)": layers of PLAN_LAYERS except L9 (`080f654`).
+- **Status (2026-11-12, night):** README "Status (2026-11-12, night)".
   - `text2sql` `ee9f9fa` holds the exact code now running on Kaggle A/B. Branch `submission` (`3b6df4c`; Docker in `c27e90d`)
     has the same fixes plus guideline log fields; merging the two will conflict.
   - Per-layer plan: [docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md).
