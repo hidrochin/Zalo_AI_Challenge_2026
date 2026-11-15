@@ -1,0 +1,16 @@
+{
+ "don vi co ban": "base_unit",
+ "gio dat don dong tra hang luc tra": "order_ts",
+ "ma khach trong neu khach le": "customer_id",
+ "ngay tao mat hang tren phan mem": "order_ts",
+ "so luong ban lay tu lo don vi co ban": "qty_base",
+ "so luong da doi ra don vi co ban": "qty_base",
+ "so luong nhap don vi co ban": "qty_base",
+ "ten hang file chi co mat hang co don vi lon": "product_name",
+ "ten khach khach le neu khong luu": "customer_name",
+ "thanh tien sau giam": "line_amount",
+ "thoi diem dat don ngay gio": "order_ts",
+ "tien hang cua don cong thanh tien cac mat hang truoc giam gia cua don chua gom phi giao": "order_goods",
+ "tong tien hang cua don cong thanh tien cac dong truoc giam gia cua don": "order_goods",
+ "trang thai phieu nhap": "status"
+}

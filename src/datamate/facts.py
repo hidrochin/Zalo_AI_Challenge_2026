@@ -355,6 +355,13 @@ def _units(biz: Business, sales: pd.DataFrame) -> pd.DataFrame | None:
             name = folded_codes.get(k) if kname == "product_id" else names.get(k)
             if name:
                 rows.append((name, unit, f))
+    uf = (biz.slots or {}).get("unit_factor")
+    if uf and uf.get("unit_column") in sales.columns:  # the factors the slot gave the sales lines hold for imports and stock too
+        q, qb = pd.to_numeric(sales["qty"], errors="coerce"), pd.to_numeric(sales["qty_base"], errors="coerce")
+        u = sales[uf["unit_column"]]
+        conv = (q > 0) & qb.notna() & (q != qb) & u.notna() & sales["product_name"].notna()
+        ratio = (qb / q)[conv].groupby([sales.loc[conv, "product_name"], u[conv].map(lambda v: fold(str(v)).strip())]).median()
+        rows += [(name, unit, float(f)) for (name, unit), f in ratio.items()]
     return pd.DataFrame(rows, columns=["product_name", "unit", "factor"]).drop_duplicates(["product_name", "unit"]) if rows else None
 
 

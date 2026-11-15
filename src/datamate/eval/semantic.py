@@ -98,7 +98,7 @@ def contract_items(train: Path, names: list[str] | None = None) -> tuple[list[Ch
 
 def score_contracts(biz, items: list, cal, gold: dict, rep: dict, max_misses: int = 8) -> None:
     """Add one shop's contract results to rep (check name -> matched / exact / skipped / misses)."""
-    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
+    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()}, biz.slots)
     for c, q, text in items:
         r = rep[c.name]
         r["matched"] += 1

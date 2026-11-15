@@ -6,6 +6,7 @@
 #        DM_KERNEL=datamate-public-run2 kaggle/push.sh update   (another kernel, so a running one is not replaced)
 #        DM_ENGINE=sql kaggle/push.sh update     (the model writes SQL instead of pandas)
 #        DM_ARGS="--catalog compiled --shop-views --judge unans" kaggle/push.sh update   (extra `datamate run` flags)
+#        DM_THINK=route kaggle/push.sh update   (thinking only for the hard questions: --thinking route)
 #        DM_MODEL=Qwen/Qwen3.5-9B kaggle/push.sh update   (serve this model only; default: Gemma 4 12B first, then Qwen)
 #        DM_DATASET=datamate-bundle-sql kaggle/push.sh   (own bundle per branch; `update` once it exists)
 #        DM_DATA=datamate-bundle-sql DM_DATASET=datamate-code kaggle/push.sh   (code only, ~300 KB; data/ comes from
@@ -43,6 +44,7 @@ sed -e "s/os.environ.get(\"DM_STAGES\", \"public\")/os.environ.get(\"DM_STAGES\"
     -e "s/os.environ.get(\"DM_ENGINE\", \"pandas\")/os.environ.get(\"DM_ENGINE\", \"${DM_ENGINE:-pandas}\")/" \
     -e "s|os.environ.get(\"DM_ARGS\", \"\")|os.environ.get(\"DM_ARGS\", \"${DM_ARGS:-}\")|" \
     -e "s|os.environ.get(\"DM_MODEL\", \"\")|os.environ.get(\"DM_MODEL\", \"${DM_MODEL:-}\")|" \
+    -e "s/os.environ.get(\"DM_THINK\", \"\")/os.environ.get(\"DM_THINK\", \"${DM_THINK:-}\")/" \
     -e "s/os.environ.get(\"DM_BUILD\", \"\")/os.environ.get(\"DM_BUILD\", \"$(shasum assets/BUILD.txt | cut -d' ' -f1)\")/" \
   kaggle/run_kaggle.py > "$KERNEL/run_kaggle.py"
 cat > "$KERNEL/kernel-metadata.json" <<EOF

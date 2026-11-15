@@ -53,19 +53,28 @@ class ExampleBank:
                     it["code"] = code[it["id"]]
         return cls(items, normalize)
 
-    def query(self, question: str, exclude_business: str | None, k: int = 4) -> list[dict]:
-        if not self.items or k <= 0:
-            return []
+    def _sims(self, question: str, exclude_business: str | None) -> np.ndarray:
         sims = (self.mat @ self.vec.transform([_key(self.normalize(question))]).T).toarray().ravel()
-        sims = sims + 0.05 * self.has_code
         if exclude_business is not None:
             sims[self.biz == exclude_business] = -1
+        return sims
+
+    def nearest(self, question: str, exclude_business: str | None) -> float:
+        """Cosine similarity of the closest train question of another shop: how familiar the question's wording is."""
+        return float(self._sims(question, exclude_business).max()) if self.items else 0.0
+
+    def query(self, question: str, exclude_business: str | None, k: int = 4, drop: Callable[[dict], bool] | None = None) -> list[dict]:
+        """drop(item): examples the target shop cannot use (a fact it lacks), skipped."""
+        if not self.items or k <= 0:
+            return []
+        sims = self._sims(question, exclude_business)
+        sims = np.where(sims < 0, sims, sims + 0.05 * self.has_code)
         out, seen = [], set()
         for i in np.argsort(-sims):
             if sims[i] < 0 or len(out) >= k:
                 break
             key = self.keys[i]
-            if key in seen:
+            if key in seen or (drop is not None and drop(self.items[i])):
                 continue
             seen.add(key)
             out.append(self.items[i])

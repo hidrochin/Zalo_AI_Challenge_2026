@@ -1,0 +1,21 @@
+# Next submission image on top of the previous one (docker load of its archive): same base, weights, train data and
+# .venv (uv.lock unchanged), so only the fixes below and the code are new. Built by docker/build_update.sh.
+ARG PREV=zaic2026_datamate_oom:v1
+FROM ${PREV}
+
+# the base ships torchcodec 0.17.0+cu130 next to torch 2.13.0+cu129: importing it raises OSError (no libcudart.so.13),
+# which vLLM 0.32 does not catch, so `vllm serve` died before starting (submission test 2026-11-15). See docker/Dockerfile.
+RUN pip uninstall -y torchcodec
+
+# the code: replaced whole, so files deleted since the previous image do not linger (the project is installed editable)
+RUN rm -rf /code/src /code/assets /code/tests /code/predict.sh /code/README.md /code/pyproject.toml /code/uv.lock
+COPY code/ /code/
+# training_code/: the README and manifest script are replaced (the train data stays); the manifest gains the generated
+# data (the lexicon's external entries and the raw replies they were built from) without hashing the weights again
+COPY training_code/ /code/training_code/
+RUN python3 /code/training_code/data_generation/manifest.py --add-generated /code /code/training_code/data_manifest.json
+RUN chmod +x /code/predict.sh \
+    && /code/.venv/bin/datamate --help > /dev/null \
+    && python3 -c "import vllm.multimodal.media.audio as a; assert a.AudioDecoder is None; print('vllm imports without torchcodec')"
+
+CMD ["bash", "/code/predict.sh"]

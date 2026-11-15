@@ -19,3 +19,11 @@ result/
 .DS_Store
 .env
 assets/BUILD.txt
+
+# debug oracle notes keyed by question id (some public)
+assets/oracle/
+
+# public-test labels: evaluation only, never in the submission
+ground_truth.jsonl
+# docker build context (weights, staged code)
+build/

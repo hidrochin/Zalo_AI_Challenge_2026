@@ -12,12 +12,17 @@ import re
 import pandas as pd
 
 from datamate.ingest.roles import header_key
+from datamate.slots.apply import apply_lines, apply_tables, apply_units
 from datamate.sql.dims import with_entity_keys
 from datamate.text import fold
 
 CANON_ROLES = ("order_id", "order_date", "order_ts", "status", "line_amount", "qty", "qty_base", "unit",
                "unit_price", "product_id", "product_name", "customer_id", "customer_name")
 ORDER_ROLES = ("order_date", "order_ts", "status", "customer_id", "customer_name")
+# the canonical columns of the sales lines, in their order (the source tables' other columns follow)
+CANON_COLS = ("order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base",
+              "unit", "base_unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key",
+              "customer_id", "customer_name", "customer_group", "walkin")
 _WALKIN = re.compile(r"^(khach )?(le|vang lai|walk ?in|khong ten|khach)$|^(kh|k) ?le$|^kl$|^kvl$|^-+$")
 _PHONE = re.compile(r"\s*[-–,(]?\s*\(?(?:\+?84|0)\d[\d .]{7,12}\)?\s*$")  # "Tên - 0328 548 455", "Tên (0913885954)"
 
@@ -59,15 +64,18 @@ def _role_cols(roles: dict[str, str]) -> dict[str, str]:
 
 
 # Roles that only say what a column is: it stays in the lines.
-_PLAIN_ROLES = (None, "order_total", "pay_method", "channel", "line_cost")
+_PLAIN_ROLES = (None, "order_goods", "order_total", "pay_method", "channel", "line_cost")
 _JUNK = re.compile(r"hinh anh|barcode|ma vach|vi tri|trong luong|mo ta|mau ghi chu|url|dinh muc|ton (lon|nho) nhat"
                    r"|lien quan|thuoc tinh|^stt$|^so thu tu$|id cua hang|ma chi nhanh|^tao luc$|ban truc tiep|bao hanh")
+# the sales and order tables keep every column but pictures and links: in a shop of an unseen trade, warranty or an
+# attribute is data (a catalogue's description, row number or store id is noise only in the catalogue)
+_LINE_JUNK = re.compile(r"hinh anh|barcode|ma vach|url")
 
 
-def _extra_cols(df: pd.DataFrame, roles: dict[str, str], taken) -> list[str]:
+def _extra_cols(df: pd.DataFrame, roles: dict[str, str], taken, junk: re.Pattern = _JUNK) -> list[str]:
     """Columns of df that carry no canonical role, are not already present and are not catalogue noise."""
     return [c for c in df.columns if roles.get(c) in _PLAIN_ROLES and not str(c).endswith("__norm") and c not in taken
-            and not str(c).startswith("_") and not _JUNK.search(header_key(c))]
+            and not str(c).startswith("_") and not junk.search(header_key(c))]
 
 
 def _has_time(s: pd.Series) -> bool:
@@ -149,6 +157,48 @@ def customer_group_col(t: pd.DataFrame) -> str | None:
     return best[0] if best else None
 
 
+def line_unit_col(sales: pd.DataFrame) -> str | None:
+    """The column of the sales lines holding the unit each line was sold in: `unit`, else a text column without a role
+    whose values are the shop's base-unit words on nearly every filled row ('ĐV': ly, cái, hộp)."""
+    if "unit" in sales.columns:
+        return "unit"
+    if "base_unit" not in sales.columns:
+        return None
+    words = set(sales["base_unit"].dropna().map(lambda v: fold(str(v)).strip()))
+    best = None
+    for c in sales.columns:
+        if c in CANON_COLS or not (sales[c].dtype == object or pd.api.types.is_string_dtype(sales[c])):
+            continue
+        v = sales[c].dropna()
+        if len(v) < 0.3 * len(sales) or not v.map(lambda x: isinstance(x, str)).all() or v.nunique() > 30:
+            continue
+        share = v.map(lambda x: fold(x).strip()).isin(words).mean()
+        if share >= 0.8 and (best is None or len(v) > best[1]):
+            best = (c, len(v))
+    return best[0] if best else None
+
+
+def unit_gap(sales: pd.DataFrame | None) -> tuple[str | None, pd.Series | None]:
+    """(unit column, mask) of the goods lines sold in a unit other than the product's base unit whose quantity was left
+    unconverted (qty_base = qty): no conversion factor was found. A product with converted lines is left out: its
+    unconverted lines are in the base unit and its base_unit label is what is off (train biz_106: 'cái' lines of a product
+    whose 'hộp' lines are × 6). Train: no line left (30 shops)."""
+    if sales is None or not {"qty", "qty_base", "base_unit"} <= set(sales.columns):
+        return None, None
+    col = line_unit_col(sales)
+    if col is None:
+        return None, None
+    u = sales[col].map(lambda v: fold(str(v)).strip() if pd.notna(v) else None)
+    b = sales["base_unit"].map(lambda v: fold(str(v)).strip() if pd.notna(v) else None)
+    q, qb = pd.to_numeric(sales["qty"], errors="coerce"), pd.to_numeric(sales["qty_base"], errors="coerce")
+    goods = sales["is_goods"] if "is_goods" in sales.columns else True
+    gap = u.notna() & b.notna() & (u != b) & (q == qb) & goods
+    if "product_name" in sales.columns:
+        converted = set(sales.loc[q.notna() & qb.notna() & (q != qb), "product_name"].dropna())
+        gap &= ~sales["product_name"].isin(converted)
+    return col, gap
+
+
 def base_units(out: pd.DataFrame, tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]],
                line_t: str, conv: list[tuple[dict, str, str]]) -> tuple[pd.Series | None, str]:
     """Each line's product's base unit (rulebook: the smallest unit the shop counts in), and where it came from.
@@ -205,17 +255,34 @@ def _order_level(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict
             continue
         t = tables[n]
         role_of = {v: c for c, v in r.items()}
-        amount = next((c for c in t.columns if "order_id" in role_of and _ORDER_GOODS_HEAD.match(header_key(c))), None)
+        amount = role_of.get("order_goods") if "order_id" in role_of else None  # the README's description, then the header
+        amount = amount or next((c for c in t.columns if "order_id" in role_of and _ORDER_GOODS_HEAD.match(header_key(c))), None)
         if amount is None:
             continue
         return tables, {**roles_by_table, n: {**r, amount: "line_amount"}}, n
     return None
 
 
-def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]]) -> tuple[pd.DataFrame | None, str]:
-    """Return (sales_lines frame or None, one-paragraph description for the prompt)."""
-    cands = [n for n, r in roles_by_table.items()
-             if "line_amount" in r.values() and n in tables and not re.search(r"nhap|import|ncc", fold(n))]
+def _sales_candidates(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]]) -> list[str]:
+    return [n for n, r in roles_by_table.items()
+            if "line_amount" in r.values() and n in tables and not re.search(r"nhap|import|ncc", fold(n))]
+
+
+def line_table(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]]) -> str | None:
+    """The table build_sales reads its lines from (the order table itself for a shop without line items)."""
+    cands = _sales_candidates(tables, roles_by_table)
+    if not cands:
+        level = _order_level(tables, roles_by_table)
+        return level[2] if level else None
+    return max(cands, key=lambda n: (("product_name" in roles_by_table[n].values()) or ("product_id" in roles_by_table[n].values()), len(tables[n])))
+
+
+def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]],
+                slots: dict | None = None) -> tuple[pd.DataFrame | None, str]:
+    """Return (sales_lines frame or None, one-paragraph description for the prompt). `slots`: the shop's conventions the
+    model filled (slots/apply.py), applied on the way."""
+    tables, slot_notes = apply_tables(tables, slots)
+    cands = _sales_candidates(tables, roles_by_table)
     level = None if cands else _order_level(tables, roles_by_table)
     if level:
         tables, roles_by_table, name = level
@@ -223,7 +290,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     if not cands:
         return None, ("sales_lines(): not built for this shop (no table with line amounts). Compute sales from the T tables directly; "
                       "this does not make sales questions unanswerable.")
-    line_t = max(cands, key=lambda n: (("product_name" in roles_by_table[n].values()) or ("product_id" in roles_by_table[n].values()), len(tables[n])))
+    line_t = line_table(tables, roles_by_table)
     lroles = roles_by_table[line_t]
     lr = _role_cols(lroles)
     L = tables[line_t]
@@ -231,7 +298,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     sources = [f"T['{line_t}']"]
     if "status" in lr and f"{lr['status']}__norm" in L.columns:
         out["status"] = L[f"{lr['status']}__norm"]
-    extras = _extra_cols(L, lroles, out.columns)
+    extras = _extra_cols(L, lroles, out.columns, _LINE_JUNK)
     for c in extras:
         out[c] = L[c]
 
@@ -258,7 +325,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             for m in missing:
                 if m in rc:
                     cols[m] = H[f"{rc[m]}__norm"] if m == "status" and f"{rc[m]}__norm" in H.columns else H[rc[m]]
-            for c in _extra_cols(H, hroles, set(out.columns) | set(cols)):
+            for c in _extra_cols(H, hroles, set(out.columns) | set(cols), _LINE_JUNK):
                 cols[c] = H[c]
             hdr = pd.DataFrame(cols).drop_duplicates("order_id")
             out = out.merge(hdr, on="order_id", how="left")
@@ -297,6 +364,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
                 sources.append(f"T['{n}'] (customer_name)")
                 break
 
+    product_attrs: set[str] = set()
     for n, r in roles_by_table.items():  # product attributes: group, active ingredient, cost, prescription ...
         rc = _role_cols(r)
         if n == line_t or n not in tables or "order_id" in rc or "line_amount" in rc or _NOT_MASTER.search(fold(n)):
@@ -316,6 +384,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         for c in add:
             v = k.map(M[c])
             out[c] = (v.fillna(False).astype(bool) if M[c].dtype == bool else v).values  # a product missing from the list has no flag
+        product_attrs.update(add)
         sources.append(f"T['{n}'] (product attributes: {', '.join(add)})")
 
     for n, r in roles_by_table.items():  # the customer's group, so a share needs no join that would drop walk-in orders
@@ -329,8 +398,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             out["customer_group"] = out[key].map(G)
             sources.append(f"T['{n}'] (customer_group from `{group}`)")
 
-    if "customer_group" not in out.columns:  # the group can sit on the order itself
-        group = next((c for c in out.columns if _GROUP_HEAD.match(header_key(c))), None)
+    if "customer_group" not in out.columns:  # the group can sit on the order itself, never on the product list ('Nhóm' of goods)
+        group = next((c for c in out.columns if _GROUP_HEAD.match(header_key(c)) and c not in product_attrs), None)
         if group is not None:
             out["customer_group"] = out[group]
 
@@ -347,6 +416,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     out["date"] = pd.to_datetime(out["order_date"], errors="coerce").dt.normalize()
     if "status" not in out.columns:  # no status column: every order is completed
         out["status"] = "hoàn thành"
+    slot_notes += apply_lines(out, slots)
     bad = out["status"].isin(["huỷ", "trả hàng"])
     qty_col = "qty" if "qty" in out.columns else ("qty_base" if "qty_base" in out.columns else None)
     if qty_col:  # returns are negative quantities; a line without a quantity is no goods (a discount or fee line)
@@ -403,10 +473,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     if fee:
         sources.append(f"{fee} service-fee lines kept in revenue but not as products")
 
-    order = ["order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base",
-             "unit", "base_unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key", "customer_id",
-             "customer_name", "customer_group", "walkin"]
-    canon = [c for c in order if c in out.columns]
+    slot_notes += apply_units(out, slots, unit_gap(out)[1])  # after the entity keys: factors name products as the card does
+    canon = [c for c in CANON_COLS if c in out.columns]
     extra = [c for c in out.columns if c not in canon and c != "order_date"]
     out = out[canon + extra].reset_index(drop=True)
     desc = (f"sales_lines(): {len(out)} rows built from {' + '.join(sources)}.\n"
@@ -422,8 +490,17 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             "`unit` = the unit the line was sold in; `base_unit` = the product's base unit, the unit of `qty_base` "
             "('bán được bao nhiêu lon' = sum(qty_base) of goods whose base_unit is lon, also lines sold by the case). "
             "orders() rolls these lines up to one row per order.")
+    if slot_notes:
+        desc += "\nShop conventions applied (read from the README and the rulebook): " + "; ".join(slot_notes) + "."
+    ucol, gap = unit_gap(out)
+    if gap is not None and gap.any():  # say it rather than let qty_base look converted
+        units = ", ".join(map(str, out.loc[gap, ucol].value_counts().index[:6]))
+        desc += (f"\nWARNING: {int(gap.sum())} goods lines sold in {units} (`{ucol}`, not the product's base unit) have no "
+                 "conversion factor, so their qty_base = qty is NOT in base units. The README or the product list may "
+                 "state the factor.")
     if flagged:
         desc += f"\nCheck before ranking customers: {', '.join(flagged)} hold(s) over 5% of orders, unusual for one customer."
+    out.attrs["sources"] = sorted({n for s in sources for n in re.findall(r"T\['([^']+)'\]", s)})  # audit scopes (gates.scope_of)
     return out, desc
 
 

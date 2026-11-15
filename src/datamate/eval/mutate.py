@@ -152,9 +152,148 @@ def subtotal_rows(sheets: list[RawSheet], readme: Readme, rng: random.Random, ev
     return out
 
 
+def _readme_without(readme: Readme, drop: set[str], rename: dict | None = None) -> Readme:
+    columns = {k: {(rename or {}).get(c, c): d for c, d in cols.items() if c not in drop} for k, cols in readme.columns.items()}
+    return replace(readme, columns=columns)
+
+
+def status_in_notes(pieces: Pieces, readme: Readme, rng: random.Random):
+    """No status column: a cancelled, returned or undelivered order says so in its note, as a hand-kept book does (slot
+    `status_text`)."""
+    out, dropped = [], set()
+    for sh, df in pieces:
+        col = next((c for c, r in _roles(sh, df, readme).items() if r == "status"), None)
+        if col is None:
+            out.append((sh, df))
+            continue
+        note = "Ghi chú đơn" if "Ghi chú" in df.columns else "Ghi chú"
+        said = df[col].map(lambda v: None if _is_null(v) or normalize_status(v) in (None, "hoàn thành") else str(v))
+        out.append((sh, df.drop(columns=[col]).assign(**{note: said})))
+        dropped.add(col)
+    return out, _readme_without(readme, dropped), {}
+
+
+def rename_order_key(pieces: Pieces, readme: Readme, rng: random.Random):
+    """The order code of the sales lines under a header no rule knows and no README line describes (slot `order_key`)."""
+    out, renamed, dropped = [], {}, set()
+    for sh, df in pieces:
+        roles = _roles(sh, df, readme)
+        col = next((c for c, r in roles.items() if r == "order_id"), None)
+        if col is None or "line_amount" not in roles.values():
+            out.append((sh, df))
+            continue
+        renamed[col] = UNSEEN["order_id"]
+        dropped.add(col)
+        out.append((sh, df.rename(columns={col: UNSEEN["order_id"]})))
+    return out, _readme_without(readme, dropped, renamed), renamed
+
+
+def amount_before_discount(pieces: Pieces, readme: Readme, rng: random.Random):
+    """Line amounts written before the line discount (slot `line_amount`)."""
+    from datamate.audit import _LINE_DISCOUNT
+    from datamate.ingest.roles import header_key
+
+    out = []
+    for sh, df in pieces:
+        roles = {r: c for c, r in _roles(sh, df, readme).items()}
+        disc = next((c for c in df.columns if not roles.get(c) and _LINE_DISCOUNT.match(header_key(c))), None)
+        if disc is None or not {"qty", "unit_price", "line_amount"} <= set(roles):
+            out.append((sh, df))
+            continue
+        df = df.copy()
+        df[roles["line_amount"]] = df[roles["line_amount"]].astype(object)
+        d, q, p = (df[c].map(parse_number) for c in (disc, roles["qty"], roles["unit_price"]))
+        hit = d.fillna(0).gt(0) & q.notna() & p.notna()
+        df.loc[hit, roles["line_amount"]] = (q * p)[hit]
+        out.append((sh, df))
+    return out, readme, {}
+
+
+def _short(name: str) -> str:
+    """'Coca Cola 330ml' -> 'Coca C330ml': the first word, then initials, words with a digit kept whole."""
+    words = str(name).split()
+    return " ".join([words[0], "".join(w if any(ch.isdigit() for ch in w) else w[0] for w in words[1:])]).strip()
+
+
+def abbrev_names(pieces: Pieces, readme: Readme, rng: random.Random):
+    """Four sales lines in five name the product short, and a two-column sheet lists each short form next to the full
+    name, as a hand-kept book does (slot `name_map`). Keyed on the row, so identical rows stay identical."""
+    full: dict[str, str] = {}
+    for sh, df in pieces:
+        roles = _roles(sh, df, readme)
+        col = next((c for c, r in roles.items() if r == "product_name"), None)
+        if col and "line_amount" in roles.values():
+            for v in df[col].dropna().unique():
+                if isinstance(v, str) and len(v.split()) >= 2:
+                    full.setdefault(fold(v).strip(), v.strip())
+    if not full:
+        return pieces, readme, {}
+    short, seen = {}, Counter()
+    for k, v in sorted(full.items()):
+        s = _short(v)
+        seen[fold(s)] += 1
+        short[k] = s if seen[fold(s)] == 1 else f"{s} {seen[fold(s)]}"
+    out = []
+    for sh, df in pieces:
+        roles = _roles(sh, df, readme)
+        col = next((c for c, r in roles.items() if r == "product_name"), None)
+        if col and "line_amount" in roles.values():
+            df = df.copy()
+            hit = [random.Random(str(row)).random() < 0.8 for row in df.itertuples(index=False, name=None)]
+            df.loc[hit, col] = df.loc[hit, col].map(lambda v: short.get(fold(v).strip(), v) if isinstance(v, str) else v)
+        out.append((sh, df))
+    sheet = pd.DataFrame({"Ghi tắt": [short[k] for k in sorted(full)], "Tên hàng": [full[k] for k in sorted(full)]})
+    out.append((RawSheet("GhiTat.xlsx", "Ghi tắt", sheet, True), sheet))
+    return out, readme, {}
+
+
+def rename_base_qty(pieces: Pieces, readme: Readme, rng: random.Random):
+    """The sales lines' quantity in base units under a header no rule knows and no README line describes, so lines sold
+    in a large unit keep qty_base = qty (slot `unit_factor`, its base quantity column)."""
+    out, renamed, dropped = [], {}, set()
+    for sh, df in pieces:
+        roles = _roles(sh, df, readme)
+        col = next((c for c, r in roles.items() if r == "qty_base"), None)
+        if col is None or "line_amount" not in roles.values():
+            out.append((sh, df))
+            continue
+        renamed[col] = UNSEEN["qty_base"]
+        dropped.add(col)
+        out.append((sh, df.rename(columns={col: UNSEEN["qty_base"]})))
+    return out, _readme_without(readme, dropped, renamed), renamed
+
+
+def factors_in_text(pieces: Pieces, readme: Readme, rng: random.Random):
+    """A conversion table's factor written as text with both units ('1 thùng = 24 lon') instead of a number, so no rule
+    reads it (slot `unit_factor`, its factors)."""
+    from datamate.canon import _BASE_UNIT, _CONV_UNIT, _FACTOR
+    from datamate.ingest.roles import header_key
+
+    out = []
+    for sh, df in pieces:
+        heads = {c: header_key(c) for c in df.columns}
+        fcol = next((c for c, h in heads.items() if _FACTOR.match(h)), None)
+        ucol = next((c for c, h in heads.items() if _CONV_UNIT.match(h) and not _BASE_UNIT.match(h)), None)
+        bcol = next((c for c, h in heads.items() if _BASE_UNIT.match(h)), None)
+        if fcol is None or ucol is None:
+            out.append((sh, df))
+            continue
+        df = df.copy()
+        f = df[fcol].map(parse_number)
+        base = df[bcol] if bcol is not None else pd.Series("đơn vị cơ bản", index=df.index)
+        df[fcol] = [f"1 {u} = {x:g} {b}" if pd.notna(x) and not _is_null(u) else None for u, x, b in zip(df[ucol], f, base)]
+        out.append((sh, df))
+    return out, readme, {}
+
+
 PIECE_MODES = {"untouched": untouched, "shuffle": shuffle, "no_readme": no_readme, "rename": rename, "rename_no_readme": rename_no_readme,
-               "formats": formats, "status_words": status_words, "name_spellings": name_spellings}
-MODES = [*PIECE_MODES, "subtotal_rows"]
+               "formats": formats, "status_words": status_words, "name_spellings": name_spellings,
+               "status_in_notes": status_in_notes, "rename_order_key": rename_order_key,
+               "amount_before_discount": amount_before_discount, "abbrev_names": abbrev_names,
+               "rename_base_qty": rename_base_qty, "factors_in_text": factors_in_text}
+SLOT_MODES = ["rename_order_key", "status_in_notes", "abbrev_names", "amount_before_discount", "rename_base_qty",
+              "factors_in_text"]  # one per slot they test (unit_factor: two)
+MODES = [*(m for m in PIECE_MODES if m not in SLOT_MODES), "subtotal_rows"]
 
 
 def mutated(biz_id: str, readme: Readme, sheets: list[RawSheet], pieces: Pieces, mode: str, seed: int):
@@ -184,6 +323,20 @@ def model_steps(generate):
     return after
 
 
+def slot_steps(generate, rulebook: str, enabled=None):
+    """The slots (slots/base.py) on shops held in memory: biz.slots set, the order code as a role."""
+    from datamate.slots.base import ORDER, run_slots
+
+    def after(biz: Business, rebuild) -> Business:
+        applied, record = run_slots(biz, rulebook, generate, rebuild, enabled or ORDER)
+        key = applied.get("order_key")
+        out = rebuild({**biz.extra_roles, key["table"]: {**biz.extra_roles.get(key["table"], {}), key["column"]: "order_id"}}) if key else biz
+        out.slots = {k: v for k, v in applied.items() if k != "order_key"}
+        print(f"  {biz.id}: " + "; ".join(f"{k} {r['result']}" for k, r in record.items()), flush=True)
+        return out
+    return after
+
+
 def recovered_roles(base: Business, biz: Business, renamed: dict) -> Counter:
     """Per role: columns that kept it ('role') and columns that lost it ('role!') or got another ('role?')."""
     c: Counter = Counter()
@@ -196,8 +349,18 @@ def recovered_roles(base: Business, biz: Business, renamed: dict) -> Counter:
 
 
 def _entities(biz: Business) -> dict[str, int]:
-    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
+    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()}, biz.slots)
     return {k: int(sales[k].nunique()) for k in ("product_key", "customer_key") if sales is not None and k in sales.columns}
+
+
+def _names(biz: Business) -> Counter:
+    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()}, biz.slots)
+    return Counter() if sales is None or "product_name" not in sales else Counter(sales["product_name"].dropna().map(fold))
+
+
+def names_kept(base: Counter, now: Counter) -> tuple[int, int]:
+    """(lines whose product name is the one the untouched shop has, lines): names as a multiset, rows need not align."""
+    return sum(min(n, now[k]) for k, n in base.items()), sum(base.values())
 
 
 def run_mutations(data_root: Path, modes: list[str] | None = None, shops: list[str] | None = None, seed: int = 0, after=None) -> dict:
@@ -208,6 +371,7 @@ def run_mutations(data_root: Path, modes: list[str] | None = None, shops: list[s
     reps = {m: empty_report(checks) for m in ["baseline", *(modes or MODES)]}
     roles: dict[str, Counter] = defaultdict(Counter)
     entities: dict[str, Counter] = defaultdict(Counter)
+    names: dict[str, Counter] = defaultdict(Counter)
     for biz_id in sorted(shops or todo):
         bdir = train / "data" / biz_id
         readme = parse_readme((bdir / "README.md").read_text(encoding="utf-8") if (bdir / "README.md").exists() else "")
@@ -218,6 +382,7 @@ def run_mutations(data_root: Path, modes: list[str] | None = None, shops: list[s
         score_contracts(base, todo[biz_id], cal, gold, reps["baseline"])
         ents = _entities(base)
         entities["baseline"].update(ents)
+        base_names = _names(base)
         for mode in reps:
             if mode == "baseline":
                 continue
@@ -226,6 +391,8 @@ def run_mutations(data_root: Path, modes: list[str] | None = None, shops: list[s
             roles[mode].update(recovered_roles(base, biz, renamed))
             score_contracts(biz, todo[biz_id], cal, gold, reps[mode], max_misses=2)
             entities[mode].update(_entities(biz))
+            kept_n, all_n = names_kept(base_names, _names(biz))
+            names[mode].update({"kept": kept_n, "lines": all_n})
         print(f"{biz_id} done", flush=True)
     out = {}
     for mode, rep in reps.items():
@@ -235,7 +402,7 @@ def run_mutations(data_root: Path, modes: list[str] | None = None, shops: list[s
                      "by_check": {k: [r["exact"], r["matched"]] for k, r in rep.items()},
                      "skipped": dict(sum((Counter(r["skipped"]) for r in rep.values()), Counter())),
                      "roles_kept": [kept, total], "lost": {r: n for r, n in roles[mode].most_common() if r[-1] in "!?"},
-                     "entities": dict(entities[mode]), "misses": [m for r in rep.values() for m in r["misses"]][:6]}
+                     "entities": dict(entities[mode]), "names_kept": [names[mode]["kept"], names[mode]["lines"]], "misses": [m for r in rep.values() for m in r["misses"]][:6]}
     return out
 
 

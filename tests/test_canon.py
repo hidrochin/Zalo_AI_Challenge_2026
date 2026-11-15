@@ -91,11 +91,38 @@ def test_description_column_is_not_a_lookup_sheet():
     assert s["product_name"].tolist() == ["Trà", "Cà phê", "Sữa"]
 
 
+def test_group_of_the_product_list_is_no_customer_group():
+    lines = pd.DataFrame({"Mã": ["1", "2", "3"], "Ngày": pd.to_datetime(["2025-01-01"] * 3), "Hàng": ["Bỉm", "Sữa", "Bỉm"],
+                          "Tiền": [1, 2, 3], "SL": [1, 1, 1], "Khách": ["An", "Bình", "An"]})
+    master = pd.DataFrame({"Hàng": ["Bỉm", "Sữa"], "Nhóm": ["bỉm tã", "sữa bột"]})
+    roles = {"lines": {"Mã": "order_id", "Ngày": "order_date", "Hàng": "product_name", "Tiền": "line_amount", "SL": "qty",
+                       "Khách": "customer_name"}, "m": {"Hàng": "product_name"}}
+    s, _ = build_sales({"lines": lines, "m": master}, roles)
+    assert "customer_group" not in s.columns and s["Nhóm"].tolist() == ["bỉm tã", "sữa bột", "bỉm tã"]
+    s, _ = build_sales({"lines": lines.assign(**{"Nhóm khách": ["sỉ", "lẻ", "sỉ"]})}, roles)
+    assert s["customer_group"].tolist() == ["sỉ", "lẻ", "sỉ"]  # on the order itself it still is
+
+
 def test_order_only_shop_reads_each_order_as_one_line():
     orders = pd.DataFrame({"Mã": ["A", "B"], "Ngày": pd.to_datetime(["2025-01-01", "2025-01-02"]), "Tiền hàng": [100, 200],
                            "TT": ["xong", "huỷ"], "TT__norm": ["hoàn thành", "huỷ"]})
     s, _ = build_sales({"o": orders}, {"o": {"Mã": "order_id", "Ngày": "order_date", "TT": "status"}})
     assert s.loc[s["counted"], "amount"].sum() == 100
+
+
+def test_order_only_shop_finds_the_goods_value_by_its_readme_description():
+    from datamate.ingest.roles import assign_roles
+
+    # biz_110's README sentence for `Tien hang`, under a header no rule knows
+    descs = {"Giá trị đơn": "tiền hàng của đơn: cộng thành tiền các mặt hàng, trước giảm giá của đơn, chưa gồm phí giao",
+             "Mã": "mã đơn", "Ngày": "ngày bán", "TT": "trạng thái đơn"}
+    roles = assign_roles(["Mã", "Ngày", "Giá trị đơn", "Tổng", "TT"], descs)
+    assert roles["Giá trị đơn"] == "order_goods"
+    orders = pd.DataFrame({"Mã": ["A", "B"], "Ngày": pd.to_datetime(["2025-01-01", "2025-01-02"]),
+                           "Giá trị đơn": [100, 200], "Tổng": [110, 220], "TT": ["xong", "xong"],
+                           "TT__norm": ["hoàn thành", "hoàn thành"]})
+    s, _ = build_sales({"o": orders}, {"o": roles})
+    assert s["amount"].sum() == 300
 
 
 def test_boolean_cells_stay_boolean():

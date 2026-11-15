@@ -93,8 +93,9 @@ def tables_to_map(biz: Business) -> list[str]:
     return [n for n, ti in biz.info.items() if {"line_amount", "order_id"} & set(ti.roles.values()) and _free_columns(biz, n)]
 
 
-def parse_roles(reply: str, df, columns: list[str], taken: set[str], allowed=ROLES) -> dict[str, str]:
-    """Column -> role for the columns asked about, without roles already used and values that do not fit."""
+def parse_roles(reply: str, df, columns: list[str], taken: set[str], allowed=ROLES, log: list | None = None) -> dict[str, str]:
+    """Column -> role for the columns asked about, without roles already used and values that do not fit.
+    log: gets one record per proposed role, accepted or refused with the reason."""
     m = _JSON.search(reply or "")
     try:
         got = json.loads(m.group(0)) if m else {}
@@ -103,7 +104,13 @@ def parse_roles(reply: str, df, columns: list[str], taken: set[str], allowed=ROL
     out: dict[str, str] = {}
     for c in columns:
         role = got.get(c) if isinstance(got, dict) else None
-        if role in allowed and role not in taken and not role_problem(df, c, role):
+        if not role:
+            continue
+        why = ("not a role offered" if role not in allowed else "role already used" if role in taken
+               else role_problem(df, c, role))
+        if log is not None:
+            log.append({"column": c, "role": role, "accepted": not why, "why": why or "values fit"})
+        if not why:
             out[c] = role
             taken = taken | {role}
     return out
@@ -118,11 +125,14 @@ def _line_amounts_on_lines(biz: Business, proposed: dict[str, dict[str, str]]) -
     return {n: {c: r for c, r in cols.items() if r != "line_amount" or sold & roles[n]} for n, cols in proposed.items()}
 
 
-def propose_roles(biz: Business, generate: Callable[[str, list[str]], str]) -> dict[str, dict[str, str]]:
+def propose_roles(biz: Business, generate: Callable[[str, list[str]], str], log: list | None = None) -> dict[str, dict[str, str]]:
     out = {}
     for name in tables_to_map(biz):
         cols = _free_columns(biz, name)
-        roles = parse_roles(generate(SYSTEM, [table_part(name, biz)]), biz.tables[name], cols, set(biz.info[name].roles.values()))
+        part: list = []
+        roles = parse_roles(generate(SYSTEM, [table_part(name, biz)]), biz.tables[name], cols, set(biz.info[name].roles.values()), log=part)
+        if log is not None:
+            log += [{"table": name, **d} for d in part]
         if roles:
             out[name] = roles
     return {n: r for n, r in _line_amounts_on_lines(biz, out).items() if r}
@@ -147,7 +157,7 @@ def _is_order_total(df: pd.DataFrame, oid: str, col: str, sales: pd.DataFrame | 
     return ratio.empty or 0.5 <= ratio.median() <= 2
 
 
-def _fit_table(biz: Business, name: str, found: dict[str, str], sales: pd.DataFrame | None) -> dict[str, str]:
+def _fit_table(biz: Business, name: str, found: dict[str, str], sales: pd.DataFrame | None, log: list | None = None) -> dict[str, str]:
     """The proposals this table's shape allows. A wrong fact gives a wrong number, a missing one only leaves the question to the model."""
     df, ti = biz.tables[name], biz.info[name]
     col_of = {r: c for c, r in {**ti.roles, **found}.items()}
@@ -174,10 +184,14 @@ def _fit_table(biz: Business, name: str, found: dict[str, str], sales: pd.DataFr
             return lines and (share is None or share.median() <= 1.2)
         return True
 
-    return {c: r for c, r in found.items() if fits(c, r)}
+    out = {c: r for c, r in found.items() if fits(c, r)}
+    for c in set(found) - set(out):
+        if log is not None:
+            log.append({"table": name, "column": c, "role": found[c], "accepted": False, "why": "the table's shape does not allow it"})
+    return out
 
 
-def propose_fact_roles(biz: Business, generate: Callable[[str, list[str]], str]) -> dict[str, dict[str, str]]:
+def propose_fact_roles(biz: Business, generate: Callable[[str, list[str]], str], log: list | None = None) -> dict[str, dict[str, str]]:
     """Roles of the facts this shop did not yield, one call per table with unplaced columns."""
     sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
     offered = {r: d for gap in missing(build_facts(biz, sales)) for r, d in FACT_ROLES.get(gap, {}).items()}
@@ -188,8 +202,12 @@ def propose_fact_roles(biz: Business, generate: Callable[[str, list[str]], str])
     for name in biz.tables:
         cols = _free_columns(biz, name)
         if cols:
-            found = parse_roles(generate(system, [table_part(name, biz)]), biz.tables[name], cols, set(biz.info[name].roles.values()), offered)
-            found = _fit_table(biz, name, found, sales)
+            part: list = []
+            found = parse_roles(generate(system, [table_part(name, biz)]), biz.tables[name], cols, set(biz.info[name].roles.values()),
+                                offered, log=part)
+            if log is not None:
+                log += [{"table": name, **d} for d in part]
+            found = _fit_table(biz, name, found, sales, log)
             if found:
                 out[name] = found
     return out
@@ -200,8 +218,11 @@ def resolve_columns(biz: Business, cache_dir: Path, generate: Callable[[str, lis
     path = roles_path(cache_dir, biz.split, biz.id)
     if path.exists():
         return False
-    roles = propose_roles(biz, generate)
-    for name, found in propose_fact_roles(with_roles(biz, roles), generate).items():
+    log: list = []  # every proposal with the reason it was kept or refused, for the evidence log
+    roles = propose_roles(biz, generate, log)
+    for name, found in propose_fact_roles(with_roles(biz, roles), generate, log).items():
         roles[name] = {**roles.get(name, {}), **found}
     path.write_text(json.dumps(roles, ensure_ascii=False, indent=1), encoding="utf-8")
+    path.with_name(path.name.replace(".json", ".decisions.json")).write_text(json.dumps(log, ensure_ascii=False, indent=1),
+                                                                               encoding="utf-8")
     return bool(roles)

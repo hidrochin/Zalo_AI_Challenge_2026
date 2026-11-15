@@ -155,7 +155,7 @@ def run_fact_checks(data_root: Path, cache_dir: Path, split: str = "train", max_
     misses: dict[str, list] = defaultdict(list)
     for biz_id, qs in sorted(by_biz.items()):
         biz = load_business(root, biz_id, Path(cache_dir))
-        sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
+        sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()}, biz.slots)
         if sales is None:
             continue
         facts = build_facts(biz, sales)

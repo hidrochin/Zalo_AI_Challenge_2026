@@ -10,6 +10,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -23,17 +24,19 @@ ENV_NIGHTLY = "/tmp/vllm-nightly"  # a vLLM nightly, for a model the release lac
 PORT = 8000
 # (model, vLLM env, extra args, thinking): the first one that starts and answers sanely is used. Gemma 4 12B first, as the
 # final image will run it; T4 (sm_75) has no bf16 and no Marlin kernels, so a plain AWQ build in fp16, then the full model
-GEMMA = ["--dtype", "half", "--reasoning-parser", "gemma4"]
+GEMMA = ["--dtype", "half", "--reasoning-parser", "gemma4", "--limit-mm-per-prompt", '{"image":0,"audio":0,"video":0}']
 MODELS = [
     # its config says compressed-tensors (W4A16), not awq: vLLM reads the method from the config
     ("nicklas373/gemma-4-12B-it-AWQ", ENV, GEMMA + ["--max-model-len", "32768"], True),
     ("google/gemma-4-12B-it", ENV, GEMMA + ["--max-model-len", "16384"], True),
-    ("Qwen/Qwen3.5-9B", ENV, ["--dtype", "half", "--limit-mm-per-prompt", '{"image":0,"video":0}', "--max-model-len", "32768"], True),
+    ("Qwen/Qwen3.5-9B", ENV, ["--dtype", "half", "--reasoning-parser", "qwen3", "--limit-mm-per-prompt", '{"image":0,"video":0}',
+                              "--max-model-len", "32768"], True),
 ]
-STAGES = os.environ.get("DM_STAGES", "public").split(",")  # public | holdout | dev120 | dev120_oracle | train; push.sh sets it
+STAGES = os.environ.get("DM_STAGES", "public").split(",")  # probe | smoke | public | holdout | train_check | dev120 | train; push.sh sets it
 ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql; push.sh sets it
 ARGS = os.environ.get("DM_ARGS", "")  # extra `datamate run` flags (--catalog compiled --shop-views --judge unans); push.sh sets it
 ONLY = os.environ.get("DM_MODEL", "")  # serve only this model (else the list in order); push.sh sets it
+THINK = os.environ.get("DM_THINK", "")  # route: thinking only for the hard questions (--thinking route); push.sh sets it
 BUILD = os.environ.get("DM_BUILD", "")  # sha1 of assets/BUILD.txt at push time; push.sh sets it
 THINKING = {}  # model -> thinking on, filled from MODELS
 
@@ -89,6 +92,7 @@ def install(env):
            if env == ENV_NIGHTLY else f"{pip} vllm")
     try:
         sh(cmd)
+        patch_attention(env)
         # a torchaudio built for another torch cannot load, and transformers imports it for any model with audio (Gemma 4):
         # without it, transformers skips audio
         sh(f"{env}/bin/python -c 'import torchaudio' 2>/dev/null || uv pip uninstall -q --python {env}/bin/python torchaudio",
@@ -99,6 +103,24 @@ def install(env):
     except subprocess.CalledProcessError as e:
         log(f"vLLM install in {env} failed: {e}")
         return False
+
+
+def patch_attention(env):
+    """T4 has 64 KB of shared memory per block. Gemma 4's full-attention layers have head size 512, and vLLM's Triton
+    prefill tile of 32 KV rows then needs 96 KB ("OutOfResources: shared memory, Required: 98304"). A tile of 16 for
+    heads of more than 512 bytes halves the K and V tiles, and one pipeline stage keeps a single copy of them; heads up to
+    256 (Gemma's sliding layers, Qwen) keep vLLM's choice."""
+    path = glob.glob(f"{env}/lib/python*/site-packages/vllm/v1/attention/ops/triton_unified_attention.py")
+    edits = [("    if is_prefill:\n        return 32\n", "    if is_prefill:\n        return 16 if head_size * element_size > 512 else 32\n"),
+             ("    launch_num_stages: int | None = None\n",
+              "    launch_num_stages: int | None = 1 if head_size * q.element_size() > 512 else None\n")]
+    src = open(path[0]).read() if path else ""
+    for old, new in edits:
+        state = "applied" if old in src else "already there" if new in src else "NOT FOUND"
+        src = src.replace(old, new, 1)
+        log(f"attention patch {new.split('=')[0].strip()}: {state}")
+    if path:
+        open(path[0], "w").write(src)
 
 
 def _get(path, data=None, timeout=10):
@@ -144,7 +166,10 @@ def start_server(only=None):
             log(f"{model} server exited with code {proc.returncode}")
         logf.flush()
         with open(vlog, errors="replace") as f:  # the reason, in the kernel's live log: the output files come only at the end
-            log("vLLM log tail:\n" + "".join([ln for ln in f if "it/s]" not in ln][-40:]))
+            lines = [ln for ln in f if "it/s]" not in ln]
+        # the root cause sits in a worker's lines, above the API server's traceback
+        errors = [ln for ln in lines if re.search(r"Error|ERROR|error:|not supported|Unsupported|out of memory|No kernel", ln)]
+        log("vLLM errors:\n" + "".join(errors[-25:]) + "\nvLLM log tail:\n" + "".join(lines[-15:]))
         proc.kill()
         proc.wait()
         time.sleep(15)
@@ -174,7 +199,8 @@ def run_stage(name, args, n_expected, model, proc, max_restarts=3):
     for attempt in range(1 + max_restarts):
         log(f"stage {name}: start (attempt {attempt + 1})")
         t0 = time.time()
-        think = "--thinking on --max-tokens 8192" if THINKING.get(model) else "--thinking off"
+        think = ("--thinking off" if not THINKING.get(model) else "--thinking route --max-tokens 2048" if THINK == "route"
+                 else "--thinking on --max-tokens 8192")
         p = subprocess.run(f"cd {PROJ} && uv run --no-sync datamate run --base-url http://localhost:{PORT}/v1 --model llm "
                            f"--engine {ENGINE} {think} --concurrency 16 --exec-workers 4 --out {OUT}/{name} {args} {ARGS} 2>&1 "
                            f"| grep -v -e sitecustomize -e \"No module named 'wrapt'\" | tail -60",
@@ -184,6 +210,8 @@ def run_stage(name, args, n_expected, model, proc, max_restarts=3):
             f.write(p.stdout)
         n = sum(1 for _ in open(sub)) if os.path.exists(sub) else 0
         log(f"stage {name}: {n}/{n_expected} answered after {time.time() - t0:.0f}s")
+        # each shop's slot fills with their triggers, model replies and checks (the run dir keeps only the applied ones)
+        subprocess.run(f"mkdir -p {OUT}/slots && cp {PROJ}/cache/ingest/*/*.slots.json {OUT}/slots/ 2>/dev/null", shell=True)
         if n >= n_expected:
             return proc
         log_host_state(f"stage {name} stopped early")
@@ -209,6 +237,35 @@ def sales_lines_report(split):
     log("sales_lines per business:\n" + p.stdout + p.stderr[-500:])
 
 
+def smoke_ids(split, path, per_shop=2):
+    """The first questions of every shop: each shop's compile, shop views and setup run once."""
+    seen, ids = {}, []
+    for ln in open(f"{PROJ}/data/{split}/questions.jsonl"):
+        q = json.loads(ln)
+        if seen.get(q["business_id"], 0) < per_shop:
+            seen[q["business_id"]] = seen.get(q["business_id"], 0) + 1
+            ids.append(q["id"])
+    open(path, "w").write("\n".join(ids) + "\n")
+    return len(ids)
+
+
+def smoke_ok(name, n_expected):
+    """Every question has a line, no traceback, the model's replies parse and some answers come out."""
+    sub = f"{OUT}/{name}/submission.jsonl"
+    rows = [json.loads(ln) for ln in open(sub)] if os.path.exists(sub) else []
+    answered = sum(1 for r in rows if r.get("type") not in ("abstain", None))
+    llm_err = 0
+    for f in glob.glob(f"{OUT}/{name}/logs/*.json"):
+        samples = json.load(open(f)).get("samples") or []
+        llm_err += bool(samples) and all(str(s.get("error") or "").startswith("LLM error") for s in samples)
+    stdout = open(f"{OUT}/{name}.txt").read() if os.path.exists(f"{OUT}/{name}.txt") else ""
+    checks = {"all lines": len(rows) >= n_expected, "no traceback": "Traceback" not in stdout,
+              "LLM errors < 25%": llm_err < 0.25 * n_expected, "answered >= 25%": answered >= 0.25 * n_expected}
+    log(f"smoke: {len(rows)}/{n_expected} lines, {answered} answered, {llm_err} with only LLM errors; " +
+        ", ".join(f"{k}: {'ok' if v else 'FAIL'}" for k, v in checks.items()))
+    return all(checks.values())
+
+
 def main():
     setup()
     model, proc = start_server(ONLY or None)
@@ -226,30 +283,31 @@ def main():
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -5")
         n = sum(1 for ln in open(f"{PROJ}/assets/holdout.txt") if ln.strip())
         proc = run_stage("holdout", "--split train --ids-file assets/holdout.txt", n, model, proc)
+    if "train_check" in STAGES:  # 106 train ids (lint and table cases + controls): no right answer may turn wrong
+        sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -5")
+        n = sum(1 for ln in open(f"{PROJ}/assets/train_check.txt") if ln.strip())
+        proc = run_stage("train_check", "--split train --ids-file assets/train_check.txt", n, model, proc)
     if "dev120" in STAGES:
         n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
         proc = run_stage("dev120", "--split train --ids-file assets/dev120.txt", n, model, proc)
-    if "dev120_oracle" in STAGES:  # table-selection experiment: only the tables a right answer used
-        n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
-        proc = run_stage("dev120_oracle", "--split train --ids-file assets/dev120.txt --keep-tables assets/oracle_tables.json", n, model, proc)
     if "train" in STAGES:
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -20")
         sales_lines_report("train")
         n = sum(1 for _ in open(f"{PROJ}/data/train/questions.jsonl"))
         proc = run_stage("train", "--split train", n, model, proc)
+    if "smoke" in STAGES:  # a few questions of every shop end to end (compile, shop views, judge) before the long run
+        sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split public_test --workers 4 | tail -20")
+        n = smoke_ids("public_test", f"{OUT}/smoke_ids.txt")
+        proc = run_stage("smoke", f"--split public_test --ids-file {OUT}/smoke_ids.txt", n, model, proc, max_restarts=0)
+        if not smoke_ok("smoke", n):
+            proc.terminate()
+            sys.exit("smoke run failed: the long stages were not started")
     if "public" in STAGES:
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split public_test --workers 4 | tail -20")
         sales_lines_report("public_test")
         n = sum(1 for _ in open(f"{PROJ}/data/public_test/questions.jsonl"))
         proc = run_stage("public", "--split public_test", n, model, proc)
         sh(f"cp {OUT}/public/submission.jsonl {W}/submission.jsonl && wc -l {W}/submission.jsonl")
-    if "oracle" in STAGES:  # interventions on the open public errors (debug/oracle/build.py); base = same questions, no note
-        sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split public_test --workers 4 | tail -20")
-        for arm in ("base", "fact", "table", "rule"):
-            ids = "assets/oracle/ids.txt" if arm == "base" else f"assets/oracle/ids_{arm}.txt"
-            n = sum(1 for ln in open(f"{PROJ}/{ids}") if ln.strip())
-            extra = "" if arm == "base" else f" --oracle assets/oracle/{arm}.json"
-            proc = run_stage(f"oracle_{arm}", f"--split public_test --ids-file {ids}{extra}", n, model, proc)
     proc.terminate()
 
 

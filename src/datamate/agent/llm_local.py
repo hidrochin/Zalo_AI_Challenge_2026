@@ -20,6 +20,23 @@ def _is_ollama(base_url: str) -> bool:
         return False
 
 
+class Reply(str):
+    """The reply text, as every caller reads it, with what the log needs besides: the model's thinking (vLLM's reasoning
+    parser puts it apart from the content) and why generation stopped ('length' = the token budget ran out)."""
+
+    reasoning: str | None = None
+    finish_reason: str | None = None
+
+
+def reply_of(choice) -> Reply:
+    msg = choice.message
+    extra = getattr(msg, "model_extra", None) or {}
+    out = Reply(msg.content or "")
+    out.reasoning = getattr(msg, "reasoning_content", None) or extra.get("reasoning_content") or extra.get("reasoning")
+    out.finish_reason = choice.finish_reason
+    return out
+
+
 class LocalLLM:
     def __init__(self, base_url: str, model: str, max_tokens: int = 2048, enable_thinking: bool | None = None,
                  api_key: str = "EMPTY", timeout: float = 900.0, effort: str = "medium"):
@@ -38,8 +55,14 @@ class LocalLLM:
         aux.enable_thinking = False
         return aux
 
+    def with_thinking(self, max_tokens: int) -> "LocalLLM":
+        """The same server and model with thinking on and a budget that holds it: the deep tier of the router."""
+        deep = copy.copy(self)
+        deep.enable_thinking, deep.max_tokens = True, max_tokens
+        return deep
+
     def generate(self, system: str, user_parts: list[str], history: list[dict], temperature: float, seed: int,
-                 max_tokens: int | None = None) -> str:
+                 max_tokens: int | None = None) -> Reply:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": "\n\n".join(user_parts)}]
         messages += history
         extra = {}
@@ -51,4 +74,4 @@ class LocalLLM:
             model=self.model, messages=messages, temperature=temperature, seed=seed,
             max_tokens=max_tokens or self.max_tokens, extra_body=extra or None,
         )
-        return r.choices[0].message.content or ""
+        return reply_of(r.choices[0])
