@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Serve Qwen/Qwen3.5-9B with vLLM on a rented GPU box (2 GPUs), the same flags as kaggle/run_kaggle.py.
+# Serve Qwen/Qwen3.5-9B with vLLM on a rented GPU box (1 or 2 GPUs), the same flags as kaggle/run_kaggle.py.
 # The server listens on 127.0.0.1 only: reach it through an SSH tunnel (ssh -N -L 18000:localhost:18000 ...).
 #
 # Usage (on the server):  bash serve_vllm.sh [--replace] [--foreground]
@@ -12,16 +12,17 @@ MODEL=${MODEL:-Qwen/Qwen3.5-9B}
 PORT=${PORT:-18000}   # vast: Caddy holds 8000 (it proxies 8000 -> 18000 with the instance token), Jupyter 8080
 DTYPE=${DTYPE:-auto}            # bf16 on Ada/Blackwell; Kaggle used half only because T4 lacks bf16
 MAX_LEN=${MAX_LEN:-32768}
+TP=${TP:-$(nvidia-smi -L | wc -l | tr -d ' ')}   # every GPU of the box
 # Throughput on 2x RTX 4090 (no NVLink): TP=2 leaves ~22 GB of KV cache (~660k tokens of this hybrid model), so ~40
 # prompts of 15k tokens fit at once; one replica per GPU would leave ~3 GB of KV cache next to 18 GB of bf16 weights.
 # 64 seqs left the KV cache at most 49% used while runs queued at 64; 128 fits.
-MAX_SEQS=${MAX_SEQS:-128}
+# One RTX 5090 (32 GB) leaves ~8 GB of KV cache next to the weights (~250k tokens, ~16 prompts of 15k), so fewer seqs.
+MAX_SEQS=${MAX_SEQS:-$([ "$TP" -ge 2 ] && echo 128 || echo 48)}
 # chunked-prefill token budget per step: prompts are 13-16k tokens. 32768 ran out of GPU memory under full load on
-# 2x4090 (2026-11-14: a 704 MB activation with 228 MB free), so keep 16384
-MAX_BATCHED=${MAX_BATCHED:-16384}
+# 2x4090 (2026-11-14: a 704 MB activation with 228 MB free), so keep 16384; half of it on one GPU
+MAX_BATCHED=${MAX_BATCHED:-$([ "$TP" -ge 2 ] && echo 16384 || echo 8192)}
 GPU_UTIL=${GPU_UTIL:-0.92}
-TP=${TP:-2}
-VLLM_VERSION=${VLLM_VERSION:-0.33.0}   # the version of the Kaggle train run, when no vLLM is installed
+VLLM_VERSION=${VLLM_VERSION:-0.32.0}   # when no vLLM is installed: the version of the rented runs and of the image base
 # the vast vLLM image ships one in /venv/main: use it rather than installing another
 VENV=${VENV:-$([ -x /venv/main/bin/vllm ] && echo /venv/main || echo /workspace/vllm-env)}
 SPEC=${SPEC:-}   # e.g. '{"method":"mtp","num_speculative_tokens":2}' when the checkpoint has MTP weights
@@ -46,7 +47,7 @@ running=$(pgrep -af "vllm serve|vllm.entrypoints|VLLM::" || true)
 if [ -n "$running" ]; then
   say "vLLM already running on this box:"
   echo "$running" | cut -c1-200
-  if curl -sf -m 5 "http://127.0.0.1:${PORT}/v1/models" | grep -q '"id":"llm"'; then
+  if [ "$REPLACE" != 1 ] && curl -sf -m 5 "http://127.0.0.1:${PORT}/v1/models" | grep -q '"id":"llm"'; then
     say "port ${PORT} already serves 'llm'; nothing to do (use --replace to restart it)"
     exit 0
   fi
@@ -73,7 +74,8 @@ if [ ! -x "$VENV/bin/vllm" ]; then
   uv venv -q --python 3.12 "$VENV"
   uv pip install -q --python "$VENV/bin/python" "vllm==${VLLM_VERSION}"
 fi
-"$VENV/bin/python" -c 'import vllm, torch; print("vllm", vllm.__version__, "torch", torch.__version__, "cuda", torch.version.cuda)'
+"$VENV/bin/python" -c 'import vllm, torch; print("vllm", vllm.__version__, "torch", torch.__version__, "cuda", torch.version.cuda)
+assert torch.cuda.is_available(), "torch sees no GPU: the driver is older than this wheel'"'"'s CUDA (see nvidia-smi)"'
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
 
 # 3. Serve
