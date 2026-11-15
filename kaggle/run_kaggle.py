@@ -32,7 +32,7 @@ MODELS = [
     ("Qwen/Qwen3.5-9B", ENV, ["--dtype", "half", "--reasoning-parser", "qwen3", "--limit-mm-per-prompt", '{"image":0,"video":0}',
                               "--max-model-len", "32768"], True),
 ]
-STAGES = os.environ.get("DM_STAGES", "public").split(",")  # probe | smoke | public | holdout | train_check | dev120 | dev120_oracle | train; push.sh sets it
+STAGES = os.environ.get("DM_STAGES", "public").split(",")  # probe | smoke | public | holdout | train_check | dev120 | train; push.sh sets it
 ENGINE = os.environ.get("DM_ENGINE", "pandas")  # pandas | sql; push.sh sets it
 ARGS = os.environ.get("DM_ARGS", "")  # extra `datamate run` flags (--catalog compiled --shop-views --judge unans); push.sh sets it
 ONLY = os.environ.get("DM_MODEL", "")  # serve only this model (else the list in order); push.sh sets it
@@ -290,9 +290,6 @@ def main():
     if "dev120" in STAGES:
         n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
         proc = run_stage("dev120", "--split train --ids-file assets/dev120.txt", n, model, proc)
-    if "dev120_oracle" in STAGES:  # table-selection experiment: only the tables a right answer used
-        n = sum(1 for ln in open(f"{PROJ}/assets/dev120.txt") if ln.strip())
-        proc = run_stage("dev120_oracle", "--split train --ids-file assets/dev120.txt --keep-tables assets/oracle_tables.json", n, model, proc)
     if "train" in STAGES:
         sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split train --workers 4 | tail -20")
         sales_lines_report("train")
@@ -311,13 +308,6 @@ def main():
         n = sum(1 for _ in open(f"{PROJ}/data/public_test/questions.jsonl"))
         proc = run_stage("public", "--split public_test", n, model, proc)
         sh(f"cp {OUT}/public/submission.jsonl {W}/submission.jsonl && wc -l {W}/submission.jsonl")
-    if "oracle" in STAGES:  # interventions on the open public errors (debug/oracle/build.py); base = same questions, no note
-        sh(f"cd {PROJ} && uv run --no-sync datamate ingest --split public_test --workers 4 | tail -20")
-        for arm in ("base", "fact", "table", "rule"):
-            ids = "assets/oracle/ids.txt" if arm == "base" else f"assets/oracle/ids_{arm}.txt"
-            n = sum(1 for ln in open(f"{PROJ}/{ids}") if ln.strip())
-            extra = "" if arm == "base" else f" --oracle assets/oracle/{arm}.json"
-            proc = run_stage(f"oracle_{arm}", f"--split public_test --ids-file {ids}{extra}", n, model, proc)
     proc.terminate()
 
 

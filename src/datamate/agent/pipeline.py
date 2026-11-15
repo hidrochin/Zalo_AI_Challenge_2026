@@ -71,8 +71,6 @@ class RunConfig:
     repair: int = 1
     k_examples: int = 4
     examples_path: Path | None = Path("assets/examples.jsonl")
-    keep_tables: Path | None = None  # experiment: JSON of question id -> raw tables to show, null = all (SQL engine)
-    oracle: Path | None = None  # experiment: JSON {"notes": {question id: note}, "setup": {business: [SQL]}} (debug/oracle)
     min_share: float = 0.5
     unans_share: float = 0.6
     llm_retries: int = 6  # server errors: back off 5..120 s, then stop the run (a resumed run retries)
@@ -315,7 +313,7 @@ def escalate_reasons(final: dict, samples: list[dict], hedge: str | None) -> lis
 
 def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part: str, bank: ExampleBank, cfg: RunConfig,
                    cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset(),
-                   macros=(), rulebook: str = "", oracle_note: str | None = None, deep_llm=None,
+                   macros=(), rulebook: str = "", deep_llm=None,
                    delta: frozenset[str] = frozenset(), suspect: bool = False, calibrator: dict | None = None,
                    caps: Capabilities | None = None, revenue_total: float | None = None, shop: str = "clean",
                    scope: dict | None = None) -> dict:
@@ -357,8 +355,6 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
     shadow = None if is_gated(text, off) or not full else engine.shadow(text, hints)
     extra = {"periods": hint_periods(hints)} if cfg.engine == "sql" else {}  # a period outside the data makes 'no rows' a reason
     user_parts = [biz_part, engine.question_part(q["question"], q["as_of_date"], examples, hints, norm)]
-    if oracle_note:  # experiment: what an intervention tells the model, checked by hand (debug/oracle)
-        user_parts[1] += "\n\nVerified facts about this shop's data for this question (use them):\n" + oracle_note
     route = None
     if cfg.think_route and deep_llm is not None:
         reasons = route_reasons(text, norm.get("rules") or pick_rules(rulebook, text), off, delta, suspect, near, cfg, frame)
@@ -615,8 +611,6 @@ def run(cfg: RunConfig) -> dict:
     t_start = time.time()
     _LLM_DOWN.clear()
 
-    kept = json.loads(Path(cfg.keep_tables).read_text(encoding="utf-8")) if cfg.keep_tables else None
-    oracle = json.loads(Path(cfg.oracle).read_text(encoding="utf-8")) if cfg.oracle else {"notes": {}, "setup": {}}
     by_biz: dict[str, list[dict]] = {}
     capabilities: dict[str, dict] = {}
     audits: dict[str, dict] = {}
@@ -679,7 +673,6 @@ def run(cfg: RunConfig) -> dict:
                 ours = usable(probe, rule_macros, hidden) if rule_macros else []
                 pool.block([m for m in stored if m not in macros and m not in {r.name for r in ours}] if not full
                            else [m for m in stored if m in hidden] if delta else [])
-                pool.setup(oracle["setup"].get(biz_id, []))  # after macros(): the card does not list the oracle's views
                 setup = [r.temp_sql() for r in ours]
                 if ours:
                     card += ("\n\n## Macros written from this split's rulebook" + (" for its new or changed rules" if delta else "")
@@ -699,19 +692,17 @@ def run(cfg: RunConfig) -> dict:
                 probe.close()
                 pool.setup(setup)
                 biz_part = business_part(biz_id, biz.readme.text, card)
-                part_of = (lambda q: business_part(biz_id, biz.readme.text, sql_card(biz, sales, sales_desc, macros, kept.get(q["id"]), views=stored))) if kept else None
             else:
                 biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
                 pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
-                part_of = None
             if cfg.prepare_only:
                 pool.close()
                 bar.update(len(by_biz[biz_id]))
                 continue
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook,
-                                      oracle["notes"].get(q["id"]), deep_llm=deep_llm, delta=delta_lines,
+                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook,
+                                      deep_llm=deep_llm, delta=delta_lines,
                                       suspect=trust.states["revenue"] == "suspect", calibrator=calibrator, caps=caps,
                                       revenue_total=revenue_total, shop=shop_audit.level, scope=scope)
                             for q in left]

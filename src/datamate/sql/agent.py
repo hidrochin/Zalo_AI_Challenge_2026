@@ -917,7 +917,7 @@ class SqlPool:
         self.blocked = frozenset(names)
 
     def setup(self, statements: list[str]) -> None:
-        """Run temp-object statements on every cursor (each is its own session): oracle views, compiled macros, shop views.
+        """Run temp-object statements on every cursor (each is its own session): compiled macros, shop views.
         DuckDB binds a table macro when it is created, so as_of() needs a typed value first (run() sets the question's).
         A statement that still fails is skipped: one lost macro beats a run with no answers."""
         if not statements:
