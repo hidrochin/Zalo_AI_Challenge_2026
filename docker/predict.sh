@@ -18,12 +18,15 @@ WORK=/tmp/datamate  # /data is read-only: split links, ingest cache, DuckDB stor
 RESULT=/result
 MAX_STARTS=4
 NGROUPS=12  # not GROUPS: bash's own array of the user's group ids, which ignores assignment (root: "0")
+# both GPUs serve one model (tensor parallel); a prompt of up to ~16k tokens plus a 16384-token thinking budget needs a
+# context of 49152 (the measured final configuration, docs/PIPELINE.md section 0)
 SERVE_ARGS=(--served-model-name llm --host 127.0.0.1 --port "$PORT" --seed 0
-            --tensor-parallel-size 2 --dtype bfloat16 --max-model-len 32768 --gpu-memory-utilization 0.90
+            --tensor-parallel-size 2 --dtype bfloat16 --max-model-len 49152 --gpu-memory-utilization 0.90
             --max-num-seqs 128 --max-num-batched-tokens 16384 --enable-prefix-caching
             --reasoning-parser qwen3 --language-model-only)
 RUN_ARGS=(--backend local --engine sql --model llm --base-url "http://127.0.0.1:$PORT/v1" --seed 0
-          --thinking route --max-tokens 2048 --catalog delta --judge unans --context rich --frame --rewrite residual
+          --thinking route --max-tokens 2048 --think-max-tokens 16384
+          --catalog delta --judge unans --context rich --frame --rewrite residual
           --exec-workers 4 --deadline "$DEADLINE" --deep-margin "$DEEP_MARGIN")
 
 log() { echo "[predict.sh] $(date -u +%FT%TZ) $*" | tee -a "$RESULT/predict.log"; }
