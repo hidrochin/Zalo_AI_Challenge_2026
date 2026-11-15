@@ -8,6 +8,7 @@ holds even when it is dated after as-of. Macros are the semantic layer, and exis
 """
 
 import hashlib
+import json
 import re
 import threading
 from pathlib import Path
@@ -248,6 +249,16 @@ def _unit_price(sales: pd.DataFrame) -> str:
     return "round(unit_price * qty / qty_base, 2)" if "qty" in sales.columns else "round(unit_price, 2)"
 
 
+# the stored tables built from the sales source tables, and from the fact sources (facts.py; some read the sales too)
+SALES_TABLES = ("sales_all", "orders_all", "dim_customer", "dim_product")
+FACT_TABLES = ("debt_orders_all", "payments_all", "deliveries_all", "imports_all", "expenses_all", "stock_card_all",
+               "stock_report_all", "lots_all", "lot_sales_all", "product_units", "catalog_cost_all", "price_list_all")
+
+
+def raw_name(table: str) -> str:
+    return f"raw_{_slug(table)}"
+
+
 def _write_facts(con, f: Facts, sales: pd.DataFrame) -> None:
     """The fact tables and the macros their rules need; a shop without a fact has neither, so the prompt never lists them."""
     for name, df, date_col in (("debt_orders_all", f.orders, "date"), ("payments_all", f.payments, "date"), ("deliveries_all", f.deliveries, "date"),
@@ -318,7 +329,7 @@ def build_store(path: Path, tables: dict[str, pd.DataFrame], roles: dict[str, di
     if calendar is not None:
         _write(con, "calendar", calendar, "date")
     for name, df in tables.items():
-        _write(con, f"raw_{_slug(name)}", df)
+        _write(con, raw_name(name), df)
     sales, _ = build_sales(tables, roles, slots)
     if sales is not None:
         _write(con, "sales_all", sales, "date")
@@ -426,3 +437,30 @@ def run_select(con, sql: str, timeout: float = 10.0) -> tuple[list[str], list[tu
         return [d[0] for d in cur.description], cur.fetchall()
     finally:
         timer.cancel()
+
+
+_PLAN_EXPRS = ("Projections", "Filters", "Aggregates", "Groups", "Conditions", "Expressions")
+
+
+def read_plan(con, sql: str) -> tuple[list[str] | None, str]:
+    """(stored tables a SELECT scans, the plan's expressions as text), views and macros expanded (DuckDB's plan).
+    Tables None when it cannot be planned or the plan scans none (a bare count(*) is read from the table statistics, so
+    its plan names no table); the text still names the columns read when the optimizer pruned the scan."""
+    try:
+        plan = json.loads(con.execute("explain (format json) " + sql).fetchall()[0][1])
+    except (duckdb.Error, ValueError, IndexError, TypeError):
+        return None, ""
+    out, exprs, todo = set(), {}, list(plan)
+    while todo:
+        node = todo.pop()
+        extra = node.get("extra_info")
+        if isinstance(extra, dict):
+            if isinstance(extra.get("Table"), str):
+                out.add(extra["Table"].rsplit(".", 1)[-1])  # '<db>.main.sales_all'
+            exprs.update((v, None) for k, v in extra.items() if k in _PLAN_EXPRS and isinstance(v, str))
+        todo += node.get("children") or []
+    return sorted(out) or None, "\n".join(exprs)[:3000]
+
+
+def read_tables(con, sql: str) -> list[str] | None:
+    return read_plan(con, sql)[0]

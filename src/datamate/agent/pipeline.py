@@ -538,7 +538,7 @@ def _judge(q, final, samples, llm, pool, system, user_parts, text, expect, ruleb
         return {"type": "abstain"}, {**rec, "action": "abstain", "retry_error": repr(e)}
     code = engine.extract(again)
     out = _checked(pool.run(code, q["as_of_date"], shadow, **extra), text, expect) if code else {"result": None, "error": engine.no_code}
-    rec["retry"] = {"reply": again, "code": code, **{k: v for k, v in out.items() if k in ("result", "error", "warning")}}
+    rec["retry"] = {"reply": again, "code": code, **{k: v for k, v in out.items() if k in ("result", "error", "warning", "tables", "reads", "ran")}}
     res = out.get("result")
     if res is not None and res.get("type") != "unanswerable" and not out.get("warning"):
         return res, {**rec, "action": "answer"}

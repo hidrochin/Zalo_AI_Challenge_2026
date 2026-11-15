@@ -21,7 +21,7 @@ from datamate.canon import build_orders
 from datamate.eval.semantic import find_check
 from datamate.ingest.business import META_COLS, Business
 from datamate.ingest.schema_card import _column_line
-from datamate.sql.store import SqlRejected, _slug, _writable, connect, run_select, set_as_of, set_params
+from datamate.sql.store import SqlRejected, _slug, _writable, connect, read_plan, run_select, set_as_of, set_params
 from datamate.sql.values import ValueIndex
 from datamate.text import fold
 
@@ -781,7 +781,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
     periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`.
     rules_code: the rewrites and lints that encode rulebook terms; blocked: stored macros this run does not offer."""
     m = _UNANSWERABLE.match(code)
-    preview, written, n_rows = "", code, None
+    preview, written, n_rows, tables, reads = "", code, None, None, ""
     if m:
         result = {"type": "unanswerable", "reason": m.group(1).strip(), "_src": "model"}
     else:
@@ -810,9 +810,12 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
                         raise
                     code = again
             preview, n_rows = repr(rows[:5]), len(rows)
+            tables, reads = read_plan(con, code)
             result = to_answer(declared.group(1).lower(), columns, rows)
         except (duckdb.Error, ValueError, TypeError) as e:  # ValueError covers SqlRejected and AnswerShape
-            return {"result": None, "error": str(e)[:1500], "stdout": preview, **_ran(written, code)}
+            error = str(e)[:1500]
+            hint = schema_hint(con, code, error, blocked)
+            return {"result": None, "error": f"{error}\n{hint}" if hint else error, "stdout": preview, **_ran(written, code)}
     error, warning = check_result(result, names, helper_guard=False, outside=periods_outside(list(periods), span, as_of),
                                   zero_ok=macro_only(code))
     contract = None
@@ -822,7 +825,42 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         if unit:
             warning, contract = _unit_warning(con, result, unit, shadow[1:], timeout)
     return {"result": result if error is None else None, "error": error, "warning": warning, "contract": contract, "stdout": preview,
-            "rows": n_rows, **_ran(written, code)}
+            "rows": n_rows, "tables": tables, "reads": reads, **_ran(written, code)}
+
+
+_NO_COLUMN = re.compile(r"Binder Error: Referenced column .* not found|Binder Error: Values list .* does not have a column", re.S)
+_NO_TABLE = re.compile(r"Catalog Error: Table with name (\w+) does not exist")
+_NO_FUNCTION = re.compile(r"Catalog Error: (?:Scalar |Table )?Function with name (\w+) does not exist")
+_FROM_NAME = re.compile(r'\b(?:from|join)\s+(?:"([^"]+)"|(\w+))(?!\s*\()', re.I)
+
+
+def schema_hint(con, code: str, error: str, blocked: frozenset[str] = frozenset()) -> str:
+    """What the database has, for the repair of a query that named a column, table or macro it does not have: every column
+    of the tables the query reads (DuckDB itself offers only the closest few), or the tables, or the macros."""
+    def names(sql: str, *args) -> list[str]:
+        try:
+            return [r[0] for r in con.execute(sql, list(args)).fetchall()]
+        except duckdb.Error:
+            return []
+
+    def q(c: str) -> str:
+        return c if re.fullmatch(r"[a-z_][a-z0-9_]*", c) else f'"{c}"'
+
+    if _NO_COLUMN.search(error):
+        lines = []
+        for t in dict.fromkeys(a or b for a, b in _FROM_NAME.findall(_body(code))):
+            cols = names("select column_name from duckdb_columns() where table_name = ? order by column_index", t)
+            if cols:
+                lines.append(f"Columns of {t}: {', '.join(q(c) for c in cols[:120])}")
+        return "\n".join(lines)
+    if _NO_TABLE.search(error):
+        tables = names("select table_name from duckdb_tables() where not internal union select view_name from duckdb_views() "
+                       "where not internal order by 1")
+        return f"Tables and views of this database: {', '.join(tables)}" if tables else ""
+    if _NO_FUNCTION.search(error):
+        fns = [f for f in names("select distinct function_name from duckdb_functions() where not internal order by 1") if f not in blocked]
+        return f"Macros of this database: {', '.join(fns)}" if fns else ""
+    return ""
 
 
 def _ran(written: str, code: str) -> dict:
