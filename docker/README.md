@@ -21,36 +21,53 @@ Temporary files go to `/tmp/datamate`. `/data` is only read.
 1. **Model server.** `predict.sh` starts vLLM on the packaged weights: tensor parallel over the 2 GPUs, bf16,
    greedy decoding (temperature 0, seed 0). If the server dies, it restarts and the run resumes from the answers
    already written.
-2. **Ingestion** (`src/datamate/ingest/`, deterministic Python, no model). Each business folder is read into
+2. **Ingestion** (`src/datamate/ingest/`, Python; the model only where noted). Each business folder is read into
    cleaned tables:
-   - header detection (title rows, 2-row headers, one sheet per month);
+   - header detection (title rows, 2-row headers, one sheet per month); a file that cannot be read is skipped;
    - column roles found by README description, by name and by value shape (the model proposes roles for columns
-     the rules leave open; each proposal must pass a value check);
+     the rules leave open, and maps unknown status words; each proposal must pass a value check);
    - Vietnamese dates and money parsed, unit conversion;
    - order header/line joins; blank cells of later rows of an order or block filled from its first row (rulebook §8).
    The tables become one DuckDB database per business, with canonical views (`sales_lines`, `orders`, debt,
    payments, imports, stock, lots...) and tested SQL macros for the train rulebook's definitions (`src/datamate/sql/`).
-3. **Rulebook.** The split's `rulebook.md` is read at run time. Each tested macro is switched off when the rulebook
+3. **Typed slots** (`src/datamate/slots/`, one model call per slot and shop, only when its trigger finds a gap in
+   the data). For a shop convention the rules cannot read, the model fills a narrow JSON from the README, the
+   rulebook rows and the column values, and code applies it, then checks it against the data (a fill that fails its
+   check is dropped):
+   - `order_key`: the order code column when no column has that role;
+   - `status_text`: the column and words that mark a cancelled or returned order when there is no status column;
+   - `name_map`: short names on the sales lines mapped to the full names of the product list;
+   - `line_amount`: a line discount still inside the line amount;
+   - `unit_factor`: lines sold in another unit than the base unit with no conversion factor (`1 thùng = 24 lon`).
+   No slot fires on any train shop; each was checked on train shops changed to show its gap (`datamate slots --mutate`).
+4. **Rulebook.** The split's `rulebook.md` is read at run time. Each tested macro is switched off when the rulebook
    no longer states its rule; the lines this rulebook adds or changes are shown to the model with each question
    that touches them, and route that question to the thinking tier.
-4. **Shop audit** (`src/datamate/audit.py`, no model). Cross-checks of each shop's data that need no answer key:
+5. **Shop audit** (`src/datamate/audit.py`, no model). Cross-checks of each shop's data that need no answer key:
    status words in a note column while the sales have no cancelled order, a line discount not taken off the amount,
-   a README sentence that names a known column the roles missed, order fields given on the first row only. A shop
-   with a flag is `suspect`.
-5. **Per question** (`src/datamate/agent/pipeline.py`):
-   - rule-based normalization: Telex typos, slang, amounts, dates; a model rewrite only when words stay unexplained;
+   a README sentence that names a known column the roles missed, order fields given on the first row only, units
+   still without a conversion factor. Each flag records what it puts at risk (a table or a column); a shop with a
+   flag other than the units one is `suspect`.
+6. **Per question** (`src/datamate/agent/pipeline.py`):
+   - rule-based normalization: Telex typos, slang, amounts, dates (lexicon: see Data); a model rewrite only when
+     words stay unexplained;
    - time hints from `calendar.csv`, including the lunar calendar;
    - retrieval of similar train questions as examples (train split only);
-   - the model writes one DuckDB query (thinking off; thinking on for questions on changed rules, unfamiliar
-     wording or a failed first answer), which runs on a read-only connection with the question's `as_of` date bound;
-   - answer checks: expected type, period, sign and plausibility. A failed check triggers one repair round.
-6. **Choosing the answer.** The final answer is formatted as the official type. When the model finds the
+   - the model writes one DuckDB query (thinking off, 2048 tokens; thinking on, 16384 tokens, for questions on
+     changed rules, unfamiliar wording or a failed first answer), which runs on a read-only connection with the
+     question's `as_of` date bound;
+   - answer checks: expected type, period, sign and plausibility. A failed check triggers one repair round; an error
+     message of the database (unknown column or table) comes back with the columns and tables that exist.
+7. **Choosing the answer.** The final answer is formatted as the official type. When the model finds the
    question unanswerable or hedges, a second model call (judge) re-reads the evidence and confirms, retries,
    or abstains. Deterministic gates (`src/datamate/agent/gates.py`) then abstain on answers measured unreliable on
-   train (a reply cut by the token budget, a count the size of a money amount...), and on a `suspect` shop keep only
-   date, boolean and unanswerable answers.
+   train (a count the size of a money amount, a table the question did not ask for...). On a `suspect` shop, a
+   number, percent, string, list or table answer abstains when its query reads what a flag puts at risk (the
+   tables and columns come from the database's query plan).
 
-No answer or logic is keyed on question or business IDs.
+A question that raises an unexpected error abstains (the error and its traceback are in its log); a shop whose data
+cannot be set up abstains on its questions; the run goes on with the rest. No answer or logic is keyed on question
+or business IDs.
 
 ## Models
 
@@ -67,8 +84,18 @@ classifier: example retrieval is TF-IDF. Weights are in `/code/models/Qwen3.5-9B
   `/code/training_code/data/train`.
 - At run time, the train questions and answers serve as retrieved examples.
 - The Telex lexicon `assets/vi_rhymes.txt` was built from train text (`datamate build-lexicon`).
+- **Generated data, one asset:** `assets/lexicon_external.json`, 85 word rewrites used by the question
+  normalization (abbreviations, teen-code, dialect words → standard words):
+  - 67 were generated with Gemini (`gemini-3-flash-preview`, temperature 0, through its API, during development only;
+    inference makes no API call). The seeds were standard words of the **train** questions and train rulebook; no test
+    question was sent;
+  - 16 come from public web pages (the URL is stored with each entry), 2 are written by hand (`đh`, `dh` → `đơn
+    hàng`, initials of a train phrase);
+  - every entry passed automatic filters and a second model check. Generator code:
+    `src/datamate/preprocess/lexgen.py` (prompt inside); the raw replies are kept in `assets/lexicon_gemini_raw.jsonl`
+    and `assets/lexicon_gemini_verify.jsonl`; checksums in `/code/training_code/data_manifest.json`.
 - No public-test or private-test data or answers were used to train, tune examples, or build any asset.
-- Nothing was trained or generated. See `/code/training_code/README.md`.
+- No model was trained or fine-tuned. See `/code/training_code/README.md`.
 
 ## Per-question log (`/result/logs/<id>.json`)
 
@@ -87,7 +114,9 @@ The rest of the record holds the preprocessing, hints, the examples used, each m
 
 ## Reproducibility and time
 
-- Decoding: greedy (temperature 0), fixed seed 0, `PYTHONHASHSEED=0`.
+- Decoding: greedy (temperature 0) for every model call, fixed seed 0, `PYTHONHASHSEED=0`.
+- Model server: vLLM, tensor parallel over the 2 GPUs, bf16, context 49152 tokens (a prompt plus the 16384-token
+  thinking budget).
 - Concurrency: the shops are split into 12 processes of 10 questions in flight each; the order of the answers in
   `submission.jsonl` may differ between runs.
 - Time: questions not started 5 h 35 min after `predict.sh` starts are left unanswered (abstain); from 4 h 35 min
@@ -102,7 +131,8 @@ The rest of the record holds the preprocessing, hints, the examples used, each m
 /code/requirements.txt        pinned inference dependencies (from uv.lock)
 /code/pyproject.toml, uv.lock project and lock file; the environment is /code/.venv
 /code/src/datamate/           inference code (ingest, sql, agent, preprocess, postprocess)
-/code/assets/                 Telex lexicon, train README description -> role table, train-only dev id lists
+/code/assets/                 Telex lexicon, generated lexicon + its raw replies, train README description -> role
+                              table, train rulebook, train-only dev id lists
 /code/tests/                  unit tests (uv run pytest -q)
 /code/models/Qwen3.5-9B/      model weights
 /code/training_code/          README, train data, data_manifest.json

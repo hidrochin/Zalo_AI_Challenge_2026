@@ -255,7 +255,11 @@ Code: [preprocess/](../src/datamate/preprocess/). Nguyên tắc: chỉ đổi c�
 - clean: NFC, bỏ emoji, gộp khoảng trắng;
 - telex: `soos` → `số`;
 - tên trong dữ liệu shop: khớp, sửa dấu, bảo vệ khỏi các bước sau;
-- lexicon: `dthu` → `doanh thu`, `mô` → `nào`, `đh` → `đơn hàng`;
+- lexicon: `dthu` → `doanh thu`, `mô` → `nào`, `đh` → `đơn hàng`. Các mục viết trong code đều có trong câu hỏi train.
+  [assets/lexicon_external.json](../assets/lexicon_external.json) có 85 mục: 67 mục do Gemini sinh từ từ gốc của train
+  (lúc phát triển, lúc chạy không gọi API; phản hồi thô giữ trong `assets/lexicon_gemini_*.jsonl`), 16 mục từ trang web
+  (có URL), 2 mục viết tay (`đh`, `dh`). Đây là dữ liệu sinh duy nhất, được khai báo trong README của image và
+  `training_code/`;
 - số tiền, ngày: `3tr7` → `3.700.000 đồng`, `th7/26` → `tháng 7/2026`.
 
 **LLM rewrite** (`--rewrite residual`): chỉ gọi khi frame còn từ chưa giải thích. Gọi một lần, thinking off, tối đa 400 token.
