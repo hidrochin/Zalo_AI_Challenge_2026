@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from datamate.canon import unit_gap
 from datamate.ingest.business import FIRST_ROW_NOTE, META_COLS, Business
 from datamate.ingest.roles import header_key
 from datamate.text import fold
@@ -23,7 +24,7 @@ _STATUS_CELL = re.compile(r"^(da |khach |don )?(huy|huy don|cancel|cancelled|can
                           r"|^(dang|chua|cho) giao( hang)?$")
 _LINE_DISCOUNT = re.compile(r"^(giam( gia)?|chiet khau|ck|km|khuyen mai|tien giam)( dong| hang| sp)?( \((d|vnd|%)\))?$")
 _LINE_ROLES = {"qty", "qty_base", "line_amount", "unit_price", "product_name", "product_id", "unit", "base_unit", "line_cost"}
-SUSPECT_FLAGS = ("role_gap", "status_in_text", "discount_unapplied", "fill_gap")
+SUSPECT_FLAGS = ("role_gap", "status_in_text", "discount_unapplied", "fill_gap", "unit_gap")
 
 
 SALES = "*sales*"  # scope table of a flag on the canonical sales (every table they are built from)
@@ -202,6 +203,12 @@ def audit(biz: Business, sales: pd.DataFrame | None, known_descs: dict[str, str]
                                ("fill_gap", _fill_gap(biz, feats, scopes))) if v}
     if "discount_unapplied" in flags:  # every line amount
         scopes.append(("discount_unapplied", SALES, None))
+    col, gap = unit_gap(sales)
+    if gap is not None and gap.sum() >= 5:  # a quantity in base units is wrong on those lines; amounts are not
+        units = ", ".join(map(str, sales.loc[gap, col].value_counts().index[:5]))
+        flags["unit_gap"] = f"{int(gap.sum())} goods lines sold in {units} (not the base unit) have no conversion factor: qty_base = qty"
+        feats["unit_gap"] = round(float(gap.mean()), 4)
+        scopes.append(("unit_gap", SALES, "qty_base"))
     _name_gap(biz, sales, feats)
     return Audit("suspect" if set(flags) & set(SUSPECT_FLAGS) else "clean", flags, feats,
                  [{"flag": f, "table": t, "column": c} for f, t, c in scopes if f in SUSPECT_FLAGS])

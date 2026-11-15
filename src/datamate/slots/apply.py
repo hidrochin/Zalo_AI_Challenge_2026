@@ -7,6 +7,8 @@ lines out; nothing here calls a model or reads a file.
   canon.build_sales joins the product lists.
 - `status_text` reads the order status from a text column (notes, delivery state) and `line_amount` takes a line discount
   off amounts written before it; both change the lines before `order_ok` and `counted` are derived.
+- `unit_factor` converts the quantity of lines sold in a unit other than the base unit that no conversion table covered:
+  from a column that already holds the base quantity, or from a factor per (product, unit).
 """
 
 import pandas as pd
@@ -77,3 +79,28 @@ def apply_lines(out: pd.DataFrame, slots: dict | None) -> list[str]:
         notes.append(f"line amounts were written before the line discount `{la['column']}` ({la['kind']}): "
                      f"taken off on {int(rows.sum())} lines")
     return notes
+
+
+def apply_units(out: pd.DataFrame, slots: dict | None, gap: pd.Series | None) -> list[str]:
+    """Set `qty_base` in place on the lines of `gap` (canon.unit_gap: sold in another unit than the base unit, left
+    unconverted)."""
+    f = (slots or {}).get("unit_factor")
+    if not f or gap is None or not gap.any() or f.get("unit_column") not in out.columns:
+        return []
+    qty = pd.to_numeric(out["qty"], errors="coerce")
+    col = f.get("base_qty_column")
+    if col in out.columns:
+        base = pd.to_numeric(out[col], errors="coerce")
+        rows = gap & base.notna()
+        out.loc[rows, "qty_base"] = base[rows]
+        return [f"qty_base of {int(rows.sum())} lines sold in another unit than the base unit read from `{col}`"]
+    factor = {(fold(x["product"]).strip(), fold(x["unit"]).strip()): float(x["factor"]) for x in f.get("factors") or []}
+    if not factor or "product_name" not in out.columns:
+        return []
+    keys = zip(out["product_name"].map(lambda v: fold(str(v)).strip()), out[f["unit_column"]].map(lambda v: fold(str(v)).strip()))
+    found = pd.Series([factor.get(k) for k in keys], index=out.index, dtype=float)
+    rows = gap & found.notna()
+    out.loc[rows, "qty_base"] = (qty * found)[rows]
+    said = ", ".join(f"{x['product']}: 1 {x['unit']} = {x['factor']:g}" for x in (f.get("factors") or [])[:8])
+    return [f"qty_base of {int(rows.sum())} lines sold in another unit than the base unit = qty × the factor read from the "
+            f"shop's README or product list ({said}{', ...' if len(f.get('factors') or []) > 8 else ''})"]

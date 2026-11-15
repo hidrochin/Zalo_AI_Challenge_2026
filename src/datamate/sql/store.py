@@ -23,7 +23,7 @@ from datamate.ingest.business import INGEST_VERSION, roles_path, slots_path, sta
 from datamate.sql.dims import entity_dims
 from datamate.text import fold
 
-STORE_VERSION = 16
+STORE_VERSION = 17
 
 BASE_MACROS = [
     "create macro round_half_up(x, n) as cast(round(cast(x as decimal(38, 10)), n) as double)",

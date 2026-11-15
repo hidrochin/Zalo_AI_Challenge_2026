@@ -12,13 +12,17 @@ import re
 import pandas as pd
 
 from datamate.ingest.roles import header_key
-from datamate.slots.apply import apply_lines, apply_tables
+from datamate.slots.apply import apply_lines, apply_tables, apply_units
 from datamate.sql.dims import with_entity_keys
 from datamate.text import fold
 
 CANON_ROLES = ("order_id", "order_date", "order_ts", "status", "line_amount", "qty", "qty_base", "unit",
                "unit_price", "product_id", "product_name", "customer_id", "customer_name")
 ORDER_ROLES = ("order_date", "order_ts", "status", "customer_id", "customer_name")
+# the canonical columns of the sales lines, in their order (the source tables' other columns follow)
+CANON_COLS = ("order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base",
+              "unit", "base_unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key",
+              "customer_id", "customer_name", "customer_group", "walkin")
 _WALKIN = re.compile(r"^(khach )?(le|vang lai|walk ?in|khong ten|khach)$|^(kh|k) ?le$|^kl$|^kvl$|^-+$")
 _PHONE = re.compile(r"\s*[-–,(]?\s*\(?(?:\+?84|0)\d[\d .]{7,12}\)?\s*$")  # "Tên - 0328 548 455", "Tên (0913885954)"
 
@@ -151,6 +155,48 @@ def customer_group_col(t: pd.DataFrame) -> str | None:
         if len(vals) and vals.map(lambda v: isinstance(v, str)).mean() > 0.9 and 2 <= n <= 15 and (best is None or n > best[1]):
             best = (c, n)
     return best[0] if best else None
+
+
+def line_unit_col(sales: pd.DataFrame) -> str | None:
+    """The column of the sales lines holding the unit each line was sold in: `unit`, else a text column without a role
+    whose values are the shop's base-unit words on nearly every filled row ('ĐV': ly, cái, hộp)."""
+    if "unit" in sales.columns:
+        return "unit"
+    if "base_unit" not in sales.columns:
+        return None
+    words = set(sales["base_unit"].dropna().map(lambda v: fold(str(v)).strip()))
+    best = None
+    for c in sales.columns:
+        if c in CANON_COLS or not (sales[c].dtype == object or pd.api.types.is_string_dtype(sales[c])):
+            continue
+        v = sales[c].dropna()
+        if len(v) < 0.3 * len(sales) or not v.map(lambda x: isinstance(x, str)).all() or v.nunique() > 30:
+            continue
+        share = v.map(lambda x: fold(x).strip()).isin(words).mean()
+        if share >= 0.8 and (best is None or len(v) > best[1]):
+            best = (c, len(v))
+    return best[0] if best else None
+
+
+def unit_gap(sales: pd.DataFrame | None) -> tuple[str | None, pd.Series | None]:
+    """(unit column, mask) of the goods lines sold in a unit other than the product's base unit whose quantity was left
+    unconverted (qty_base = qty): no conversion factor was found. A product with converted lines is left out: its
+    unconverted lines are in the base unit and its base_unit label is what is off (train biz_106: 'cái' lines of a product
+    whose 'hộp' lines are × 6). Train: no line left (30 shops)."""
+    if sales is None or not {"qty", "qty_base", "base_unit"} <= set(sales.columns):
+        return None, None
+    col = line_unit_col(sales)
+    if col is None:
+        return None, None
+    u = sales[col].map(lambda v: fold(str(v)).strip() if pd.notna(v) else None)
+    b = sales["base_unit"].map(lambda v: fold(str(v)).strip() if pd.notna(v) else None)
+    q, qb = pd.to_numeric(sales["qty"], errors="coerce"), pd.to_numeric(sales["qty_base"], errors="coerce")
+    goods = sales["is_goods"] if "is_goods" in sales.columns else True
+    gap = u.notna() & b.notna() & (u != b) & (q == qb) & goods
+    if "product_name" in sales.columns:
+        converted = set(sales.loc[q.notna() & qb.notna() & (q != qb), "product_name"].dropna())
+        gap &= ~sales["product_name"].isin(converted)
+    return col, gap
 
 
 def base_units(out: pd.DataFrame, tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[str, str]],
@@ -427,10 +473,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
     if fee:
         sources.append(f"{fee} service-fee lines kept in revenue but not as products")
 
-    order = ["order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base",
-             "unit", "base_unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key", "customer_id",
-             "customer_name", "customer_group", "walkin"]
-    canon = [c for c in order if c in out.columns]
+    slot_notes += apply_units(out, slots, unit_gap(out)[1])  # after the entity keys: factors name products as the card does
+    canon = [c for c in CANON_COLS if c in out.columns]
     extra = [c for c in out.columns if c not in canon and c != "order_date"]
     out = out[canon + extra].reset_index(drop=True)
     desc = (f"sales_lines(): {len(out)} rows built from {' + '.join(sources)}.\n"
@@ -448,6 +492,12 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             "orders() rolls these lines up to one row per order.")
     if slot_notes:
         desc += "\nShop conventions applied (read from the README and the rulebook): " + "; ".join(slot_notes) + "."
+    ucol, gap = unit_gap(out)
+    if gap is not None and gap.any():  # say it rather than let qty_base look converted
+        units = ", ".join(map(str, out.loc[gap, ucol].value_counts().index[:6]))
+        desc += (f"\nWARNING: {int(gap.sum())} goods lines sold in {units} (`{ucol}`, not the product's base unit) have no "
+                 "conversion factor, so their qty_base = qty is NOT in base units. The README or the product list may "
+                 "state the factor.")
     if flagged:
         desc += f"\nCheck before ranking customers: {', '.join(flagged)} hold(s) over 5% of orders, unusual for one customer."
     out.attrs["sources"] = sorted({n for s in sources for n in re.findall(r"T\['([^']+)'\]", s)})  # audit scopes (gates.scope_of)

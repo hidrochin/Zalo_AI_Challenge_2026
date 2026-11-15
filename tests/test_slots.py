@@ -101,6 +101,54 @@ def test_line_discount_left_in_the_amount_is_taken_off():
     assert rec["line_amount"]["result"] == "no fill"  # an order discount stays in revenue
 
 
+def unit_shop(base_qty: bool = False) -> Business:
+    """Three products sold by the bag (300 each) and, one line in five, by the case of 4 bags (1200), with no conversion
+    table: the case lines keep qty_base = qty."""
+    n = 60
+    case = [i % 5 == 0 for i in range(n)]
+    df = lines(n, hang=[f"Bỉm {'ABC'[i % 3]}" for i in range(n)], dvt=["thùng" if c else "bịch" for c in case],
+               sl=[1 if c else 2 for c in case], gia=[1200 if c else 300 for c in case], tien=[1200 if c else 600 for c in case])
+    if base_qty:
+        df["sl le"] = [4 if c else 2 for c in case]
+    catalog = pd.DataFrame({"ten": ["Bỉm A", "Bỉm B", "Bỉm C"], "dv": ["bịch"] * 3, "ghi": ["thùng = 4 bịch"] * 3})
+    return shop({"t": (df, {**ROLES, "dvt": "unit"}), "dm": (catalog, {"ten": "product_name", "dv": "base_unit"})})
+
+
+def test_unit_factor_converts_the_case_lines_and_says_so():
+    from datamate.audit import audit
+
+    biz = unit_shop()
+    roles = {n: ti.roles for n, ti in biz.info.items()}
+    sales, desc = build_sales(biz.tables, roles)
+    assert "WARNING: 12 goods lines sold in thùng" in desc and audit(biz, sales).flags.get("unit_gap")
+    fill = {"base_qty_column": None, "factors": [{"product": f"Bỉm {x}", "unit": "thùng", "factor": 4} for x in "ABC"]}
+    applied, rec = run_slots(biz, RULEBOOK, reply(fill), rebuild_of(biz))
+    assert rec["unit_factor"]["result"] == "applied"
+    sales, desc = build_sales(biz.tables, roles, applied)
+    assert sales.loc[sales["unit"] == "thùng", "qty_base"].eq(4).all() and "WARNING" not in desc
+    assert "unit_gap" not in audit(biz, sales).flags
+    _, rec = run_slots(biz, RULEBOOK, reply({"factors": [{"product": f"Bỉm {x}", "unit": "thùng", "factor": 40} for x in "ABC"]}),
+                       rebuild_of(biz))
+    assert rec["unit_factor"]["result"].startswith("rejected")  # 30 a bag in a case against 300 a bag
+
+
+def test_unit_factor_reads_a_column_already_in_base_units():
+    biz = unit_shop(base_qty=True)
+    applied, rec = run_slots(biz, RULEBOOK, reply({"base_qty_column": "sl le", "factors": []}), rebuild_of(biz))
+    assert applied["unit_factor"] == {"unit_column": "unit", "base_qty_column": "sl le"}
+    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()}, applied)
+    assert sales.loc[sales["unit"] == "thùng", "qty_base"].eq(4).all() and sales.loc[sales["unit"] == "bịch", "qty_base"].eq(2).all()
+
+
+def test_unconverted_lines_of_a_product_with_converted_ones_are_no_gap():
+    from datamate.canon import unit_gap
+
+    s = pd.DataFrame({"unit": ["cái", "cái", "hộp"], "base_unit": ["hộp"] * 3, "qty": [1, 2, 1], "qty_base": [1, 2, 6],
+                      "product_name": ["Bánh"] * 3, "is_goods": [True] * 3})
+    assert not unit_gap(s)[1].any()  # train biz_106: the label is off, the quantities are right
+    assert unit_gap(s.assign(qty_base=[1, 2, 1]))[1].tolist() == [True, True, False]
+
+
 def test_parse_json_reads_a_block_or_a_bare_object():
     assert parse_json('```json\n{"a": 1}\n```') == {"a": 1}
     assert parse_json('Here: {"a": null} done') == {"a": None}

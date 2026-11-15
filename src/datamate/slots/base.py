@@ -18,14 +18,14 @@ from pathlib import Path
 import pandas as pd
 
 from datamate.audit import _LINE_DISCOUNT
-from datamate.canon import build_sales, line_table
+from datamate.canon import build_sales, line_table, unit_gap
 from datamate.ingest.business import META_COLS, Business, build_business, slots_path, status_path, apply_status
 from datamate.ingest.roles import header_key, is_known_status, normalize_status
 from datamate.slots.apply import STATUSES, name_map, order_key_roles
 from datamate.text import fold
 
 SLOTS_VERSION = 1
-ORDER = ("order_key", "status_text", "name_map", "line_amount")
+ORDER = ("order_key", "status_text", "name_map", "line_amount", "unit_factor")
 CANON = {"order_id", "date", "order_ts", "status", "counted", "order_ok", "is_goods", "amount", "qty", "qty_base", "unit",
          "base_unit", "unit_price", "product_id", "product_key", "product_name", "customer", "customer_key", "customer_id",
          "customer_name", "customer_group", "walkin", "product_name_raw", "customer_name_raw"}
@@ -407,6 +407,132 @@ def la_check(before: Ctx, after: Ctx, fill: dict) -> str | None:
     return None if r0 and abs(r1 - r0) / abs(r0) < 0.2 else f"revenue moved {r0:,.0f} -> {r1:,.0f}"
 
 
+# --- 4. unit_factor: lines sold in a unit other than the base unit, with no conversion factor ------------------------
+
+
+def _uf_gap(c: Ctx) -> tuple[str | None, pd.Series | None]:
+    return unit_gap(c.sales)
+
+
+def _base_qty_candidates(c: Ctx) -> list[str]:
+    """Numeric columns of the sales lines that equal the quantity on the lines sold in the base unit and differ from it
+    on most lines of the gap: a quantity already written in base units."""
+    col, gap = _uf_gap(c)
+    s = c.sales
+    q = pd.to_numeric(s["qty"], errors="coerce")
+    based = s[col].map(lambda v: fold(str(v)).strip()) == s["base_unit"].map(lambda v: fold(str(v)).strip())
+    out = []
+    for k in s.columns:
+        if k in CANON or not pd.api.types.is_numeric_dtype(s[k]):
+            continue
+        v = pd.to_numeric(s[k], errors="coerce")
+        if based.sum() and (v == q)[based].mean() >= 0.95 and ((v != q) & v.notna())[gap].mean() >= 0.5:
+            out.append(k)
+    return out
+
+
+def uf_trigger(c: Ctx) -> str | None:
+    col, gap = _uf_gap(c)
+    if gap is None or gap.sum() < 5:
+        return None
+    units = dict(c.sales.loc[gap, col].value_counts().head(6))
+    return f"{int(gap.sum())} goods lines sold in another unit than the base unit with no factor (`{col}`: {units})"
+
+
+UF_SYSTEM = """You read one shop's records for an analyst. Quantities are counted in each product's base unit. The lines
+below were sold in another unit (a case, a box, a load ...) and the code that loaded the shop found no conversion factor
+for them, so their quantity is still in that unit. Below: those products and units, the sales columns that may already
+hold the quantity in base units, the products' rows in the shop's product lists, the README and the rulebook rows on
+units.
+
+Fill this JSON and reply with it alone, in a ```json block:
+{"base_qty_column": "<a listed sales column that already holds each line's quantity in the base unit, or null>",
+ "factors": [{"product": "<product name as listed>", "unit": "<unit as listed>", "factor": <how many base units one such unit holds>}]}
+Give a factor only when the README, a product row or the unit's own name states it; leave the others out. When a base
+quantity column is listed and holds the quantity, name it and leave "factors" empty."""
+
+
+def _uf_products(c: Ctx) -> pd.DataFrame:
+    col, gap = _uf_gap(c)
+    s = c.sales
+    g = s[gap].assign(_u=s.loc[gap, col])
+    price = (pd.to_numeric(g["amount"], errors="coerce") / pd.to_numeric(g["qty"], errors="coerce"))
+    rows = g.assign(_p=price).groupby(["product_name", "_u", "base_unit"], dropna=False).agg(lines=("qty", "size"), price=("_p", "median"))
+    based = s[s[col].map(lambda v: fold(str(v)).strip()) == s["base_unit"].map(lambda v: fold(str(v)).strip())]
+    bp = (pd.to_numeric(based["amount"], errors="coerce") / pd.to_numeric(based["qty_base"], errors="coerce")).groupby(based["product_name"]).median()
+    rows = rows.reset_index().rename(columns={"_u": "unit"})
+    rows["price of one base unit"] = rows["product_name"].map(bp)
+    return rows.sort_values("lines", ascending=False)
+
+
+def uf_prompt(c: Ctx) -> tuple[str, list[str]]:
+    col, gap = _uf_gap(c)
+    s = c.sales
+    prods = _uf_products(c).head(40)
+    names = set(prods["product_name"].map(lambda v: fold(str(v)).strip()))
+    descs = c.biz.info[c.line].descs if c.line in c.biz.info else {}
+    cands = _base_qty_candidates(c)
+    cand = "\n".join(value_card(s[k], k, len(s)) + (f" (README: {descs[k]})" if k in descs else "") for k in cands) or "(none)"
+    if cands:
+        cand += "\n" + s.loc[gap, ["product_name", col, "qty", *cands]].head(8).to_string(index=False)
+    lists = []
+    for n, ti in c.biz.info.items():
+        pcol = next((k for k, r in ti.roles.items() if r == "product_name"), None)
+        if n == c.line or pcol is None or re.search(r"nhap|import|ncc", fold(n)):
+            continue
+        t = c.biz.tables[n]
+        hit = t[t[pcol].map(lambda v: fold(str(v)).strip()).isin(names)]
+        if len(hit):
+            cols = [k for k in t.columns if k not in META_COLS and not str(k).endswith("__norm")][:14]
+            lists.append(f"table {n!r}:\n" + hit[cols].head(40).to_string(index=False, max_colwidth=40))
+    return UF_SYSTEM, ["## Products sold in another unit than their base unit, with no factor (price = amount per unit sold)\n"
+                       + prods.to_string(index=False, max_colwidth=40),
+                       "## Sales columns that may hold the quantity in base units\n" + cand,
+                       "## Rows of these products in the product lists\n" + ("\n\n".join(lists) or "(none)"), _readme(c),
+                       "## RULEBOOK rows on units\n" + rule_rows(c.rulebook, r"đơn vị|quy đổi|quy ra")]
+
+
+def uf_parse(raw, c: Ctx) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    col, _ = _uf_gap(c)
+    bq = raw.get("base_qty_column")
+    if bq in _base_qty_candidates(c):
+        return {"unit_column": col, "base_qty_column": bq}
+    prods = _uf_products(c)
+    allowed = {(fold(str(p)).strip(), fold(str(u)).strip()): (p, u) for p, u in zip(prods["product_name"], prods["unit"])}
+    factors = []
+    for x in raw.get("factors") or []:
+        if not isinstance(x, dict) or not isinstance(x.get("factor"), (int, float)) or isinstance(x.get("factor"), bool):
+            continue
+        key = (fold(str(x.get("product"))).strip(), fold(str(x.get("unit"))).strip())
+        if key in allowed and x["factor"] > 0 and x["factor"] != 1:
+            p, u = allowed[key]
+            factors.append({"product": p, "unit": u, "factor": float(x["factor"])})
+    return {"unit_column": col, "factors": factors} if factors else None
+
+
+def uf_check(before: Ctx, after: Ctx, fill: dict) -> str | None:
+    s0, s1 = before.sales, after.sales
+    if s1 is None or len(s1) != len(s0):
+        return "line count changed"
+    g0, g1 = int(_uf_gap(before)[1].sum()), int(_uf_gap(after)[1].sum())
+    if g1 > 0.5 * g0:
+        return f"lines with no factor: {g0} before, {g1} after"
+    # a converted line costs about what the same goods cost in the base unit (a case may be a little cheaper)
+    col = fill["unit_column"]
+    done = _uf_gap(before)[1] & ~_uf_gap(after)[1]
+    based = s1[col].map(lambda v: fold(str(v)).strip()) == s1["base_unit"].map(lambda v: fold(str(v)).strip())
+    per = pd.to_numeric(s1["amount"], errors="coerce") / pd.to_numeric(s1["qty_base"], errors="coerce")
+    conv, base = per[done].groupby(s1.loc[done, "product_name"]).median(), per[based].groupby(s1.loc[based, "product_name"]).median()
+    both = conv.index.intersection(base.index)
+    if len(both) >= 3:
+        ratio = (conv[both] / base[both]).between(0.5, 1.5).mean()
+        if ratio < 0.8:
+            return f"price per base unit of converted lines near the base-unit price for only {ratio:.0%} of {len(both)} products"
+    return None
+
+
 @dataclass(frozen=True)
 class Slot:
     name: str
@@ -419,7 +545,8 @@ class Slot:
 SLOTS = {s.name: s for s in (Slot("order_key", ok_trigger, ok_prompt, ok_parse, ok_check),
                              Slot("status_text", st_trigger, st_prompt, st_parse, st_check),
                              Slot("name_map", nm_trigger, nm_prompt, nm_parse, nm_check),
-                             Slot("line_amount", la_trigger, la_prompt, la_parse, la_check))}
+                             Slot("line_amount", la_trigger, la_prompt, la_parse, la_check),
+                             Slot("unit_factor", uf_trigger, uf_prompt, uf_parse, uf_check))}
 
 
 def run_slots(biz: Business, rulebook: str, generate: Callable[[str, list[str]], str] | None,
@@ -474,7 +601,7 @@ def disk_rebuild(split_dir: Path, biz_id: str, cache_dir: Path | None) -> Callab
 
 
 def slots_key(biz: Business, rulebook: str, model: str, enabled) -> str:
-    prompts = [OK_SYSTEM, ST_SYSTEM, NM_SYSTEM, LA_SYSTEM]  # a changed prompt asks again
+    prompts = [OK_SYSTEM, ST_SYSTEM, NM_SYSTEM, LA_SYSTEM, UF_SYSTEM]  # a changed prompt asks again
     return hashlib.sha1(json.dumps([SLOTS_VERSION, biz.readme.text, rulebook, model, sorted(enabled), prompts]).encode()).hexdigest()
 
 

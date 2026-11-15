@@ -247,11 +247,52 @@ def abbrev_names(pieces: Pieces, readme: Readme, rng: random.Random):
     return out, readme, {}
 
 
+def rename_base_qty(pieces: Pieces, readme: Readme, rng: random.Random):
+    """The sales lines' quantity in base units under a header no rule knows and no README line describes, so lines sold
+    in a large unit keep qty_base = qty (slot `unit_factor`, its base quantity column)."""
+    out, renamed, dropped = [], {}, set()
+    for sh, df in pieces:
+        roles = _roles(sh, df, readme)
+        col = next((c for c, r in roles.items() if r == "qty_base"), None)
+        if col is None or "line_amount" not in roles.values():
+            out.append((sh, df))
+            continue
+        renamed[col] = UNSEEN["qty_base"]
+        dropped.add(col)
+        out.append((sh, df.rename(columns={col: UNSEEN["qty_base"]})))
+    return out, _readme_without(readme, dropped, renamed), renamed
+
+
+def factors_in_text(pieces: Pieces, readme: Readme, rng: random.Random):
+    """A conversion table's factor written as text with both units ('1 thùng = 24 lon') instead of a number, so no rule
+    reads it (slot `unit_factor`, its factors)."""
+    from datamate.canon import _BASE_UNIT, _CONV_UNIT, _FACTOR
+    from datamate.ingest.roles import header_key
+
+    out = []
+    for sh, df in pieces:
+        heads = {c: header_key(c) for c in df.columns}
+        fcol = next((c for c, h in heads.items() if _FACTOR.match(h)), None)
+        ucol = next((c for c, h in heads.items() if _CONV_UNIT.match(h) and not _BASE_UNIT.match(h)), None)
+        bcol = next((c for c, h in heads.items() if _BASE_UNIT.match(h)), None)
+        if fcol is None or ucol is None:
+            out.append((sh, df))
+            continue
+        df = df.copy()
+        f = df[fcol].map(parse_number)
+        base = df[bcol] if bcol is not None else pd.Series("đơn vị cơ bản", index=df.index)
+        df[fcol] = [f"1 {u} = {x:g} {b}" if pd.notna(x) and not _is_null(u) else None for u, x, b in zip(df[ucol], f, base)]
+        out.append((sh, df))
+    return out, readme, {}
+
+
 PIECE_MODES = {"untouched": untouched, "shuffle": shuffle, "no_readme": no_readme, "rename": rename, "rename_no_readme": rename_no_readme,
                "formats": formats, "status_words": status_words, "name_spellings": name_spellings,
                "status_in_notes": status_in_notes, "rename_order_key": rename_order_key,
-               "amount_before_discount": amount_before_discount, "abbrev_names": abbrev_names}
-SLOT_MODES = ["rename_order_key", "status_in_notes", "abbrev_names", "amount_before_discount"]  # one per slot they test
+               "amount_before_discount": amount_before_discount, "abbrev_names": abbrev_names,
+               "rename_base_qty": rename_base_qty, "factors_in_text": factors_in_text}
+SLOT_MODES = ["rename_order_key", "status_in_notes", "abbrev_names", "amount_before_discount", "rename_base_qty",
+              "factors_in_text"]  # one per slot they test (unit_factor: two)
 MODES = [*(m for m in PIECE_MODES if m not in SLOT_MODES), "subtotal_rows"]
 
 
