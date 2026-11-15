@@ -8,7 +8,9 @@ import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from datamate.audit import SALES
 from datamate.postprocess import _MONEY_WORD
+from datamate.sql.store import FACT_TABLES, SALES_TABLES, raw_name
 from datamate.text import fold
 
 # "bao nhiêu đơn / khách / ly ...": a count, not money
@@ -29,12 +31,53 @@ def _attempts(rec: dict) -> list[dict]:
 BIASED_TYPES = ("number", "percent", "string", "list", "table")
 
 
-def gate(rec: dict, shop: str = "clean") -> tuple[dict, str] | None:
+def scope_of(audit: dict, sales_sources: list[str]) -> dict | None:
+    """What a suspect shop's flags put at risk, in the store's terms: {"tables": stored tables, "columns": raw column names}.
+    A whole flagged table covers its raw table, the facts (their sources are not recorded, and some read the sales) and,
+    when the sales read it, every sales table; a flagged column only the queries that name it. None: no scope recorded
+    (an older audit), so the whole shop."""
+    if audit.get("level") != "suspect" or not audit.get("scopes"):
+        return None
+    tables, columns = set(), set()
+    for s in audit["scopes"]:
+        sales = s["table"] == SALES or s["table"] in sales_sources
+        if s.get("column"):
+            columns.add(s["column"])
+            continue
+        if s["table"] != SALES:
+            tables.add(raw_name(s["table"]))
+        tables |= set(FACT_TABLES) | (set(SALES_TABLES) | {raw_name(t) for t in sales_sources} if sales else set())
+    return {"tables": sorted(tables), "columns": sorted(columns)}
+
+
+def decisive(rec: dict) -> dict:
+    """The executed attempt behind the decided answer: the judge's retry when it answered, else the last attempt with a
+    result of the first sample that has one ({} when the answer came from no query, e.g. a contract's)."""
+    judge = rec.get("judge") or {}
+    if judge.get("action") == "answer" and (judge.get("retry") or {}).get("code"):
+        return judge["retry"]
+    s = next((s for s in rec.get("samples") or [] if s.get("result") is not None), None)
+    return next((a for a in reversed(s["attempts"]) if a.get("code") and a.get("error") is None), {}) if s else {}
+
+
+def touches(rec: dict, scope: dict | None) -> bool:
+    """The decided answer reads what the shop's flags put at risk; unknown (no scope, no plan of the query) counts as yes."""
+    a = decisive(rec)
+    if scope is None or a.get("tables") is None:
+        return True
+    if set(a["tables"]) & set(scope["tables"]):
+        return True
+    text = fold((a.get("ran") or a.get("code") or "") + "\n" + (a.get("reads") or ""))  # the plan names what macros read
+    return any(re.search(rf"(?<!\w){re.escape(fold(c))}(?!\w)", text) for c in scope["columns"])
+
+
+def gate(rec: dict, shop: str = "clean", scope: dict | None = None) -> tuple[dict, str] | None:
     """(new final, gate name) when a gate changes the decided answer of this question log, else None.
-    shop: the shop's audit level (audit.py); a suspect shop keeps only the answer types a store bias does not change."""
+    shop: the shop's audit level (audit.py); in a suspect shop an answer that reads the flagged data (scope, `scope_of`)
+    keeps only the answer types a store bias does not change."""
     final = rec.get("final") or {}
     t, a = final.get("type", "abstain"), final.get("answer")
-    if shop == "suspect" and t in BIASED_TYPES:
+    if shop == "suspect" and t in BIASED_TYPES and touches(rec, scope):
         return {"type": "abstain"}, "shop_suspect"
     text = fold((rec.get("pre") or {}).get("rules") or rec.get("question") or "")
     expect = rec.get("expect") or {}
@@ -58,9 +101,9 @@ def gate(rec: dict, shop: str = "clean") -> tuple[dict, str] | None:
     return None
 
 
-def apply(rec: dict, shop: str = "clean") -> dict:
+def apply(rec: dict, shop: str = "clean", scope: dict | None = None) -> dict:
     """The log with its gate applied in place: `final` replaced, `gated` = {gate, from}."""
-    got = gate(rec, shop)
+    got = gate(rec, shop, scope)
     if got is not None:
         rec["gated"] = {"gate": got[1], "from": rec["final"]}
         rec["final"] = got[0]
@@ -70,10 +113,12 @@ def apply(rec: dict, shop: str = "clean") -> dict:
 def measure(run: Path, gold_path: Path, shops: dict[str, str] | None = None) -> dict:
     """Replay the gates on a run's logs: per gate, outcome before -> after against gold (right / wrong / abstain), and
     the PA change. A log that already went through a gate is replayed from its pre-gate answer.
-    shops: business id -> audit level (default: the run's audit.json, else every shop clean)."""
+    shops: business id -> audit level (default: the run's audit.json, else every shop clean); the scopes of a suspect
+    shop come from audit.json (`scope`, written by the run)."""
+    path = Path(run, "audit.json")
+    audits = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     if shops is None:
-        path = Path(run, "audit.json")
-        shops = {b: a["level"] for b, a in json.loads(path.read_text(encoding="utf-8")).items()} if path.exists() else {}
+        shops = {b: a["level"] for b, a in audits.items()}
     from datamate.eval.scorer import is_correct, read_jsonl
 
     gold = {r["id"]: r for r in read_jsonl(gold_path)}
@@ -92,8 +137,8 @@ def measure(run: Path, gold_path: Path, shops: dict[str, str] | None = None) -> 
             rec["final"] = rec.pop("gated")["from"]
         n += 1
         o = outcome(rec["final"], ref)
-        got = gate(rec, shops.get(rec["business_id"], "clean"))
-        o2 =outcome(got[0], ref) if got else o
+        got = gate(rec, shops.get(rec["business_id"], "clean"), (audits.get(rec["business_id"]) or {}).get("scope"))
+        o2 = outcome(got[0], ref) if got else o
         if got:
             moves[got[1]][f"{o}->{o2}"] += 1
         score = {"right": 1, "wrong": -1, "abstain": 0}

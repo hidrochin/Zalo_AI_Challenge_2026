@@ -50,7 +50,22 @@ def test_line_discount_left_in_the_amount_is_flagged_but_an_order_discount_is_no
 def test_order_level_cell_left_blank_on_later_rows_is_flagged():
     df = lines()
     df["khach"] = [f"K{i // 2}" if i % 2 == 0 else None for i in range(60)]  # only on the first row of each order
-    assert "fill_gap" in audit(biz({"t": (df, ROLES, {})}), sales_of(df)).flags
+    a = audit(biz({"t": (df, ROLES, {})}), sales_of(df))
+    assert "fill_gap" in a.flags
+    assert a.scopes == [{"flag": "fill_gap", "table": "t", "column": "khach"}]  # no role: only the queries that read it
+    a = audit(biz({"t": (df, {**ROLES, "khach": "customer_name"}, {})}), sales_of(df))
+    assert a.scopes == [{"flag": "fill_gap", "table": "t", "column": None}]  # a role: the table's facts
+
+
+def test_every_table_ingest_filled_from_its_first_row_is_in_scope():
+    from datamate.ingest.business import FIRST_ROW_NOTE
+
+    t = pd.DataFrame({"a": [1]})
+    b = biz({"no": (t, {}, {}), "gop": (t, {}, {}), "ban": (t, {}, {})})
+    for name in ("no", "gop"):
+        b.info[name].notes.append(f"{FIRST_ROW_NOTE}: x")
+    a = audit(b, None)
+    assert a.level == "suspect" and [s["table"] for s in a.scopes] == ["no", "gop"]
 
 
 def test_blocks_under_a_dated_row_are_flagged():

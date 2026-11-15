@@ -26,11 +26,16 @@ _LINE_ROLES = {"qty", "qty_base", "line_amount", "unit_price", "product_name", "
 SUSPECT_FLAGS = ("role_gap", "status_in_text", "discount_unapplied", "fill_gap")
 
 
+SALES = "*sales*"  # scope table of a flag on the canonical sales (every table they are built from)
+
+
 @dataclass
 class Audit:
     level: str = "clean"  # clean | suspect
     flags: dict[str, str] = field(default_factory=dict)  # flag -> what was seen
     features: dict[str, float] = field(default_factory=dict)  # measured shares, flagged or not
+    # what each flag puts at risk: {"flag", "table", "column"}; column None = the whole table (agent/gates.py `scope_of`)
+    scopes: list[dict] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -56,18 +61,19 @@ def readme_roles(businesses: list[Business]) -> dict[str, str]:
     return out
 
 
-def _role_gap(biz: Business, known: dict[str, str]) -> str | None:
-    gaps = [f"{name}.{c} (README as a {known[desc_key(d)]} column)" for name, ti in biz.info.items()
+def _role_gap(biz: Business, known: dict[str, str], scopes: list) -> str | None:
+    gaps = [(name, f"{name}.{c} (README as a {known[desc_key(d)]} column)") for name, ti in biz.info.items()
             for c, d in ti.descs.items() if d and c in biz.tables[name].columns and not ti.roles.get(c)
             and desc_key(d) in known and not re.search(r"nhap|import|ncc", fold(name))]  # sales tables only
-    return ", ".join(gaps) or None
+    scopes += [("role_gap", name, None) for name in dict.fromkeys(n for n, _ in gaps)]  # a missing role changes the table's facts
+    return ", ".join(g for _, g in gaps) or None
 
 
 def _text_cells(s: pd.Series) -> pd.Series:
     return s.dropna().map(lambda v: fold(v).strip(" .!") if isinstance(v, str) else None).dropna()
 
 
-def _status_in_text(biz: Business, sales: pd.DataFrame | None, feats: dict) -> str | None:
+def _status_in_text(biz: Business, sales: pd.DataFrame | None, feats: dict, scopes: list) -> str | None:
     """The canonical sales have no cancelled, returned or undelivered order, but a column without a role holds whole-cell
     status phrases on a share of the sales rows."""
     if sales is None or "status" not in sales or set(sales["status"].dropna().unique()) - {"hoàn thành"}:
@@ -88,7 +94,10 @@ def _status_in_text(biz: Business, sales: pd.DataFrame | None, feats: dict) -> s
     if best is None:
         return None
     feats["status_in_text"] = round(best[0], 4)
-    return best[1] if best[0] >= 0.005 else None
+    if best[0] < 0.005:
+        return None
+    scopes.append(("status_in_text", SALES, None))  # a missed status changes `counted`, so every sales fact
+    return best[1]
 
 
 def _discount_unapplied(sales: pd.DataFrame | None, feats: dict) -> str | None:
@@ -116,15 +125,17 @@ def _discount_unapplied(sales: pd.DataFrame | None, feats: dict) -> str | None:
     return None
 
 
-def _fill_gap(biz: Business, feats: dict) -> str | None:
+def _fill_gap(biz: Business, feats: dict, scopes: list) -> str | None:
     """Rulebook §8: a blank cell on a later row of an order is the first row's value. An order-level column (one value
-    per order) that is still blank on later rows while the order's first row has it: ingest did not fill it."""
+    per order) that is still blank on later rows while the order's first row has it: ingest did not fill it.
+    Scope: that column when it has no role (only a query reading it sees the blanks), else the whole table."""
     worst = None
-    for name, ti in biz.info.items():
-        done = next((n for n in ti.notes if n.startswith(FIRST_ROW_NOTE)), None)
-        if done:  # ingest filled it already (business._group_fill / _block_fill): the layout is still one no train shop has
-            feats["fill_gap"] = 1.0
-            return f"{name}: {done}"
+    # ingest filled these already (business._group_fill / _block_fill): the layout is still one no train shop has
+    done = {name: n for name, ti in biz.info.items() for n in ti.notes if n.startswith(FIRST_ROW_NOTE)}
+    if done:
+        feats["fill_gap"] = 1.0
+        scopes += [("fill_gap", name, None) for name in done]  # every such table, not only the first
+        return "; ".join(f"{name}: {n}" for name, n in done.items())
     for name, ti in biz.info.items():
         oid = next((c for c, r in ti.roles.items() if r == "order_id"), None)
         t = biz.tables[name]
@@ -138,7 +149,7 @@ def _fill_gap(biz: Business, feats: dict) -> str | None:
             blank = t[day].isna() & t[data].notna().any(axis=1)
             share = float(blank.mean())
             if share > 0.05 and (worst is None or share > worst[0]):
-                worst = (share, f"{name}.{day} blank on {share:.0%} of rows that carry data under a dated row")
+                worst = (share, f"{name}.{day} blank on {share:.0%} of rows that carry data under a dated row", name, None)
             continue
         g = t.groupby(oid, sort=False)
         size = g[oid].transform("size")
@@ -156,9 +167,11 @@ def _fill_gap(biz: Business, feats: dict) -> str | None:
             vals = t[c].dropna()
             one_value = (g[c].nunique() <= 1).mean() if len(vals) else 0
             if one_value >= 0.99 and (worst is None or share > worst[0]):
-                worst = (share, f"{name}.{c} blank on {share:.0%} of later order rows that the first row fills")
+                worst = (share, f"{name}.{c} blank on {share:.0%} of later order rows that the first row fills", name,
+                         None if ti.roles.get(c) else c)
     if worst:
         feats["fill_gap"] = round(worst[0], 4)
+        scopes.append(("fill_gap", worst[2], worst[3]))
     return worst[1] if worst else None
 
 
@@ -182,12 +195,16 @@ def _name_gap(biz: Business, sales: pd.DataFrame | None, feats: dict) -> None:
 
 def audit(biz: Business, sales: pd.DataFrame | None, known_descs: dict[str, str] | None = None) -> Audit:
     feats: dict[str, float] = {}
-    flags = {k: v for k, v in (("role_gap", _role_gap(biz, known_descs or {})),
-                               ("status_in_text", _status_in_text(biz, sales, feats)),
+    scopes: list[tuple[str, str, str | None]] = []
+    flags = {k: v for k, v in (("role_gap", _role_gap(biz, known_descs or {}, scopes)),
+                               ("status_in_text", _status_in_text(biz, sales, feats, scopes)),
                                ("discount_unapplied", _discount_unapplied(sales, feats)),
-                               ("fill_gap", _fill_gap(biz, feats))) if v}
+                               ("fill_gap", _fill_gap(biz, feats, scopes))) if v}
+    if "discount_unapplied" in flags:  # every line amount
+        scopes.append(("discount_unapplied", SALES, None))
     _name_gap(biz, sales, feats)
-    return Audit("suspect" if set(flags) & set(SUSPECT_FLAGS) else "clean", flags, feats)
+    return Audit("suspect" if set(flags) & set(SUSPECT_FLAGS) else "clean", flags, feats,
+                 [{"flag": f, "table": t, "column": c} for f, t, c in scopes if f in SUSPECT_FLAGS])
 
 
 KNOWN_DESCS = Path(__file__).resolve().parents[2] / "assets" / "readme_roles.json"

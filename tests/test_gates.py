@@ -47,6 +47,29 @@ def test_suspect_shop_keeps_only_bias_proof_types():
     assert gate(log({"type": "number", "answer": 5}, "doanh thu"), "clean") is None
 
 
+def test_suspect_scope_gates_only_answers_that_read_the_flagged_data():
+    from datamate.agent.gates import scope_of
+
+    def read(tables, code="select 1"):
+        return log({"type": "number", "answer": 5}, "doanh thu", [{"code": code, "error": None, "tables": tables}])
+
+    debt = scope_of({"level": "suspect", "scopes": [{"flag": "fill_gap", "table": "SoNo.Sổ nợ", "column": None}]},
+                    ["SoBanHang"])
+    assert "raw_sono_so_no" in debt["tables"] and "debt_orders_all" in debt["tables"] and "sales_all" not in debt["tables"]
+    assert gate(read(["sales_all"]), "suspect", debt) is None
+    assert gate(read(["raw_sono_so_no"]), "suspect", debt)[1] == "shop_suspect"
+    assert gate(read(None), "suspect", debt)[1] == "shop_suspect"  # no plan of the query: the whole shop, as before
+    assert gate(read(["sales_all"]), "suspect", None)[1] == "shop_suspect"  # no scope recorded
+    sales = scope_of({"level": "suspect", "scopes": [{"flag": "fill_gap", "table": "SoBanHang", "column": None}]},
+                     ["SoBanHang"])
+    assert gate(read(["orders_all"]), "suspect", sales)[1] == "shop_suspect"
+    col = scope_of({"level": "suspect", "scopes": [{"flag": "fill_gap", "table": "SoBanHang", "column": "Thu máy cũ"}]},
+                   ["SoBanHang"])
+    assert gate(read(["sales_all"], "select sum(amount) from sales_lines"), "suspect", col) is None
+    assert gate(read(["sales_all"], 'select sum("Thu máy cũ") from sales_lines'), "suspect", col)[1] == "shop_suspect"
+    assert scope_of({"level": "clean", "scopes": []}, []) is None
+
+
 def test_hard_expectation_mismatch_abstains():
     rec = log({"type": "number", "answer": 5}, "ngay nao ban nhieu nhat", expect={"type": "date", "hard": True})
     assert gate(rec)[1] == "expect_type"

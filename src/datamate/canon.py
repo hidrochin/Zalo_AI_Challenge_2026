@@ -450,6 +450,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         desc += "\nShop conventions applied (read from the README and the rulebook): " + "; ".join(slot_notes) + "."
     if flagged:
         desc += f"\nCheck before ranking customers: {', '.join(flagged)} hold(s) over 5% of orders, unusual for one customer."
+    out.attrs["sources"] = sorted({n for s in sources for n in re.findall(r"T\['([^']+)'\]", s)})  # audit scopes (gates.scope_of)
     return out, desc
 
 

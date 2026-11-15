@@ -317,7 +317,8 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
                    cal=None, index: EntityIndex | None = None, off: frozenset[str] = frozenset(), terms: frozenset[str] = frozenset(),
                    macros=(), rulebook: str = "", oracle_note: str | None = None, deep_llm=None,
                    delta: frozenset[str] = frozenset(), suspect: bool = False, calibrator: dict | None = None,
-                   caps: Capabilities | None = None, revenue_total: float | None = None, shop: str = "clean") -> dict:
+                   caps: Capabilities | None = None, revenue_total: float | None = None, shop: str = "clean",
+                   scope: dict | None = None) -> dict:
     t0 = time.time()
     if cfg.deadline and t0 > cfg.deadline:
         return {"id": q["id"], "business_id": q["business_id"], "question": q["question"], "as_of_date": q["as_of_date"],
@@ -395,7 +396,7 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
         if p < calibrator["threshold"]:
             rec["calibrated_from"], rec["final"] = rec["final"], {"type": "abstain"}
     if cfg.gates:
-        gates.apply(rec, shop)
+        gates.apply(rec, shop, scope)
     rec["elapsed"] = round(time.time() - t0, 2)
     return rec
 
@@ -659,7 +660,8 @@ def run(cfg: RunConfig) -> dict:
             capabilities[biz_id] = caps.to_json()
             (out_dir / "capabilities.json").write_text(json.dumps(capabilities, ensure_ascii=False, indent=1), encoding="utf-8")
             shop_audit = audit(biz, sales, known_descs)
-            audits[biz_id] = shop_audit.to_json()
+            scope = gates.scope_of(shop_audit.to_json(), sales.attrs.get("sources", []) if sales is not None else [])
+            audits[biz_id] = {**shop_audit.to_json(), "scope": scope}
             (out_dir / "audit.json").write_text(json.dumps(audits, ensure_ascii=False, indent=1, default=float), encoding="utf-8")
             revenue_total = float(sales["amount"].abs().sum()) if sales is not None and "amount" in sales else None
             index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
@@ -711,7 +713,7 @@ def run(cfg: RunConfig) -> dict:
                     futs = [ex.submit(solve_question, q, llm, pool, system, part_of(q) if part_of else biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook,
                                       oracle["notes"].get(q["id"]), deep_llm=deep_llm, delta=delta_lines,
                                       suspect=trust.states["revenue"] == "suspect", calibrator=calibrator, caps=caps,
-                                      revenue_total=revenue_total, shop=shop_audit.level)
+                                      revenue_total=revenue_total, shop=shop_audit.level, scope=scope)
                             for q in left]
                     for f in as_completed(futs):
                         try:
