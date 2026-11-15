@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the submission image: TEAM=<lowercase team id> docker/build.sh
-# The code comes from the committed `submission` branch (git archive HEAD), never from the working tree, so untracked
+# The code comes from the committed HEAD of the current branch (git archive HEAD), never from the working tree, so untracked
 # or uncommitted files (public-test labels, debug notes, experiments) cannot reach the image.
 set -euo pipefail
 
@@ -12,7 +12,7 @@ ROOT=$(git rev-parse --show-toplevel)
 CTX=${CTX:-$ROOT/build/context}
 cd "$ROOT"
 
-[ "$(git branch --show-current)" = submission ] || { echo "build from the submission branch"; exit 1; }
+echo "building from branch $(git branch --show-current) at $(git rev-parse --short HEAD)"
 git diff --quiet HEAD -- || { echo "uncommitted changes: the image is built from HEAD only; commit first"; exit 1; }
 mkdir -p "$CTX/models" "$CTX/training_code/data"
 

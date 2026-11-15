@@ -5,22 +5,9 @@ This is the backend used in the competition: everything runs offline on our own 
 
 import copy
 import json
-import threading
 import urllib.request
 
 from openai import OpenAI
-
-_trace = threading.local()  # reasoning of each model call made on this thread, for the per-question log
-
-
-def start_trace() -> None:
-    _trace.calls = []
-
-
-def take_trace() -> list[str] | None:
-    """The reasoning of every call since start_trace(), in call order ("" for a call without any); None if none had any."""
-    calls, _trace.calls = getattr(_trace, "calls", None), None
-    return calls if calls and any(calls) else None
 
 
 def _is_ollama(base_url: str) -> bool:
@@ -31,6 +18,23 @@ def _is_ollama(base_url: str) -> bool:
             return "version" in json.loads(r.read())
     except Exception:  # noqa: BLE001
         return False
+
+
+class Reply(str):
+    """The reply text, as every caller reads it, with what the log needs besides: the model's thinking (vLLM's reasoning
+    parser puts it apart from the content) and why generation stopped ('length' = the token budget ran out)."""
+
+    reasoning: str | None = None
+    finish_reason: str | None = None
+
+
+def reply_of(choice) -> Reply:
+    msg = choice.message
+    extra = getattr(msg, "model_extra", None) or {}
+    out = Reply(msg.content or "")
+    out.reasoning = getattr(msg, "reasoning_content", None) or extra.get("reasoning_content") or extra.get("reasoning")
+    out.finish_reason = choice.finish_reason
+    return out
 
 
 class LocalLLM:
@@ -51,8 +55,14 @@ class LocalLLM:
         aux.enable_thinking = False
         return aux
 
+    def with_thinking(self, max_tokens: int) -> "LocalLLM":
+        """The same server and model with thinking on and a budget that holds it: the deep tier of the router."""
+        deep = copy.copy(self)
+        deep.enable_thinking, deep.max_tokens = True, max_tokens
+        return deep
+
     def generate(self, system: str, user_parts: list[str], history: list[dict], temperature: float, seed: int,
-                 max_tokens: int | None = None) -> str:
+                 max_tokens: int | None = None) -> Reply:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": "\n\n".join(user_parts)}]
         messages += history
         extra = {}
@@ -64,8 +74,4 @@ class LocalLLM:
             model=self.model, messages=messages, temperature=temperature, seed=seed,
             max_tokens=max_tokens or self.max_tokens, extra_body=extra or None,
         )
-        msg = r.choices[0].message
-        if getattr(_trace, "calls", None) is not None:  # vLLM's reasoning parser: `reasoning` (newer) or `reasoning_content`
-            extra_fields = msg.model_extra or {}
-            _trace.calls.append(extra_fields.get("reasoning") or extra_fields.get("reasoning_content") or "")
-        return msg.content or ""
+        return reply_of(r.choices[0])

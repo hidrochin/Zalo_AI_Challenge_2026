@@ -91,6 +91,53 @@ def term_advice(text: str, code: str, terms: frozenset[str], engine: str, macros
             "logic from raw tables, unless the question really asks for something else.")
 
 
+def _sql_body(code: str) -> str:
+    return "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("--"))
+
+
+_SHIFT = re.compile(r"\bca (sang|chieu)\b")
+_SHIFT_ORDERS = re.compile(r"\b(so|bao nhieu|may|bn) (don|hoa don)\b")
+_PCT = re.compile(r"%|phan tram")
+_MANY_ORDERS = re.compile(r"\b(nhieu|bao nhieu|may|so|bn|it) (don|hoa don)\b")
+_CODE_LIT = re.compile(r"=\s*'([A-Za-z]{1,5}[-_]?\d{2,})'")
+_SPLIT_ARG = re.compile(r"stock_split\(\s*'[^']*'\s*,\s*'([^']*)'", re.I)
+_SPLIT_UNIT = re.compile(r"\b(?:may|bao nhieu|bn) (\w+)\b(?=(?:(?!\b(?:may|bao nhieu|bn)\b).)*?\b(?:chan|nguyen)\b)")
+
+
+def frame_advice(text: str, code: str, frame) -> str | None:
+    """What the query drops of the question or of its frame (agent/frame.py). Every case is a train error (route run of
+    2026-11-14) and none fires on a train answer that was right; like term_advice it asks once and never blocks."""
+    if frame is None or code.lstrip().upper().startswith("UNANSWERABLE"):
+        return None
+    f, body = fold(text), _sql_body(code)
+    if _SHIFT.search(f) and _SHIFT_ORDERS.search(f) and "shift_revenue(" in body and "shift_orders(" not in body:
+        return "The question counts orders (số đơn) per shift: shift_orders(...) counts them, shift_revenue(...) sums money."
+    if _SHIFT.search(f) and _PCT.search(f) and re.search(r"shift_(orders|revenue)\(", body) \
+            and not re.search(r"pct_change\(|/", body):
+        return ("The question asks a percent change between the two shifts: pct_change(<afternoon value>, <morning value>), "
+                "not the value of one shift.")
+    if _MANY_ORDERS.search(f) and re.search(r"\bfrom\s+sales_lines\b", body) and re.search(r"count\(\s*\*\s*\)", body) \
+            and not re.search(r"count\(\s*distinct\s+order_id", body):
+        return "sales_lines has one row per product line: count(*) counts lines. Count orders with count(distinct order_id)."
+    guessed = [lit for lit in _CODE_LIT.findall(body) if fold(lit) not in f]
+    if (frame.capability or (None,))[0] == "stock" and frame.entities and re.search(r"\braw_\w+", body) and guessed:
+        return (f"The code '{guessed[0]}' is not in the question and may belong to another product. Filter on the product "
+                f"name ({frame.entities[0]!r}) or use stock_at(<product name>, <day>).")
+    m = _SPLIT_ARG.search(body)
+    asked = _SPLIT_UNIT.search(f)
+    if m and asked and fold(m.group(1)).split()[:1] != [asked.group(1)]:
+        return f"The question asks whole '{asked.group(1)}': pass that unit to stock_split, not '{m.group(1)}'."
+    for v in frame.values:
+        col = re.search(r'-> "([^"]+)" = \'([^\']+)\'', v)
+        if col and (col.group(1) == "customer_group" or "khach" in fold(col.group(1))) and col.group(2) not in body:
+            return (f"The question names a customer group: filter {col.group(1)} = '{col.group(2)}' (see the frame); the query "
+                    "does not.")
+    if frame.periods and re.search(r"\bdate '\d", body) and all(a not in body and b not in body for _, a, b in frame.periods):
+        days = "; ".join(f"{p}: {a}..{b}" for p, a, b in frame.periods)
+        return f"The question's period resolves to {days} (see the frame), but the query filters other days."
+    return None
+
+
 def grain_advice(text: str, code: str) -> str | None:
     """A pandas program that counts lines as orders or drops the default sales rule."""
     f = fold(text)

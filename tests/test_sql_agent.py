@@ -375,3 +375,24 @@ def test_status_norm_asked_of_a_view_is_rebound_and_not_linted():
     assert lint(q) is None
     err = 'Binder Error: Referenced column "status__norm" not found in FROM clause!\nCandidate bindings: "status", "customer_name"'
     assert rebind_key(q, err).endswith("status = 'huỷ'")
+
+
+def test_executed_query_records_the_stored_tables_it_reads(con):
+    out = execute(con, "-- type: number\nselect revenue(date '2025-01-01', date '2025-01-31')", "2025-01-31", None)
+    assert out["error"] is None and out["tables"] == ["sales_all"]  # the macro and the view expanded
+    out = execute(con, "-- type: number\nselect sum(tien) from raw_lines", "2025-01-31", None)
+    assert out["tables"] == ["raw_lines"]
+    out = execute(con, "-- type: number\nselect count(*) from raw_lines", "2025-01-31", None)
+    assert out["error"] is None and out["tables"] is None  # read from the statistics: unknown, so a gate still sees it
+
+
+def test_missing_column_table_or_macro_gets_what_the_database_has(con):
+    out = execute(con, '-- type: number\nselect sum("Thành tiền") from sales_lines', "2025-01-31", None)
+    assert out["error"].startswith("Binder Error") and "Columns of sales_lines: " in out["error"] and "amount" in out["error"]
+    out = execute(con, "-- type: number\nselect count(*) from don_hang", "2025-01-31", None)
+    assert "Tables and views of this database: " in out["error"] and "sales_lines" in out["error"]
+    out = execute(con, "-- type: number\nselect doanh_thu(1)", "2025-01-31", None)
+    assert "Macros of this database: " in out["error"] and "revenue" in out["error"]
+    out = execute(con, "-- type: number\nselect revenue(date '2025-01-01', date '2025-01-31')", "2025-01-31", None,
+                  blocked=frozenset({"revenue"}))
+    assert "revenue," not in out["error"].split("Macros of this database: ")[1]

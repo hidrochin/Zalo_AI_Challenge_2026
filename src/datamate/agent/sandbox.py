@@ -197,7 +197,7 @@ def _worker(conn, split_dir: str, biz_id: str, cache_dir: str | None, timeout: i
 
     biz = load_business(Path(split_dir), biz_id, Path(cache_dir) if cache_dir else None)
     cal = load_calendar(Path(split_dir))
-    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()})
+    sales, _ = build_sales(biz.tables, {n: ti.roles for n, ti in biz.info.items()}, biz.slots)
     names = name_index(biz.tables, sales)
     facts = build_facts(biz, sales)
     _limit_memory()

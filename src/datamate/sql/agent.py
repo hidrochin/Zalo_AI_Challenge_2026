@@ -21,7 +21,7 @@ from datamate.canon import build_orders
 from datamate.eval.semantic import find_check
 from datamate.ingest.business import META_COLS, Business
 from datamate.ingest.schema_card import _column_line
-from datamate.sql.store import SqlRejected, _slug, _writable, connect, run_select, set_as_of, set_params
+from datamate.sql.store import SqlRejected, _slug, _writable, connect, read_plan, run_select, set_as_of, set_params
 from datamate.sql.values import ValueIndex
 from datamate.text import fold
 
@@ -234,16 +234,21 @@ _PLAN = ("After the type line write three comment lines, then the query:\n"
          "If a term the question needs has nothing that holds it, reply UNANSWERABLE instead.\n")
 
 
-def build_sql_system(rulebook: str, primitives: bool = False, compiled: bool = False, plan: bool = False) -> str:
+def _drop_skeletons(text: str, names) -> str:
+    return _SKELETON.sub(lambda m: "" if any(re.search(rf"\b{n}\s*\(", m.group(0)) for n in names) else m.group(0), text)
+
+
+def build_sql_system(rulebook: str, primitives: bool = False, compiled: bool = False, plan: bool = False,
+                     drop: frozenset[str] = frozenset()) -> str:
     """primitives: the skeletons that call a rulebook macro are left out, and the model computes every term itself.
     compiled: the same, but the card also lists the macros the model wrote from this rulebook (sql/compile.py).
-    plan: the query starts with comment lines naming the terms, the rule and the columns it uses."""
-    text = SYSTEM_TEMPLATE
+    plan: the query starts with comment lines naming the terms, the rule and the columns it uses.
+    drop: tested macros this rulebook switched off (catalog "delta"): their skeletons are left out."""
+    text = _drop_skeletons(SYSTEM_TEMPLATE, drop) if drop else SYSTEM_TEMPLATE
     if plan:
         text = text.replace("If the data cannot support the question, reply", _PLAN + "If the data cannot support the question, reply")
     if primitives:
-        rule_macros = [m for m in MACROS if m not in PRIMITIVES]
-        text = _SKELETON.sub(lambda m: "" if any(re.search(rf"\b{n}\s*\(", m.group(0)) for n in rule_macros) else m.group(0), text)
+        text = _drop_skeletons(text, [m for m in MACROS if m not in PRIMITIVES])
         text = text.replace(_MACRO_RULE, (
             "- The schema card lists generic helpers and the macros written from this RULEBOOK: call one when its doc is the "
             "term the question asks, with the question's own arguments. Compute any other business term yourself from the "
@@ -382,6 +387,8 @@ def sql_question_part(question: str, as_of: str, examples: list[dict], hints: li
     if (norm or {}).get("rules"):
         out += ("\n\nRULEBOOK lines whose words the question uses (check that they are the rule it asks; the whole "
                 "RULEBOOK is in the system message):\n" + "\n".join(norm["rules"]))
+    if (norm or {}).get("frame"):
+        out += "\n\n" + norm["frame"]
     lines = sql_hints(hints or [])
     if lines:
         out += "\n\nTime expressions, already resolved by the rulebook (use exactly these dates):\n" + "\n".join(lines)
@@ -430,6 +437,21 @@ def _plain(v):
     return v.isoformat() if isinstance(v, dt.date) else v
 
 
+_CODE_VALUE = re.compile(r"[A-Za-z]{1,6}[-_.]?\d{2,}")
+
+
+def drop_code_column(columns: list[str], rows: list[list]) -> tuple[list[str], list[list]]:
+    """A code column right before the name column of the same rows (debt_by_customer gives customer, customer_name, debt):
+    the reference tables name each row once (train: 19/19 tables are name, amount), so the code goes."""
+    if len(columns) < 3 or not rows:
+        return columns, rows
+    first, second = [r[0] for r in rows], [r[1] for r in rows]
+    if all(isinstance(v, str) and _CODE_VALUE.fullmatch(v.strip()) for v in first) \
+            and all(isinstance(v, str) and not _CODE_VALUE.fullmatch(v.strip()) for v in second):
+        return columns[1:], [r[1:] for r in rows]
+    return columns, rows
+
+
 def to_answer(kind: str, columns: list[str], rows: list[tuple]) -> dict:
     """The typed answer read off a query result. Rounding and formats are those of the dm answer functions."""
     rows = [tuple(_plain(v) for v in r) for r in rows]
@@ -463,7 +485,7 @@ def to_answer(kind: str, columns: list[str], rows: list[tuple]) -> dict:
             return dm.answer_list(list(rows[0]))
         raise AnswerShape(f"`-- type: list` needs one column, or one row: got {len(rows)} rows and {len(columns)} columns.")
     if kind == "table":
-        return dm.answer_table(columns, [list(r) for r in rows])
+        return dm.answer_table(*drop_code_column(columns, [list(r) for r in rows]))
     raise AnswerShape(f"Unknown answer type {kind!r} in the `-- type:` line.")
 
 
@@ -759,7 +781,7 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
     periods: the question's resolved periods; span: first and last day of the sales data; walkin: the views have `walkin`.
     rules_code: the rewrites and lints that encode rulebook terms; blocked: stored macros this run does not offer."""
     m = _UNANSWERABLE.match(code)
-    preview, written = "", code
+    preview, written, n_rows, tables, reads = "", code, None, None, ""
     if m:
         result = {"type": "unanswerable", "reason": m.group(1).strip(), "_src": "model"}
     else:
@@ -787,10 +809,13 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
                     if again is None or tries == 2:
                         raise
                     code = again
-            preview = repr(rows[:5])
+            preview, n_rows = repr(rows[:5]), len(rows)
+            tables, reads = read_plan(con, code)
             result = to_answer(declared.group(1).lower(), columns, rows)
         except (duckdb.Error, ValueError, TypeError) as e:  # ValueError covers SqlRejected and AnswerShape
-            return {"result": None, "error": str(e)[:1500], "stdout": preview, **_ran(written, code)}
+            error = str(e)[:1500]
+            hint = schema_hint(con, code, error, blocked)
+            return {"result": None, "error": f"{error}\n{hint}" if hint else error, "stdout": preview, **_ran(written, code)}
     error, warning = check_result(result, names, helper_guard=False, outside=periods_outside(list(periods), span, as_of),
                                   zero_ok=macro_only(code))
     contract = None
@@ -800,7 +825,42 @@ def execute(con, code: str, as_of: str, names: set[str] | None, shadow=None, tim
         if unit:
             warning, contract = _unit_warning(con, result, unit, shadow[1:], timeout)
     return {"result": result if error is None else None, "error": error, "warning": warning, "contract": contract, "stdout": preview,
-            **_ran(written, code)}
+            "rows": n_rows, "tables": tables, "reads": reads, **_ran(written, code)}
+
+
+_NO_COLUMN = re.compile(r"Binder Error: Referenced column .* not found|Binder Error: Values list .* does not have a column", re.S)
+_NO_TABLE = re.compile(r"Catalog Error: Table with name (\w+) does not exist")
+_NO_FUNCTION = re.compile(r"Catalog Error: (?:Scalar |Table )?Function with name (\w+) does not exist")
+_FROM_NAME = re.compile(r'\b(?:from|join)\s+(?:"([^"]+)"|(\w+))(?!\s*\()', re.I)
+
+
+def schema_hint(con, code: str, error: str, blocked: frozenset[str] = frozenset()) -> str:
+    """What the database has, for the repair of a query that named a column, table or macro it does not have: every column
+    of the tables the query reads (DuckDB itself offers only the closest few), or the tables, or the macros."""
+    def names(sql: str, *args) -> list[str]:
+        try:
+            return [r[0] for r in con.execute(sql, list(args)).fetchall()]
+        except duckdb.Error:
+            return []
+
+    def q(c: str) -> str:
+        return c if re.fullmatch(r"[a-z_][a-z0-9_]*", c) else f'"{c}"'
+
+    if _NO_COLUMN.search(error):
+        lines = []
+        for t in dict.fromkeys(a or b for a, b in _FROM_NAME.findall(_body(code))):
+            cols = names("select column_name from duckdb_columns() where table_name = ? order by column_index", t)
+            if cols:
+                lines.append(f"Columns of {t}: {', '.join(q(c) for c in cols[:120])}")
+        return "\n".join(lines)
+    if _NO_TABLE.search(error):
+        tables = names("select table_name from duckdb_tables() where not internal union select view_name from duckdb_views() "
+                       "where not internal order by 1")
+        return f"Tables and views of this database: {', '.join(tables)}" if tables else ""
+    if _NO_FUNCTION.search(error):
+        fns = [f for f in names("select distinct function_name from duckdb_functions() where not internal order by 1") if f not in blocked]
+        return f"Macros of this database: {', '.join(fns)}" if fns else ""
+    return ""
 
 
 def _ran(written: str, code: str) -> dict:
@@ -857,7 +917,7 @@ class SqlPool:
         self.blocked = frozenset(names)
 
     def setup(self, statements: list[str]) -> None:
-        """Run temp-object statements on every cursor (each is its own session): compiled macros, shop views.
+        """Run temp-object statements on every cursor (each is its own session): oracle views, compiled macros, shop views.
         DuckDB binds a table macro when it is created, so as_of() needs a typed value first (run() sets the question's).
         A statement that still fails is skipped: one lost macro beats a run with no answers."""
         if not statements:

@@ -110,3 +110,16 @@ def test_rule_variants_report(tmp_path):
                 "| Đơn tính vào doanh thu | x |\n| Đơn thuộc kỳ nào | y |\n")
     rep = run_rule_variants(rulebook, tmp_path, lambda system, parts: '{"changed": true}')
     assert rep["caught"][0] == rep["caught"][1]
+
+
+def test_slot_modes_make_the_gap_their_slot_fills():
+    from datamate.eval.mutate import _short, abbrev_names, rename_order_key, status_in_notes
+
+    p, _, _ = status_in_notes(pieces(), readme(), random.Random(0))
+    assert "Trạng thái" not in p[0][1].columns and p[0][1]["Ghi chú"].isna().tolist() == [True, False]
+    p, _, renamed = rename_order_key(pieces(), readme(), random.Random(0))
+    assert renamed == {"Mã đơn": UNSEEN["order_id"]} and UNSEEN["order_id"] in p[0][1].columns
+    assert _short("Coca Cola 330ml") == "Coca C330ml"
+    two = [(sh, df.assign(**{"Tên hàng": ["Bia Sài Gòn xanh", "Nước suối Lavie"]})) for sh, df in pieces()]
+    p, _, _ = abbrev_names(two, readme(), random.Random(0))
+    assert p[-1][1].to_dict("list") == {"Ghi tắt": ["Bia SGx", "Nước sL"], "Tên hàng": ["Bia Sài Gòn xanh", "Nước suối Lavie"]}

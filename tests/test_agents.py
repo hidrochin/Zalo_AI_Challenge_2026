@@ -49,6 +49,8 @@ def test_sections_and_parse():
     assert [(m.name, m.doc, m.sql.endswith(";")) for m in two] == [("rev", "doanh thu từ a đến b", False),
                                                                   ("top_items", "mặt hàng bán chạy", False)]
     assert two[1].types["k"] == "int" and "-- doc" not in two[0].sql
+    looped = parse_macros(REVENUE + TOP + REVENUE.replace("doanh thu từ", "lặp"))  # a looping model repeats a name
+    assert [(m.name, m.doc) for m in looped] == [("rev", "doanh thu từ a đến b"), ("top_items", "mặt hàng bán chạy")]
 
 
 def test_macros_run_and_hidden_ones_are_refused(tmp_path):

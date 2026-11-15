@@ -16,7 +16,9 @@ from typing import Callable
 
 import duckdb
 
-COMPILE_VERSION = 2
+from datamate.sql.invariants import compiled_problem
+
+COMPILE_VERSION = 3  # 3: an empty reply cut by thinking is asked again without thinking (no cached empty compile)
 
 # What every store holds when the shop has the data (sql/store.py, facts.py). Facts only, no rule: the compiler decides
 # how the rulebook combines them.
@@ -122,8 +124,10 @@ def sections(rulebook: str) -> list[tuple[str, str]]:
 
 
 def parse_macros(reply: str, section: str = "") -> list[Macro]:
-    """Every `create macro` of the reply; a block may hold several, each after its own `-- doc:` / `-- args:` lines."""
+    """Every `create macro` of the reply; a block may hold several, each after its own `-- doc:` / `-- args:` lines.
+    A name the reply already used is dropped: a looping model wrote `phone_model_lines` 12 times in one reply."""
     out = []
+    seen = set()
     for block in _BLOCK.findall(reply):
         heads = list(_HEAD.finditer(block))
         ends = [m.start() for m in heads[1:]] + [len(block)]
@@ -143,6 +147,9 @@ def parse_macros(reply: str, section: str = "") -> list[Macro]:
                     if len(words) >= 2:
                         types[words[0]] = words[1].lower()
             doc = _DOC.search(head)
+            if m.group(1).lower() in seen:
+                continue
+            seen.add(m.group(1).lower())
             out.append(Macro(m.group(1).lower(), args, types, bool(m.group(3)), doc.group(1).strip() if doc else "",
                              body.strip().rstrip(";").strip(), section))
     return out
@@ -218,13 +225,18 @@ def _missing_table(err: str) -> bool:
     return bool(re.search(r"Table with name \w+ does not exist|Referenced table|Catalog Error: Table", err))
 
 
-def _check(macros: list[Macro], stores: dict[str, Path], before: list[Macro], hidden: frozenset[str]) -> dict[str, str]:
+def _check(macros: list[Macro], stores: dict[str, Path], before: list[Macro], hidden: frozenset[str],
+           taken: frozenset[str] = frozenset()) -> dict[str, str]:
     """Run every macro on every store, after the macros of earlier sections: name -> an error, for the ones that ran
-    nowhere (the error of a shop that has the tables, if any). Fills Macro.shops."""
+    nowhere (the error of a shop that has the tables, if any). Fills Macro.shops.
+    taken: names of the stores' tested macros, which a compiled macro may not replace."""
     hide = _hidden(hidden, before + macros)
     errors: dict[str, list[str]] = {m.name: [] for m in macros}
     for m in macros:
         m.shops = []
+        if m.name in taken:
+            errors[m.name].append(f"{m.name} is the name of a macro that already exists: give the new rule's macro another name.")
+    macros = [m for m in macros if m.name not in taken]
     for biz, path in stores.items():
         con = duckdb.connect(str(path), read_only=True)
         try:
@@ -232,6 +244,7 @@ def _check(macros: list[Macro], stores: dict[str, Path], before: list[Macro], hi
             day = data_end(con)
             for m in macros:
                 err = try_macro(con, m, day, hide)
+                err = err or compiled_problem(con, m, day)  # ran, but breaks an invariant (sql/invariants.py)
                 if err is None:
                     m.shops.append(biz)
                 else:
@@ -239,10 +252,9 @@ def _check(macros: list[Macro], stores: dict[str, Path], before: list[Macro], hi
         finally:
             con.close()
     out = {}
-    for m in macros:
-        if not m.shops:
-            errs = errors[m.name]
-            out[m.name] = next((e for e in errs if not _missing_table(e)), errs[0] if errs else "did not run")
+    for name, errs in errors.items():
+        if name in taken or not next(m for m in macros if m.name == name).shops:
+            out[name] = next((e for e in errs if not _missing_table(e)), errs[0] if errs else "did not run")
     return out
 
 
@@ -261,23 +273,75 @@ def compile_rulebook(rulebook: str, stores: dict[str, Path], generate: Callable[
     if path.exists():
         return [Macro(**d) for d in json.loads(path.read_text(encoding="utf-8"))["macros"]]
     system = SYSTEM.format(schema=SCHEMA_DOC, rulebook=rulebook.strip())
+    asks = [(title, lambda done, text=text: [f"Macros already written:\n{_known(done)}",
+                                             f"Write the macros of this section:\n\n{text}"]) for title, text in sections(rulebook)]
+    return _compile(asks, system, stores, generate, path, hidden, frozenset(), log)
+
+
+DELTA_NOTE = """
+## This rulebook against the tested one
+Most rules are the same as in the rulebook the shops' tested macros were written for; those macros are listed in the
+message and already apply them. You only write macros for the rules that are NEW or CHANGED, one section per message.
+Give a new macro a name of its own: never the name of a tested macro, even one this rulebook switched off.
+"""
+
+
+def compile_delta(rulebook: str, delta: list[tuple[str, str, str]], tested: dict[str, str], off: frozenset[str],
+                  stores: dict[str, Path], generate: Callable[[str, list[str], list[dict]], str], cache_path: Path,
+                  model: str = "", log: Callable[[str], None] = print) -> list[Macro]:
+    """The macros of the rules this rulebook adds or changes against the train rulebook (rules.rule_delta), cached by those
+    rules. tested: name -> doc of the stores' hand-written macros; off: the ones this rulebook's changes switched off,
+    which a compiled macro may not call. The rest of the rulebook stays with the tested macros, lints and checks."""
+    if not delta:
+        return []
+    by_section: dict[str, list[str]] = {}
+    for section, _, line in delta:
+        by_section.setdefault(section, []).append(line)
+    on = "\n".join(f"- {d}" for n, d in tested.items() if n not in off)
+    gone = "\n".join(f"- {d}" for n, d in tested.items() if n in off)
+    head = (f"Tested macros you may call:\n{on}"
+            + (f"\n\nTested macros switched off: their rule changed, so write the changed rule as a new macro:\n{gone}" if gone else ""))
+    key = hashlib.sha1(f"{COMPILE_VERSION}\n{model}\n{SCHEMA_DOC}\n{SYSTEM}\n{DELTA_NOTE}\n{rulebook}\n{head}\n"
+                       f"{json.dumps(by_section, ensure_ascii=False)}".encode()).hexdigest()[:12]
+    path = cache_path.with_name(f"{cache_path.stem}_delta_{key}.json")
+    if path.exists():
+        return [Macro(**d) for d in json.loads(path.read_text(encoding="utf-8"))["macros"]]
+    system = SYSTEM.format(schema=SCHEMA_DOC, rulebook=rulebook.strip()) + DELTA_NOTE
+    asks = [(title, lambda done, lines=lines, title=title: [
+        head, f"Macros already written for new rules:\n{_known(done)}",
+        f"Section {title}: these rules are new or changed. Write the macros they need:\n\n" + "\n".join(lines)])
+        for title, lines in by_section.items()]
+    return _compile(asks, system, stores, generate, path, off, frozenset(tested), log)
+
+
+def _compile(asks: list[tuple[str, Callable[[list[Macro]], list[str]]]], system: str, stores: dict[str, Path],
+             generate: Callable[[str, list[str], list[dict]], str], path: Path, hidden: frozenset[str],
+             taken: frozenset[str], log: Callable[[str], None]) -> list[Macro]:
+    """One message per section (its user parts built from the macros written so far), one repair round, then the cache."""
     macros: list[Macro] = []
     record = []
-    for title, text in sections(rulebook):
-        user = [f"Macros already written:\n{_known(macros)}", f"Write the macros of this section:\n\n{text}"]
+    for title, ask in asks:
+        user = ask(macros)
         reply = generate(system, user, [])
         new = [m for m in parse_macros(reply, title) if m.name not in {x.name for x in macros}]
-        errors = _check(new, stores, macros, hidden) if new else {}
+        errors = _check(new, stores, macros, hidden, taken) if new else {}
         if errors:  # one repair round with the errors of the macros that ran nowhere
             msg = "These macros failed when called on the shops' databases:\n" + "\n".join(
                 f"- {n}: {e}" for n, e in errors.items()) + "\n\nReturn every failed macro again, fixed, one ```sql block each."
-            fixed = {m.name: m for m in parse_macros(generate(system, user, [{"role": "assistant", "content": reply},
-                                                                                {"role": "user", "content": msg}]), title)}
+            again = parse_macros(generate(system, user, [{"role": "assistant", "content": reply},
+                                                         {"role": "user", "content": msg}]), title)
+            fixed = {m.name: m for m in again}
             new = [fixed.get(m.name, m) if m.name in errors else m for m in new]
-            errors = _check(new, stores, macros, hidden)
+            new += [m for m in again if m.name not in {x.name for x in new + macros}]  # renamed off a taken name
+            errors = _check(new, stores, macros, hidden, taken)
         kept = [m for m in new if m.name not in errors]
         macros += kept
-        record.append({"section": title, "reply": reply, "kept": [m.name for m in kept], "failed": errors})
+        cut = getattr(reply, "cut", None)
+        record.append({"section": title, "reply": reply, "finish_reason": getattr(reply, "finish_reason", None),
+                       "thinking_chars": len(getattr(reply, "reasoning", None) or ""),
+                       "cut": None if cut is None else {"finish_reason": cut.finish_reason,
+                                                        "thinking_chars": len(cut.reasoning or "")},
+                       "kept": [m.name for m in kept], "failed": errors})
         log(f"compile: {title}: {len(kept)} macros{f', {len(errors)} failed' if errors else ''}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"macros": [asdict(m) for m in macros], "sections": record}, ensure_ascii=False, indent=1),
