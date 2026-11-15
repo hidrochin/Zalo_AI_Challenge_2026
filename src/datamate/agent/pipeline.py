@@ -441,6 +441,7 @@ def _samples(llm, q: dict, pool, system: str, user_parts: list[str], text: str, 
         contract = None  # the primitive's answer, when a check found the query disagrees with it
         tries = 1 + cfg.repair
         attempt = 0
+        extended = False
         while attempt < tries:
             try:
                 text_reply = _generate(llm, cfg, system, user_parts, history, temperature=temperature, seed=cfg.seed + s)
@@ -479,8 +480,8 @@ def _samples(llm, q: dict, pool, system: str, user_parts: list[str], text: str, 
             attempt += 1
             if code is None and not text_reply.strip() and getattr(text_reply, "finish_reason", None) == "length" \
                     and hasattr(llm, "without_thinking"):
-                if attempt == tries and tries == 1 + cfg.repair:  # the repair round was the cut one: one more, once (train: 8)
-                    tries += 1
+                if not extended:  # the cut reply is no attempt: the reply without thinking keeps its repair round, once
+                    tries, extended = tries + 1, True
                 llm = llm.without_thinking()  # thinking ate the budget: the same budget again would be cut again
                 continue
             msg = engine.repair_message(out) if out["error"] else engine.check_message(out["warning"])
