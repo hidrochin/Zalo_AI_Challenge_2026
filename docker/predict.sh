@@ -6,7 +6,7 @@
 # Time: the organizers' 6 h include model loading. Questions not started by DEADLINE are left unanswered (abstain);
 # from DEADLINE - DEEP_MARGIN no question takes the deep (thinking) tier.
 # Throughput: one `datamate run` solves one shop at a time, so after a single prepare pass the shops are split into
-# GROUPS processes balanced by question count; all of them append to /result/submission.jsonl.
+# NGROUPS processes balanced by question count; all of them append to /result/submission.jsonl.
 set -uo pipefail
 
 T0=$(date +%s)
@@ -17,7 +17,7 @@ PORT=8000
 WORK=/tmp/datamate  # /data is read-only: split links, ingest cache, DuckDB stores
 RESULT=/result
 MAX_STARTS=4
-GROUPS=12
+NGROUPS=12  # not GROUPS: bash's own array of the user's group ids, which ignores assignment (root: "0")
 SERVE_ARGS=(--served-model-name llm --host 127.0.0.1 --port "$PORT" --seed 0
             --tensor-parallel-size 2 --dtype bfloat16 --max-model-len 32768 --gpu-memory-utilization 0.90
             --max-num-seqs 128 --max-num-batched-tokens 16384 --enable-prefix-caching
@@ -29,6 +29,7 @@ RUN_ARGS=(--backend local --engine sql --model llm --base-url "http://127.0.0.1:
 log() { echo "[predict.sh] $(date -u +%FT%TZ) $*" | tee -a "$RESULT/predict.log"; }
 
 mkdir -p "$RESULT/logs" "$WORK/root"
+touch "$RESULT/submission.jsonl"  # a missing line is an abstain; a missing file makes the whole run invalid
 ln -sfn /data "$WORK/root/test"                          # the pipeline reads <data-root>/<split>/
 ln -sfn /code/training_code/data/train "$WORK/root/train"  # train questions + answers: the example bank
 NQ=$(grep -c . /data/questions.jsonl)
@@ -48,19 +49,19 @@ start_server() {
     while (( SECONDS - t0 < 1800 )); do
         python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$PORT/health', timeout=5)" 2>/dev/null \
             && { log "model server up after $(( SECONDS - t0 ))s"; return 0; }
-        kill -0 "$SERVER" 2>/dev/null || { log "model server exited"; tail -40 "$RESULT/vllm.log"; return 1; }
+        kill -0 "$SERVER" 2>/dev/null || { log "model server exited"; tail -120 "$RESULT/vllm.log"; return 1; }
         sleep 5
     done
     log "model server not up after 30 min"
     return 1
 }
 
-answered() { [ -f "$RESULT/submission.jsonl" ] && grep -c . "$RESULT/submission.jsonl" || echo 0; }
+answered() { grep -c . "$RESULT/submission.jsonl" || true; }  # grep -c prints 0 itself (exit 1) on an empty file
 
 datamate() { (cd /code && .venv/bin/datamate --data-root "$WORK/root" --cache-dir "$WORK/cache/ingest" "$@"); }
 
 # shop groups, longest first to the emptiest group (one line per group: "<questions> <biz...>")
-mapfile -t PARTS < <(python3 - /data/questions.jsonl "$GROUPS" <<'EOF'
+mapfile -t PARTS < <(python3 - /data/questions.jsonl "$NGROUPS" <<'EOF'
 import json, sys
 from collections import Counter
 n = Counter(json.loads(l)["business_id"] for l in open(sys.argv[1], encoding="utf-8") if l.strip())
@@ -74,6 +75,8 @@ for total, bizs in groups:
         print(total, " ".join(sorted(bizs)))
 EOF
 )
+(( ${#PARTS[@]} > 0 )) || { log "no shop groups from /data/questions.jsonl"; exit 1; }
+log "${#PARTS[@]} shop groups: $(printf '%s; ' "${PARTS[@]}")"
 
 for (( start = 1; start <= MAX_STARTS; start++ )); do
     (( $(date +%s) < DEADLINE )) || { log "deadline reached"; break; }

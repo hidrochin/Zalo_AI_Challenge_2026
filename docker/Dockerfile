@@ -5,6 +5,10 @@
 # vLLM 0.33 ships CUDA 13.0 only; the scoring machine's driver (R570) runs CUDA <= 12.8 natively and 12.9 through
 # minor-version compatibility, so the base is the newest cu129 release.
 FROM vllm/vllm-openai:v0.32.0-cu129
+# that image ships torchcodec 0.17.0+cu130 next to torch 2.13.0+cu129: it needs libcudart.so.13, so importing it raises
+# OSError, which vLLM 0.32 does not catch (only ImportError/RuntimeError), and `vllm serve` dies before it starts
+# (submission test 2026-11-15). Without it vLLM falls back as for a missing package; it serves only audio input.
+RUN pip uninstall -y torchcodec
 ENTRYPOINT []
 ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 \
     PIP_NO_CACHE_DIR=1 NCCL_P2P_DISABLE=1 PYTHONHASHSEED=0 \

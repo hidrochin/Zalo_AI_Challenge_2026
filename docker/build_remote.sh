@@ -32,7 +32,10 @@ set -euo pipefail
 cd /workspace/imgbuild
 N=zaic2026_datamate_oom
 date -u +"start %FT%TZ"
-python3 assemble.py --base . --tag $N:final --layer ctx/models=code/models:deref \
+SP=usr/local/lib/python3.12/dist-packages  # torchcodec: the RUN pip uninstall of docker/Dockerfile
+python3 assemble.py --base . --tag $N:final \
+  --remove $SP/torchcodec --remove $SP/torchcodec-0.17.0.dist-info --remove $SP/torchcodec.libs \
+  --layer ctx/models=code/models:deref \
   --layer ctx/training_code=code/training_code --layer /code=code | pigz -p 64 > out/$N.tar.gz
 date -u +"written %FT%TZ"
 pigz -dc out/$N.tar.gz | python3 assemble.py --verify - > out/verify.json

@@ -3,7 +3,7 @@ such as a vast.ai container). The result is what `docker build` from docker/Dock
 the base image's layers, then one layer per COPY/RUN step, with the Dockerfile's ENTRYPOINT, ENV, WORKDIR and CMD.
 
     python3 assemble.py --base <dir with manifest.json, config.json, blobs/> --tag zaic2026_datamate_<team>:final \
-        --layer <src dir>=<path in image>[:deref] ... | pigz > zaic2026_datamate_<team>.tar.gz
+        [--remove <path in image> ...] --layer <src dir>=<path in image>[:deref] ... | pigz > zaic2026_datamate_<team>.tar.gz
 
 The archive holds both layouts `docker save` writes (Docker >= 25): manifest.json for `docker load`, and an OCI layout
 (oci-layout, index.json, blobs/sha256/...). Layers are uncompressed tars named by their SHA-256. Every digest and size
@@ -87,6 +87,22 @@ def write_layer(out, src: Path, dest: str, deref: bool) -> None:
     tar.close()
 
 
+def write_removals(out, paths: list[str]) -> None:
+    """One layer that deletes `paths` of the base image (OCI whiteouts `.wh.<name>`), as a RUN rm/pip uninstall does."""
+    tar = tarfile.open(fileobj=out, mode="w|", format=tarfile.GNU_FORMAT)
+    dirs = sorted({"/".join(p.strip("/").split("/")[:i]) for p in paths for i in range(1, len(p.strip("/").split("/")))})
+    for d in dirs:
+        ti = _info(d + "/", os.stat("/"), tarfile.DIRTYPE)
+        ti.mode = 0o755
+        tar.addfile(ti)
+    for p in sorted(paths):
+        parent, _, name = p.strip("/").rpartition("/")
+        ti = _info(f"{parent}/.wh.{name}", os.stat("/"), tarfile.REGTYPE)
+        ti.mode = 0o644
+        tar.addfile(ti, io.BytesIO(b""))
+    tar.close()
+
+
 def _gunzip(path: Path):
     """A decompressing reader of a base layer blob (pigz when present: several times faster than gzip)."""
     try:
@@ -123,7 +139,12 @@ def _bytes_member(out, name: str, data: bytes) -> None:
     _pad(out, len(data))
 
 
-def assemble(base: Path, tag: str, layers: list[tuple[Path, str, bool]], out) -> None:
+def assemble(base: Path, tag: str, layers: list[tuple[Path, str, bool]], out, remove: list[str] | None = None) -> None:
+    # our layers in Dockerfile order: the removals (a RUN right after FROM), then one per COPY
+    steps = ([(f"RUN rm -rf {' '.join('/' + p.strip('/') for p in remove)} (docker/assemble.py)",
+               lambda o: write_removals(o, remove))] if remove else [])
+    steps += [(f"COPY {dest} (docker/assemble.py)", lambda o, s=src, d=dest, r=deref: write_layer(o, s, d, r))
+              for src, dest, deref in layers]
     manifest = json.loads((base / "manifest.json").read_text())
     config = json.loads((base / "config.json").read_text())
     blobs = [base / "blobs" / l["digest"].split(":", 1)[1] for l in manifest["layers"]]
@@ -138,11 +159,11 @@ def assemble(base: Path, tag: str, layers: list[tuple[Path, str, bool]], out) ->
         if got[b][0] != want:
             raise SystemExit(f"base layer {i} ({b.name}) does not match its diff_id")
     ours = []
-    for src, dest, deref in layers:
+    for label, write in steps:
         sink = Sink()
-        write_layer(sink, src, dest, deref)
+        write(sink)
         ours.append(("sha256:" + sink.h.hexdigest(), sink.n))
-        print(f"layer {dest}: {sink.n} bytes {ours[-1][0]}", file=sys.stderr, flush=True)
+        print(f"layer {label}: {sink.n} bytes {ours[-1][0]}", file=sys.stderr, flush=True)
 
     # image config: the Dockerfile's instructions over the base config
     c = config["config"]
@@ -155,7 +176,7 @@ def assemble(base: Path, tag: str, layers: list[tuple[Path, str, bool]], out) ->
         {"created": created, "created_by": "ENTRYPOINT []", "empty_layer": True},
         {"created": created, "created_by": "ENV " + " ".join(ENV), "empty_layer": True},
         {"created": created, "created_by": "WORKDIR /code", "empty_layer": True},
-    ] + [{"created": created, "created_by": f"COPY {dest} (docker/assemble.py)"} for _, dest, _ in layers] + [
+    ] + [{"created": created, "created_by": label} for label, _ in steps] + [
         {"created": created, "created_by": 'CMD ["bash", "/code/predict.sh"]', "empty_layer": True}]
     cfg = json.dumps(config, separators=(",", ":")).encode()
     cfg_d = "sha256:" + hashlib.sha256(cfg).hexdigest()
@@ -199,15 +220,15 @@ def assemble(base: Path, tag: str, layers: list[tuple[Path, str, bool]], out) ->
         if ("sha256:" + sink.h.hexdigest(), sink.n) != (d, n):
             raise SystemExit(f"base layer {b.name} changed between passes")
         _pad(out, n)
-    for (src, dest, deref), (d, n) in zip(layers, ours):
+    for (label, write), (d, n) in zip(steps, ours):
         if d in written:
             continue
         written.add(d)
         _member(out, path(d), n)
         sink = Sink(out)
-        write_layer(sink, src, dest, deref)
+        write(sink)
         if ("sha256:" + sink.h.hexdigest(), sink.n) != (d, n):
-            raise SystemExit(f"layer {dest} changed between passes")
+            raise SystemExit(f"layer {label} changed between passes")
         _pad(out, n)
     out.write(b"\0" * 1024)
     out.flush()
@@ -268,6 +289,7 @@ def main() -> None:
     ap.add_argument("--base", type=Path)
     ap.add_argument("--tag")
     ap.add_argument("--layer", action="append", default=[], help="<src dir>=<path in image>[:deref]")
+    ap.add_argument("--remove", action="append", default=[], help="a path of the base image to delete (whiteout)")
     ap.add_argument("--verify", help="an archive to check, or - for stdin")
     a = ap.parse_args()
     if a.verify:
@@ -280,7 +302,7 @@ def main() -> None:
         deref = dest.endswith(":deref")
         layers.append((Path(src), dest.removesuffix(":deref"), deref))
     out = sys.stdout.buffer
-    assemble(a.base, a.tag, layers, out)
+    assemble(a.base, a.tag, layers, out, a.remove)
 
 
 if __name__ == "__main__":
