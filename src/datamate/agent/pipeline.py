@@ -5,6 +5,7 @@ import json
 import random
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -397,6 +398,13 @@ def solve_question(q: dict, llm, pool: ExecPool | SqlPool, system: str, biz_part
     return rec
 
 
+def failed(q: dict, where: str, e: Exception) -> dict:
+    """The record of a question an unexpected error stopped: an abstain, with the error and its traceback in the log."""
+    return {"id": q["id"], "business_id": q["business_id"], "question": q["question"], "as_of_date": q["as_of_date"],
+            "final": {"type": "abstain"}, "error": f"{where}: {e!r}", "traceback": "".join(traceback.format_exception(e)),
+            "samples": [], "elapsed": 0.0}
+
+
 def log_summary(rec: dict) -> dict:
     """The fields the organizers' Docker guideline asks of each question's log (section 3.3), first in the file: the final
     answer, elapsed_ms, and every executed query with its output, in order (the full attempts, with the model's
@@ -632,80 +640,94 @@ def run(cfg: RunConfig) -> dict:
             bar.update(1)
 
         for biz_id in sorted(by_biz):
-            biz = load_business(split_dir, biz_id, cfg.cache_dir)
-            if resolve_columns(biz, cfg.cache_dir, ask):
+            pool = None
+            try:
                 biz = load_business(split_dir, biz_id, cfg.cache_dir)
-            if resolve_statuses(biz, cfg.cache_dir, ask):
-                biz = load_business(split_dir, biz_id, cfg.cache_dir)
-            if resolve_slots(biz, split_dir, cfg.cache_dir, rulebook, lambda system, parts: think(system, parts, []),
-                             cfg.model, enabled):
-                biz = load_business(split_dir, biz_id, cfg.cache_dir)
-            saved = slots_path(cfg.cache_dir, split_dir.name, biz_id)
-            slot_fills[biz_id] = json.loads(saved.read_text(encoding="utf-8")).get("applied", {}) if saved.exists() else {}
-            (out_dir / "slots.json").write_text(json.dumps(slot_fills, ensure_ascii=False, indent=1), encoding="utf-8")
-            roles = {n: ti.roles for n, ti in biz.info.items()}
-            sales, sales_desc = build_sales(biz.tables, roles, biz.slots)
-            trust = assess(biz, sales)
-            sales_desc += f"\n{trust.note()}" if trust.problems else ""
-            shop_off = frozenset(c.name for c in CHECKS) if trust.states["revenue"] == "suspect" else off
-            facts = build_facts(biz, sales)
-            terms = ready_terms(facts)
-            caps = profile(biz, trust, facts)
-            capabilities[biz_id] = caps.to_json()
-            (out_dir / "capabilities.json").write_text(json.dumps(capabilities, ensure_ascii=False, indent=1), encoding="utf-8")
-            shop_audit = audit(biz, sales, known_descs)
-            scope = gates.scope_of(shop_audit.to_json(), sales.attrs.get("sources", []) if sales is not None else [])
-            audits[biz_id] = {**shop_audit.to_json(), "scope": scope}
-            (out_dir / "audit.json").write_text(json.dumps(audits, ensure_ascii=False, indent=1, default=float), encoding="utf-8")
-            revenue_total = float(sales["amount"].abs().sum()) if sales is not None and "amount" in sales else None
-            index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
-            left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
-            macros = []
-            if cfg.engine == "sql":
-                store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
-                pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout, params=params,
-                               rules_code=full)
-                stored = pool.macros()
-                macros = [m for m in stored if m not in shop_off] if full else [m for m in stored if m in PRIMITIVES]
-                card = sql_card(biz, sales, sales_desc, macros, views=stored, rich=rich)
-                probe = pool.base.cursor()  # a session of its own, to find what runs on this store
-                probe.execute(f"set variable as_of = date '{data_end(probe)}'")  # its own variables: none set yet
-                ours = usable(probe, rule_macros, hidden) if rule_macros else []
-                pool.block([m for m in stored if m not in macros and m not in {r.name for r in ours}] if not full
-                           else [m for m in stored if m in hidden] if delta else [])
-                setup = [r.temp_sql() for r in ours]
-                if ours:
-                    card += ("\n\n## Macros written from this split's rulebook" + (" for its new or changed rules" if delta else "")
-                             + " (call one when its doc is the term the question asks; "
-                             "TABLE ones go after FROM" + ("; the line under each is its SQL: if it disagrees with the "
-                             "RULEBOOK, compute the term yourself" if rich else "") + ")\n"
-                             + "\n".join(f"- {r.card_line(body=rich)}" for r in ours))
-                if cfg.shop_views:
-                    views = shop_views(biz_id, card, biz.readme.text, probe, think,
-                                       Path(cfg.cache_dir).parent / "shopviews" / split_dir.name, model=cfg.model)
-                    for v in views:
-                        probe.execute(v.temp_sql())
-                    setup = [v.temp_sql() for v in views] + setup
-                    card += card_part(probe, views)
-                if rich:
-                    card += caps_card(caps)
-                probe.close()
-                pool.setup(setup)
-                biz_part = business_part(biz_id, biz.readme.text, card)
-            else:
-                biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
-                pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
-            if cfg.prepare_only:
-                pool.close()
-                bar.update(len(by_biz[biz_id]))
+                if resolve_columns(biz, cfg.cache_dir, ask):
+                    biz = load_business(split_dir, biz_id, cfg.cache_dir)
+                if resolve_statuses(biz, cfg.cache_dir, ask):
+                    biz = load_business(split_dir, biz_id, cfg.cache_dir)
+                if resolve_slots(biz, split_dir, cfg.cache_dir, rulebook, lambda system, parts: think(system, parts, []),
+                                 cfg.model, enabled):
+                    biz = load_business(split_dir, biz_id, cfg.cache_dir)
+                saved = slots_path(cfg.cache_dir, split_dir.name, biz_id)
+                slot_fills[biz_id] = json.loads(saved.read_text(encoding="utf-8")).get("applied", {}) if saved.exists() else {}
+                (out_dir / "slots.json").write_text(json.dumps(slot_fills, ensure_ascii=False, indent=1), encoding="utf-8")
+                roles = {n: ti.roles for n, ti in biz.info.items()}
+                sales, sales_desc = build_sales(biz.tables, roles, biz.slots)
+                trust = assess(biz, sales)
+                sales_desc += f"\n{trust.note()}" if trust.problems else ""
+                shop_off = frozenset(c.name for c in CHECKS) if trust.states["revenue"] == "suspect" else off
+                facts = build_facts(biz, sales)
+                terms = ready_terms(facts)
+                caps = profile(biz, trust, facts)
+                capabilities[biz_id] = caps.to_json()
+                (out_dir / "capabilities.json").write_text(json.dumps(capabilities, ensure_ascii=False, indent=1), encoding="utf-8")
+                shop_audit = audit(biz, sales, known_descs)
+                scope = gates.scope_of(shop_audit.to_json(), sales.attrs.get("sources", []) if sales is not None else [])
+                audits[biz_id] = {**shop_audit.to_json(), "scope": scope}
+                (out_dir / "audit.json").write_text(json.dumps(audits, ensure_ascii=False, indent=1, default=float), encoding="utf-8")
+                revenue_total = float(sales["amount"].abs().sum()) if sales is not None and "amount" in sales else None
+                index = EntityIndex.from_tables(biz.tables, roles, sales) if cfg.normalize != "off" else None
+                left = fast_pass(by_biz[biz_id], cal, sales, trust, shop_off, index, save) if cfg.fast else by_biz[biz_id]
+                macros = []
+                if cfg.engine == "sql":
+                    store = ensure_store(split_dir, biz_id, Path(cfg.cache_dir).parent)
+                    pool = SqlPool(store, name_index(biz.tables, sales), n=cfg.exec_workers, timeout=cfg.timeout, params=params,
+                                   rules_code=full)
+                    stored = pool.macros()
+                    macros = [m for m in stored if m not in shop_off] if full else [m for m in stored if m in PRIMITIVES]
+                    card = sql_card(biz, sales, sales_desc, macros, views=stored, rich=rich)
+                    probe = pool.base.cursor()  # a session of its own, to find what runs on this store
+                    probe.execute(f"set variable as_of = date '{data_end(probe)}'")  # its own variables: none set yet
+                    ours = usable(probe, rule_macros, hidden) if rule_macros else []
+                    pool.block([m for m in stored if m not in macros and m not in {r.name for r in ours}] if not full
+                               else [m for m in stored if m in hidden] if delta else [])
+                    setup = [r.temp_sql() for r in ours]
+                    if ours:
+                        card += ("\n\n## Macros written from this split's rulebook" + (" for its new or changed rules" if delta else "")
+                                 + " (call one when its doc is the term the question asks; "
+                                 "TABLE ones go after FROM" + ("; the line under each is its SQL: if it disagrees with the "
+                                 "RULEBOOK, compute the term yourself" if rich else "") + ")\n"
+                                 + "\n".join(f"- {r.card_line(body=rich)}" for r in ours))
+                    if cfg.shop_views:
+                        views = shop_views(biz_id, card, biz.readme.text, probe, think,
+                                           Path(cfg.cache_dir).parent / "shopviews" / split_dir.name, model=cfg.model)
+                        for v in views:
+                            probe.execute(v.temp_sql())
+                        setup = [v.temp_sql() for v in views] + setup
+                        card += card_part(probe, views)
+                    if rich:
+                        card += caps_card(caps)
+                    probe.close()
+                    pool.setup(setup)
+                    biz_part = business_part(biz_id, biz.readme.text, card)
+                else:
+                    biz_part = business_part(biz_id, biz.readme.text, schema_card(biz) + "\n\n## " + sales_desc)
+                    pool = ExecPool(split_dir, biz_id, cfg.cache_dir, n=cfg.exec_workers, timeout=cfg.timeout)
+                if cfg.prepare_only:
+                    pool.close()
+                    bar.update(len(by_biz[biz_id]))
+                    continue
+            except LLMUnavailable:
+                raise
+            except Exception as e:  # noqa: BLE001  data the code cannot read costs this shop's questions, not the run
+                if pool is not None:
+                    pool.close()
+                print(f"{biz_id}: shop setup failed ({e!r}); its questions abstain", flush=True)
+                if cfg.prepare_only:
+                    bar.update(len(by_biz[biz_id]))
+                else:
+                    for q in by_biz[biz_id]:
+                        save(failed(q, "shop setup", e))
                 continue
             try:
                 with ThreadPoolExecutor(max_workers=cfg.concurrency) as ex:
-                    futs = [ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook,
+                    futs = {ex.submit(solve_question, q, llm, pool, system, biz_part, bank, cfg, cal, index, shop_off, terms, macros, rulebook,
                                       deep_llm=deep_llm, delta=delta_lines,
                                       suspect=trust.states["revenue"] == "suspect", calibrator=calibrator, caps=caps,
-                                      revenue_total=revenue_total, shop=shop_audit.level, scope=scope)
-                            for q in left]
+                                      revenue_total=revenue_total, shop=shop_audit.level, scope=scope): q
+                            for q in left}
                     for f in as_completed(futs):
                         try:
                             rec = f.result()
@@ -713,6 +735,9 @@ def run(cfg: RunConfig) -> dict:
                             _LLM_DOWN.set()
                             ex.shutdown(wait=True, cancel_futures=True)
                             raise
+                        except Exception as e:  # noqa: BLE001  a bug on one question's data costs that question only
+                            print(f"{futs[f]['id']}: failed ({e!r}); it abstains", flush=True)
+                            rec = failed(futs[f], "question", e)
                         save(rec)
             finally:
                 pool.close()
