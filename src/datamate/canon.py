@@ -318,6 +318,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
                 sources.append(f"T['{n}'] (customer_name)")
                 break
 
+    product_attrs: set[str] = set()
     for n, r in roles_by_table.items():  # product attributes: group, active ingredient, cost, prescription ...
         rc = _role_cols(r)
         if n == line_t or n not in tables or "order_id" in rc or "line_amount" in rc or _NOT_MASTER.search(fold(n)):
@@ -337,6 +338,7 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
         for c in add:
             v = k.map(M[c])
             out[c] = (v.fillna(False).astype(bool) if M[c].dtype == bool else v).values  # a product missing from the list has no flag
+        product_attrs.update(add)
         sources.append(f"T['{n}'] (product attributes: {', '.join(add)})")
 
     for n, r in roles_by_table.items():  # the customer's group, so a share needs no join that would drop walk-in orders
@@ -350,8 +352,8 @@ def build_sales(tables: dict[str, pd.DataFrame], roles_by_table: dict[str, dict[
             out["customer_group"] = out[key].map(G)
             sources.append(f"T['{n}'] (customer_group from `{group}`)")
 
-    if "customer_group" not in out.columns:  # the group can sit on the order itself
-        group = next((c for c in out.columns if _GROUP_HEAD.match(header_key(c))), None)
+    if "customer_group" not in out.columns:  # the group can sit on the order itself, never on the product list ('Nhóm' of goods)
+        group = next((c for c in out.columns if _GROUP_HEAD.match(header_key(c)) and c not in product_attrs), None)
         if group is not None:
             out["customer_group"] = out[group]
 
