@@ -194,7 +194,7 @@ profit uses the **cost recorded on the sale line**.
 
 ---
 
-## 4. Implications for the solution (to be decided)
+## 4. Implications for the solution (the analysis before the build)
 
 - The challenge is ~two problems: (a) **robust ingestion/normalization** of messy, varied
   files into a canonical schema, and (b) **precise question → computation** following the
@@ -213,128 +213,45 @@ profit uses the **cost recorded on the sale line**.
 
 ## 5. Repository
 
-- **Plan of record:** [docs/PROPOSAL.md](docs/PROPOSAL.md). It covers the hybrid architecture,
-  prompting only, a solo developer with under 2 weeks, and a Claude example bank built from
-  train only.
+**State: final submission version, code frozen (2026-11-15).** The final pipeline, its results, the checks behind each
+change, compliance and the residual errors: [docs/PIPELINE.md](docs/PIPELINE.md) (Vietnamese). Runs and commands:
+[README.md](README.md). Day-by-day status notes up to 2026-11-15: `git show f42295a:README.md` and
+`git show f42295a:CLAUDE.md`.
 
-- **Tasks and run commands:** [README.md](README.md). Its "Status" section is the handoff point
-  between sessions; read it first.
-- **Research plan (2026-11-04):** [docs/PROPOSAL_V3.md](docs/PROPOSAL_V3.md) (Vietnamese, for the mentor):
-  pandas code generation + a tested semantic layer + result validation; experiments E0–E5. Fine-tuning is now
-  an option, so "prompting only" and "solo" in PROPOSAL.md no longer bind.
-- **Current plan (2026-11-05):** [docs/PLAN_TEXT2SQL.md](docs/PLAN_TEXT2SQL.md): fast branch + text-to-SQL on DuckDB.
-  pandas code generation is paused; Docker and vLLM work is deferred.
-- **Rule (2026-11-11, organizers' QnA in `description/QnA.txt`):** inference code holds nothing learned from the public
-  test (rulebook wording, macros, headers, layouts, fixes chosen on public labels). Add a fix only when train has the
-  case. Question preprocessing is exempt (user's choice). See README "Status (2026-11-11, late)".
-- **Status (2026-11-15, evening):** slots 0–3 in `src/datamate/slots/` (uncommitted); README "Status (2026-11-15,
-  evening): start here"; measurements in docs/PLAN_LAYERS.md section 9.6. Train no-op (no slot fires on train); public
-  replay dev_003 15/85 → 65/9, dev_013 7/48 → 34/19. Kaggle: `hydrochii/datamate-slots-public`,
-  `hydrochiii/datamate-slots-train-check`.
-- **Status (2026-11-15):** decision: typed slots (model fills a narrow JSON per shop convention, code applies it).
-  Plan: docs/PLAN_LAYERS.md section 9; README "Status (2026-11-15): start here". No code change yet.
-  - `sales_all` already keeps every unroled column (`Ghi chú`, `Ghi tắt`, `Tiền giảm`, ...); the missing part is the
-    meaning (`status`, `counted`, `amount`, `is_goods`), computed by role regexes that ignore those columns.
-  - Slot triggers fire on data gaps, not on rule failures; fallback is the current store plus the gate.
-- **Status (2026-11-14, night 2):** read the README section "Status (2026-11-14, night 2): start here" first, then
-  docs/PLAN_LAYERS.md section 8.6. The repo code is unchanged since `291d1bf`; this session only measured.
-  - public_d 0.595 (649/54/297). train_check 0.9528 on 106 train ids, with no right answer lost against route-train.
-  - New industries fail on the store, not on the model: the model's SQL is mostly right, but the store misses each
-    shop's own conventions.
-  - P3 probe with Qwen: rewriting the whole `sales_all` fails. A typed slot (status column, status map, order key)
-    filled by the model and applied by code works: replay W→R 49, R→W 2.
-  - Scratch code and the server's stores of the four shops are in `debug/p3_slot/` (gitignored).
-  - Waiting on the user: compliance of the slot, integration, image #2.
-- **Status (2026-11-14, late night):** README section "Status (2026-11-14, late night)";
-  plan and measurements in docs/PLAN_LAYERS.md sections 6.5, 8, 8.5; pipeline walkthrough in docs/PIPELINE.md.
-  - public_c 0.577 (shop audit + gates); Docker image #1 built daemonless on the server (`docker/assemble.py`,
-    `docker/build_remote.sh`), MD5 `2992a15d5d4f8c29d75a7f885fa97de5`, never run; being uploaded by the user.
-  - Train-backed lints `lint.frame_advice`, table code-column drop, lexicon `đh` committed; runs `public_d` and
-    `train_check` were still on the server at handoff.
-- **Status (2026-11-14, evening):** README section "Status (2026-11-14, evening)"; measured
-  results per layer are in docs/PLAN_LAYERS.md section 6.
-  - Public on a rented vast.ai 2×4090 (`remote/serve_vllm.sh`, `remote/run_parallel.sh`): PA 0.406 vs v5 0.751. Cause:
-    ingest removed by the compliance commit `7ca2324`. Train route run: 0.9707 in-sample; a learned L8 drops nothing.
-  - Uncommitted: compile retry without thinking (`COMPILE_VERSION` 3), router "changed rule" fix, shop gate
-    (`shop-gate-fit`, `shop-gate`; public 0.406 → 0.553 but fragile), run scripts. 369 tests pass.
-- **Status (2026-11-14):** README section "Status (2026-11-14)".
-  - The Gemma 4 A/B of 2026-11-12 ran only smoke (28 public questions) in about 7 h and answered 6/28 and 4/28.
-    - Causes: thinking used up `max_tokens` 8192; parallelism only within one shop.
-    - Fix (uncommitted): after an empty `length`-cut reply, the next attempt runs with thinking off.
-  - Running on Kaggle (Qwen3.5-9B, `DM_THINK=route`, code `1e9b3cf` + fix):
-    - `hydrochii/datamate-agents-a`, `hydrochii/datamate-agents-b` (public);
-    - `hydrochiii/datamate-route-train` (train, B flags, for L8).
-- **Status (2026-11-13):** README "Status (2026-11-13)": layers of PLAN_LAYERS except L9 (`080f654`).
-- **Status (2026-11-12, night):** README "Status (2026-11-12, night)".
-  - `text2sql` `ee9f9fa` holds the exact code now running on Kaggle A/B. Branch `submission` (`3b6df4c`; Docker in `c27e90d`)
-    has the same fixes plus guideline log fields; merging the two will conflict.
-  - Per-layer plan: [docs/PLAN_LAYERS.md](docs/PLAN_LAYERS.md).
-  - The 0/1000 Kaggle A/B runs had two causes:
-    - `SqlPool.setup` without `as_of` (fixed);
-    - Triton attention on T4 needing 96 KB of shared memory for Gemma 4's head 512 (patched in `run_kaggle.py`).
-  - Kaggle A/B rerun on Gemma 4 12B W4A16 with thinking, stages `probe,smoke,public`. The smoke gate stops a broken
-    run. Estimated finish: 2026-11-13, 04:00–06:00 VN.
-- **Status (2026-11-12, late):** README "Status (2026-11-12, late)".
-  - Direction (user, after the mentor): the LLM reads the rulebook and writes the computations. Flags:
-    - `--catalog compiled`: the rulebook compiled to macros;
-    - `--shop-views`;
-    - `--judge unans`: the second agent;
-    - `--context rich`: keys, missing facts, rulebook lines per question, plan lines.
-  - Validation: `assets/holdout.txt` (train). Public only measures.
-  - Kaggle public runs in flight on Qwen3.5-9B with thinking:
-    - A: `hydrochii/datamate-agents-a`;
-    - B: `hydrochiii/datamate-agents-b` (`--context rich`).
-  - Gemma 4 12B does not serve on Kaggle T4 yet (probe `hydrochiii/datamate-gemma-probe`).
-- **Status (2026-11-11):** public v5 leaderboard 0.759; README "Status (2026-11-11): start here".
-  - Committed on `text2sql` (`b89d4dd`..`5de216b`, not pushed):
-    - train rules as macros, gated on their clauses;
-    - shift hours read from the rulebook;
-    - query rewrites and lints;
-    - value hints (`sql/values.py`).
-  - Replay: public 0.792, train 0.9077. A live run is still needed.
-- **Status (2026-11-08, end of day):** README "Status (2026-11-08, end of day)".
-  - All fixes committed on `text2sql` (8 commits to `fd767ea`, not pushed). Replay train 0.9037, public 0.655.
-  - Kaggle public-test SQL run in flight: `hydrochii/datamate-sql-public`.
-  - Design rule from the user: question normalization keeps the content (wording only). Intent/semantic extraction is a separate
-    step, and normalization never decides business logic.
-  - Text-to-SQL only. One folder, no worktrees: develop on `text2sql`, `main` = final code, merge by pull request.
-  - `codegen` (pandas) and `combined` (both arms) are dropped and kept as branches only.
-  - Train error analysis and fixes: `debug/sql_train_*.txt` (gitignored, local). Replay PA is 0.9037.
-  - Model-behaviour groups M1–M21 await the user's choice.
-  - Default engine is still `pandas`: pass `--engine sql`.
-- **Earlier status (2026-11-05):** README "Status (2026-11-05, evening)". E0 ran code older than
-  `98d4c7b`, so its 0.473 is not comparable with the public 0.288.
-  - Local model: Qwen3.5-9B on Ollama (alias `qwen3.5-9b-24k`, 24k context, thinking off).
-  - Public leaderboard: PA −0.110 → 0.040 → **0.288** (pipeline `98d4c7b`, precision ≈ 68%).
-  - E0, all 3000 train questions on Kaggle: **PA 0.473** (precision 77.7%); its logs were deleted on 2026-11-12.
-  - Kaggle runner in `kaggle/`: `DM_STAGES=public|dev120|train DM_KERNEL=<name> DM_ENGINE=pandas|sql DM_DATASET=<bundle> kaggle/push.sh update`.
-  - The prompt is about 13–16k tokens, so a local server needs ≥ 24k context (set `num_ctx` through
-    a Modelfile).
+- **Solution:** Qwen3.5-9B (vLLM, TP=2) writes one DuckDB SELECT per question over a per-shop store.
+  - Hand-written macros tested on train sit around the model, with lints, answer checks, typed slots (the model fills a
+    narrow JSON per shop convention, code applies it), an audit with scoped flags, a judge for unanswerable, and
+    deterministic gates.
+  - Final public PA (local scorer): see docs/PIPELINE.md section 0. Leaderboard: public_e 0.724.
+- **Rules that bind every change:**
+  - Organizers' QnA (`description/QnA.txt`): inference code holds nothing learned from the public test (rulebook wording,
+    macros, headers, layouts, fixes chosen on public labels). Add a fix only when train has the case. Question
+    preprocessing is exempt (user's choice).
+  - Changes the user accepted after a public measurement are listed with their train checks in docs/PIPELINE.md
+    section 8.
+  - Public labels (`ground_truth.jsonl`, local only) measure and never feed code. Private test data never leaves the
+    machine.
+  - Question normalization keeps the content (wording only); intent extraction is a separate step.
+  - Develop on `text2sql`; `main` = final code, merged by pull request (the user opens PRs). One folder, no worktrees.
+  - Commit only when the user asks.
+  - The rented GPU box only serves vLLM and runs experiments (`remote/`): no Docker or images there.
 - **Layout:**
-  - `src/datamate/ingest/`: raw files → cleaned tables + schema card, cached in `cache/ingest/`
-  - `src/datamate/dm.py`: helpers available to generated programs
-  - `src/datamate/preprocess/`: question cleanup (Telex, abbreviations/dialect, amounts/dates, shop names)
-    + one LLM rewrite
+  - `src/datamate/ingest/`: raw files → cleaned tables, column roles, schema card; cached in `cache/ingest/`
+  - `src/datamate/preprocess/`: question cleanup (Telex, abbreviations/dialect, amounts/dates, shop names) + one LLM rewrite
+  - `src/datamate/slots/`: typed shop slots (`order_key`, `status_text`, `name_map`, `line_amount`, `unit_factor`)
+  - `src/datamate/canon.py`: `sales_lines` (with `counted`), `unit_gap`; `facts.py`: fact tables at the rulebook's grain
+  - `src/datamate/audit.py`: train-calibrated cross-checks with scopes; `capabilities.py`, `ingest/trust.py`
+  - `src/datamate/sql/`: DuckDB store, macros and query plan (`store.py`), dimensions, the text-to-SQL engine (`agent.py`)
+  - `src/datamate/agent/`: pipeline, prompt, retrieval, router, judge, gates, lints, LLM clients
   - `src/datamate/postprocess.py`: answer expectations and checks, official output format
-  - `src/datamate/facts.py`: fact tables at the rulebook's grain (debt, payments, trips, imports, expenses, stock, lots), found by
-    README description, header or value shape; the `dm` helpers and SQL macros read them, `datamate facts-check` tests them on gold
-  - `src/datamate/agent/`: prompt, retrieval, local and Claude backends, sandbox, vote, pipeline, query lint (`lint.py`), model column mapping (`columns.py`)
-  - `src/datamate/eval/`: exact PA scorer (`scorer.py`), paired run comparison (`compare.py`), offline
-    answer-check eval (`checks.py`), semantic contract tests of `dm` primitives (`semantic.py`)
-  - `src/datamate/sql/`: entity dimensions (`dims.py`), per-business DuckDB views and macros (`store.py`), contract
-    replay (`check.py`), the text-to-SQL engine (`agent.py`, `datamate run --engine sql`)
-  - `src/datamate/cli.py`: `datamate ingest | run | score | compare | eval-checks | semantic-check | sql-build |
-    sql-check | facts-check | normalize | validate | export-examples`
-- Bump `dm.SEMANTIC_VERSION` whenever a primitive's definition changes, and re-run `datamate semantic-check`.
-- Bump `STORE_VERSION` in `sql/store.py` whenever a view, macro or dimension changes, and re-run `datamate sql-check`.
-- **Commands:**
-  - `uv run pytest -q`: unit tests
-  - `uv run datamate ingest --split train`: writes `outputs/ingest/<split>/<biz>.md` cards
-  - `uv run datamate run --backend local --model <ollama/vLLM model> --limit N`: scores on train
-- `src/datamate/rules.py` gates fixed definitions on rulebook clauses; `src/datamate/fast.py` is the fast branch; `ingest/trust.py` checks roles by value.
-- Bump `INGEST_VERSION` in `ingest/business.py` whenever ingestion output changes, so the caches
-  rebuild.
-- Python ≥ 3.11 managed with **uv** (`uv sync`, `uv run ...`, `uv add <pkg>`).
-- Current deps: pandas, numpy, openpyxl, python-calamine, pyarrow, tqdm; dev: ipykernel.
-- `data/`, zips, `.venv/`, caches and outputs are gitignored.
-- Keep scratch/exploration scripts out of the repo root unless they become real code.
+  - `src/datamate/eval/`: exact PA scorer, paired compare, contract tests, train mutates
+  - `src/datamate/dm.py`, `fast.py`, `agent/sandbox.py`: pandas engine and fast branch (not in the submission)
+  - `docker/`: submission image; `remote/`: rented-GPU scripts; `kaggle/`: Kaggle runner
+- **Version bumps:**
+  - `INGEST_VERSION` (`ingest/business.py`) when ingestion output changes;
+  - `STORE_VERSION` (`sql/store.py`) when a view, macro, dimension or fact changes, then `datamate sql-check`;
+  - `dm.SEMANTIC_VERSION` when a primitive changes, then `datamate semantic-check`.
+- **Commands:** `uv run pytest -q`; `uv run datamate <ingest | run | score | compare | gate | slots | audit | sql-check |
+  facts-check | semantic-check | validate>` (README Quickstart).
+- Python ≥ 3.11 managed with **uv**. `data/`, zips, `.venv/`, caches, outputs and `debug/` are gitignored. Keep scratch
+  scripts out of the repo root.
