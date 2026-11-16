@@ -94,6 +94,21 @@ classifier: example retrieval is TF-IDF. Weights are in `/code/models/Qwen3.5-9B
   - every entry passed automatic filters and a second model check. Generator code:
     `src/datamate/preprocess/lexgen.py` (prompt inside); the raw replies are kept in `assets/lexicon_gemini_raw.jsonl`
     and `assets/lexicon_gemini_verify.jsonl`; checksums in `/code/training_code/data_manifest.json`.
+- **Hand-written word lists in the code.** The team wrote these lists by hand from everyday Vietnamese; no model or
+  data generated them. Most entries occur in the train split (questions, rulebook, READMEs or data files). The
+  entries below occur nowhere in the train split:
+
+  | list (`src/datamate/`) | what it does | entries not in the train split |
+  |---|---|---|
+  | `preprocess/lexicon.py` context rules | abbreviation, teen-code and dialect rewrites | `ni` → `này` after a time or shop word; `nhut` (= `nhất`) |
+  | `preprocess/entities.py` `_NORTH_SOUTH` | Northern food words matched to Southern product names | `rán`, `ngao`, `đậu phụ` |
+  | `preprocess/entities.py` `_PERSON_CUE` | words that mark a person's name in a question | `em` |
+  | `preprocess/rewrite.py` prompt and `_COMMON` | examples for the model rewrite, filler words | `ni`, `ơi`, `nhé`, `em` |
+  | `agent/hints.py` | relative-day phrases | `hôm wa` (= `hôm qua`) |
+  | `agent/frame.py` `_EMPTY` | filler words ignored when reading a question | `em`, `ơi`, `nhé` |
+  | `sql/values.py` `SUBJECTIVE` | a "…nhất" question on a personal quality is unanswerable | `uy tín`, `(đáng) tin cậy`, `vui vẻ`, `tốt bụng`, `yêu thích`, `đẹp` |
+  | `ingest/business.py` `_CODE_NAME` | column names that hold codes, not amounts | `số ĐT` |
+  | `sql/dims.py` `_UNIT_GAP` | a unit written apart from its number | `GB` |
 - No public-test or private-test data or answers were used to train, tune examples, or build any asset.
 - No model was trained or fine-tuned. See `/code/training_code/README.md`.
 
