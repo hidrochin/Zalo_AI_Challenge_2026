@@ -55,3 +55,9 @@ Commands, from `/code` with `data/train` linked to `training_code/data/train`:
   to the hosted model may answer differently; the kept replies are the ones the packaged lexicon was built from.
 
 No public-test or private-test data was used for training or for building any packaged asset.
+
+## Hand-written word lists
+
+Besides the generated lexicon, the code holds word lists the team wrote by hand (abbreviations, dialect and filler
+words, subjective adjectives, column-name and unit patterns). No model or data generated them, so there is nothing
+to reproduce. The entries that occur nowhere in the train split are listed in `/code/README.md`, section Data.

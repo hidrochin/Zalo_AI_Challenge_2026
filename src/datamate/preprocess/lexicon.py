@@ -1,7 +1,8 @@
 """Word-level rewrites: abbreviations, teen-code, Central/Southern dialect and English business words.
 
 Sources, kept apart so none comes from the test splits (organizers' QnA 2026-11-11):
-- the entries written here occur in the TRAIN questions;
+- the entries written here are written by hand; most occur in the TRAIN questions, the context rules for 'ni' (= này)
+  and 'nhut' (= nhất) do not (declared in the image's README, section Data);
 - assets/lexicon_external.json: entries from public web pages (URL per entry) and from Gemini over train-only seed
   words (preprocess/lexgen.py, raw replies kept), each passed through `accept`. An entry written here wins.
 Ambiguous short forms are only rewritten in a context that fixes their meaning ('k' after a number is 'nghìn' and is
