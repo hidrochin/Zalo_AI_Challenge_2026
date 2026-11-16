@@ -495,7 +495,6 @@ leaderboard.
 | kiểm tra đáp án, finalize | [postprocess.py](../src/datamate/postprocess.py) |
 | vote, judge, gates | [agent/vote.py](../src/datamate/agent/vote.py), [agent/judge.py](../src/datamate/agent/judge.py), [agent/gates.py](../src/datamate/agent/gates.py) |
 | mutate train (kiểm chứng slots) | [eval/mutate.py](../src/datamate/eval/mutate.py) |
-| chạy thử nghiệm trên GPU thuê | [remote/setup_server.sh](../remote/setup_server.sh), [remote/serve_vllm.sh](../remote/serve_vllm.sh), [remote/run_parallel.sh](../remote/run_parallel.sh) |
 
 ---
 

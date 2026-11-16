@@ -132,7 +132,7 @@ The rest of the record holds the preprocessing, hints, the examples used, each m
 /code/pyproject.toml, uv.lock project and lock file; the environment is /code/.venv
 /code/src/datamate/           inference code (ingest, sql, agent, preprocess, postprocess)
 /code/assets/                 Telex lexicon, generated lexicon + its raw replies, train README description -> role
-                              table, train rulebook, train-only dev id lists
+                              table, train rulebook
 /code/tests/                  unit tests (uv run pytest -q)
 /code/models/Qwen3.5-9B/      model weights
 /code/training_code/          README, train data, data_manifest.json
