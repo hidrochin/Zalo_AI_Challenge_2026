@@ -384,6 +384,14 @@ Log ghi `gated = {gate, from}`.
 
 Sai định dạng thì thành `abstain`.
 
+Lỗi bất ngờ ([pipeline.py](../src/datamate/agent/pipeline.py), `failed`):
+- Một câu ném lỗi thì câu đó `abstain`. Log của nó có `error` và `traceback`.
+- Một shop không dựng được (ingest, slots, sales, facts, audit, store, kể cả lỗi 4xx của vLLM khi gọi slots) thì các
+  câu của shop `abstain`, và lượt chạy sang shop tiếp theo.
+- `LLMUnavailable` (server model chết) vẫn dừng lượt chạy, để `predict.sh` khởi động lại server rồi chạy tiếp.
+
+Trước bản sửa này, một lỗi làm chết cả nhóm shop trong `predict.sh`, và 4 lần khởi động lại đều chết ở cùng chỗ.
+
 ---
 
 ## 6. Output
