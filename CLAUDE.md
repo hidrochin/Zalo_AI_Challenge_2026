@@ -218,6 +218,43 @@ change, compliance and the residual errors: [docs/PIPELINE.md](docs/PIPELINE.md)
 [README.md](README.md). Day-by-day status notes up to 2026-11-15: `git show f42295a:README.md` and
 `git show f42295a:CLAUDE.md`.
 
+**Handoff (2026-11-16): start here.**
+- **Branches:**
+  - `text2sql` (this branch) is the full development branch: every doc, script (`kaggle/`, `remote/`), dev id list and
+    the `--oracle`/`--keep-tables` experiment flags. It tracks `ground_truth.jsonl` (public labels: measurement only).
+  - `submission` is the final code, the branch the image is built from. A pull request `submission` → `main` is open;
+    the user merges it.
+    - Code commits it has and `text2sql` lacks: `e7b26ee` (oracle and keep-tables flags removed), `f387608` (a question
+      or a shop that raises abstains and the run goes on; before, one exception killed a whole shop group of
+      predict.sh), `7663931` (predict.sh `--think-max-tokens 16384`, vLLM `--max-model-len 49152`, TP=2), `44476c2`
+      (the image's README, `training_code/README.md` and manifest declare the generated lexicon
+      `assets/lexicon_external.json`: 67 Gemini, 16 web, 2 by hand `đh`/`dh`, added after public errors under the
+      user's preprocessing exemption).
+    - `873ab94` (2026-11-16, not pushed) keeps only what the image and a reader need: src, assets, tests, docker/,
+      README.md, docs/PIPELINE.md. CLAUDE.md, DATA.md, docs/PROPOSAL*, docs/PLAN_*, kaggle/, remote/ and the assets
+      nothing reads at inference (dev id lists, `wrong_v1v2.txt`, `shop_gate.json`) are gone there. Never merge
+      `submission` into `text2sql`: it would delete them here.
+  - The image only takes `src`, `assets`, `tests`, `pyproject.toml`, `uv.lock` from HEAD, plus `docker/predict.sh` and
+    `docker/README.md`.
+- **Next:**
+  1. Build the final image on the Mac from `submission`: load the previous image archive and tag it
+     `zaic2026_datamate_oom:v1`, then `docker/build_update.sh build`, `smoke` (prints the budget flags and the
+     manifest's `generated_data`), `export`.
+  2. Run the organizers' "Test Solution" on it. Image #2 (`01f6c076…`) passed, 14 min for 5 questions. Then submit
+     the archive with its MD5 and uncompressed size (guideline section 11).
+  3. Experiment: Gemma 4 12B (`google/gemma-4-12B-it`, Apache-2.0, 2026-05-23) on the full public test, resumed
+     2026-11-16 from 477/1000.
+     - Box: `ssh -p 44353 root@180.189.55.38` (1×RTX 5090; key passphrase: ask the user, never store it). Run dir
+       `/workspace/zalo_ai_gemma`, code = `text2sql` `c7a2a85`, tmux `gem`; FP8 because bf16 leaves only 3.6 GiB of
+       KV cache.
+     - On a new box: vast's supervisor starts a Qwen vLLM on port 18000 (`supervisorctl stop vllm`, then kill the
+       leftover `VLLM::EngineCore`), and the symlink `zalo_ai_gemma/data -> /workspace/zalo_ai/data` may be lost.
+     - Commands: `debug/final/gemma_resume.sh <port> <host> serve|run|fetch`. `fetch` compares with the final Qwen
+       run (`outputs/rented/public_i_ungated`, local PA 0.799).
+     - Switch only if clearly higher. A switch changes the weights in the image, predict.sh (model path,
+       `--reasoning-parser gemma4`), the READMEs and `docker/manifest.py`, and needs a new test run.
+  4. Stop the rented box when done.
+
 - **Solution:** Qwen3.5-9B (vLLM, TP=2) writes one DuckDB SELECT per question over a per-shop store.
   - Hand-written macros tested on train sit around the model, with lints, answer checks, typed slots (the model fills a
     narrow JSON per shop convention, code applies it), an audit with scoped flags, a judge for unanswerable, and
@@ -232,7 +269,8 @@ change, compliance and the residual errors: [docs/PIPELINE.md](docs/PIPELINE.md)
   - Public labels (`ground_truth.jsonl`, local only) measure and never feed code. Private test data never leaves the
     machine.
   - Question normalization keeps the content (wording only); intent extraction is a separate step.
-  - Develop on `text2sql`; `main` = final code, merged by pull request (the user opens PRs). One folder, no worktrees.
+  - Develop on `text2sql` (full branch); the final code is `submission` (lean); `main` = final code, merged by pull
+    request (the user opens PRs). One folder, no worktrees.
   - Commit only when the user asks.
   - The rented GPU box only serves vLLM and runs experiments (`remote/`): no Docker or images there.
 - **Layout:**
