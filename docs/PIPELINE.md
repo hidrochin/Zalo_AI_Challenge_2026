@@ -384,6 +384,14 @@ Log ghi `gated = {gate, from}`.
 
 Sai định dạng thì thành `abstain`.
 
+Lỗi bất ngờ ([pipeline.py](../src/datamate/agent/pipeline.py), `failed`):
+- Một câu ném lỗi thì câu đó `abstain`. Log của nó có `error` và `traceback`.
+- Một shop không dựng được (ingest, slots, sales, facts, audit, store, kể cả lỗi 4xx của vLLM khi gọi slots) thì các
+  câu của shop `abstain`, và lượt chạy sang shop tiếp theo.
+- `LLMUnavailable` (server model chết) vẫn dừng lượt chạy, để `predict.sh` khởi động lại server rồi chạy tiếp.
+
+Trước bản sửa này, một lỗi làm chết cả nhóm shop trong `predict.sh`, và 4 lần khởi động lại đều chết ở cùng chỗ.
+
 ---
 
 ## 6. Output
@@ -487,7 +495,6 @@ leaderboard.
 | kiểm tra đáp án, finalize | [postprocess.py](../src/datamate/postprocess.py) |
 | vote, judge, gates | [agent/vote.py](../src/datamate/agent/vote.py), [agent/judge.py](../src/datamate/agent/judge.py), [agent/gates.py](../src/datamate/agent/gates.py) |
 | mutate train (kiểm chứng slots) | [eval/mutate.py](../src/datamate/eval/mutate.py) |
-| chạy thử nghiệm trên GPU thuê | [remote/setup_server.sh](../remote/setup_server.sh), [remote/serve_vllm.sh](../remote/serve_vllm.sh), [remote/run_parallel.sh](../remote/run_parallel.sh) |
 
 ---
 
